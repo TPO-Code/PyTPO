@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QMenu, QToolButton
 
 from src.lang_rust.cargo_discovery import discover_workspace_root_for_file
@@ -719,7 +720,10 @@ class ExecutionController:
 
         self.ide._ad_hoc_terminal_counter += 1
         key = f"__adhoc__/{self.ide._ad_hoc_terminal_counter}"
-        label = f"Terminal {self.ide._ad_hoc_terminal_counter}"
+        if self.ide._ad_hoc_terminal_counter == 1:
+            label = "Terminal"
+        else:
+            label = f"Terminal {self.ide._ad_hoc_terminal_counter}"
 
         terminal = TerminalWidget(cwd=start_in, parent=self.console_tabs)
         self._style_terminal_widget(terminal)
@@ -731,6 +735,9 @@ class ExecutionController:
         self.console_tabs.setCurrentWidget(terminal)
         self.dock_terminal.show()
         self.dock_terminal.raise_()
+        self.console_tabs.setFocus()
+        terminal.setFocus()
+        QTimer.singleShot(0, terminal.setFocus)
         self.ide.statusBar().showMessage(f"Opened {label}.", 1500)
         self._refresh_runtime_action_states()
 

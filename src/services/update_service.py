@@ -16,7 +16,9 @@ from typing import Callable
 @dataclass(slots=True)
 class UpdateCheckResult:
     current_version: str
+    current_build: int
     latest_version: str
+    latest_build: int
     latest_tag: str
     update_available: bool
     repo_slug: str
@@ -43,6 +45,9 @@ class UpdateServiceError(RuntimeError):
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 _TAG_VERSION_RE = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+_VERSION_BUILD_RE = re.compile(
+    r"^(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+build\.(?P<build>\d+))?(?:\+[0-9A-Za-z.-]+)?$"
+)
 
 
 class UpdateService:
@@ -88,11 +93,17 @@ class UpdateService:
         return "0.0.0"
 
     def check_for_updates(self) -> UpdateCheckResult:
-        repo_slug = self._resolve_repo_slug()
-        current = self.current_version()
+        repo_root = self._require_repo_root()
+        repo_slug = self._resolve_repo_slug(repo_root=repo_root)
+        current_version, current_build = self._split_version_build(self.current_version())
+        current_build = max(
+            current_build,
+            self._head_build_for_version(repo_root=repo_root, version=current_version),
+        )
 
         latest_tag = ""
-        latest_version = ""
+        latest_version = "0.0.0"
+        latest_build = 0
         release_url = ""
         release_title = ""
         release_notes = ""
@@ -122,15 +133,17 @@ class UpdateService:
             if not latest_tag:
                 raise UpdateServiceError("No usable tag was returned by GitHub.", kind="no_tags")
 
-        latest_version = self._normalize_version_text(latest_tag)
-        is_update = self._is_update_available(current, latest_version)
+        latest_version, latest_build = self._split_version_build(latest_tag)
+        is_update = self._is_update_available(current_version, current_build, latest_version, latest_build)
 
         if not release_title:
             release_title = latest_tag
 
         return UpdateCheckResult(
-            current_version=current,
+            current_version=current_version,
+            current_build=current_build,
             latest_version=latest_version,
+            latest_build=latest_build,
             latest_tag=latest_tag,
             update_available=is_update,
             repo_slug=repo_slug,
@@ -171,14 +184,14 @@ class UpdateService:
             uv_sync_output=uv_sync_output,
         )
 
-    def _resolve_repo_slug(self) -> str:
+    def _resolve_repo_slug(self, *, repo_root: str | None = None) -> str:
         from_env = str(os.environ.get("PYTPO_UPDATE_REPO") or "").strip()
         if from_env:
             parsed_env = self._parse_repo_slug(from_env)
             if parsed_env:
                 return parsed_env
 
-        root = self._require_repo_root()
+        root = self._canonical(repo_root) if repo_root else self._require_repo_root()
         remote_url = self._run_command(
             ["git", "-C", root, "remote", "get-url", "origin"],
             kind="origin_missing",
@@ -372,11 +385,56 @@ class UpdateService:
             return None
 
     @classmethod
-    def _is_update_available(cls, current: str, latest: str) -> bool:
-        if current == latest:
+    def _split_version_build(cls, value: str) -> tuple[str, int]:
+        normalized = cls._normalize_version_text(value)
+        match = _VERSION_BUILD_RE.fullmatch(normalized)
+        if match is None:
+            return normalized, 0
+        version = str(match.group("version") or "").strip() or normalized
+        build_raw = str(match.group("build") or "").strip()
+        if not build_raw:
+            return version, 0
+        try:
+            return version, max(0, int(build_raw))
+        except Exception:
+            return version, 0
+
+    def _head_build_for_version(self, *, repo_root: str, version: str) -> int:
+        target_version = str(version or "").strip()
+        if not target_version:
+            return 0
+        try:
+            out = self._run_command(
+                ["git", "-C", repo_root, "tag", "--points-at", "HEAD"],
+                kind="tag_read_failed",
+                timeout_s=20,
+            )
+        except UpdateServiceError:
+            return 0
+        max_build = 0
+        for raw_tag in str(out or "").splitlines():
+            tag = str(raw_tag or "").strip()
+            if not tag:
+                continue
+            tag_version, tag_build = self._split_version_build(tag)
+            if tag_version != target_version:
+                continue
+            if tag_build > max_build:
+                max_build = tag_build
+        return max_build
+
+    @classmethod
+    def _is_update_available(cls, current_version: str, current_build: int, latest_version: str, latest_build: int) -> bool:
+        if current_version == latest_version and int(current_build) == int(latest_build):
             return False
-        current_tuple = cls._semver_tuple(current)
-        latest_tuple = cls._semver_tuple(latest)
+        current_tuple = cls._semver_tuple(current_version)
+        latest_tuple = cls._semver_tuple(latest_version)
         if current_tuple is not None and latest_tuple is not None:
-            return latest_tuple > current_tuple
-        return bool(str(latest or "").strip()) and str(current or "").strip() != str(latest or "").strip()
+            if latest_tuple > current_tuple:
+                return True
+            if latest_tuple < current_tuple:
+                return False
+            return int(latest_build) > int(current_build)
+        if str(current_version or "").strip() != str(latest_version or "").strip():
+            return bool(str(latest_version or "").strip())
+        return int(latest_build) > int(current_build)

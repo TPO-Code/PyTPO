@@ -646,6 +646,8 @@ class PythonIDE(Window):
         self.schedule_git_status_refresh(delay_ms=80, force=True)
         if self.no_project_mode:
             self._enter_no_project_ui_mode()
+        elif self.console_tabs is not None and self.console_tabs.count() == 0:
+            self.new_terminal_tab()
         self._refresh_runtime_action_states()
         self._schedule_symbol_outline_refresh(immediate=True)
 

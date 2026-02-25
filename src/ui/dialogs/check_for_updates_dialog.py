@@ -179,8 +179,12 @@ class CheckForUpdatesDialog(DialogWindow):
 
     def _render_check(self, result: UpdateCheckResult) -> None:
         self.repo_label.setText(f"Repository: {result.repo_slug}")
-        self.current_label.setText(f"Current Version: {result.current_version}")
-        self.latest_label.setText(f"Latest Version: {result.latest_version} (tag: {result.latest_tag})")
+        self.current_label.setText(
+            f"Current Version: {result.current_version} (build {int(result.current_build)})"
+        )
+        self.latest_label.setText(
+            f"Latest Version: {result.latest_version} (build {int(result.latest_build)}, tag: {result.latest_tag})"
+        )
 
         release_parts: list[str] = []
         if result.release_title:
@@ -193,8 +197,9 @@ class CheckForUpdatesDialog(DialogWindow):
 
         details_lines: list[str] = []
         details_lines.append(f"Repository: {result.repo_slug}")
-        details_lines.append(f"Current: {result.current_version}")
-        details_lines.append(f"Latest: {result.latest_version} ({result.latest_tag})")
+        details_lines.append(f"Current: {result.current_version} (build {int(result.current_build)})")
+        details_lines.append(f"Latest: {result.latest_version} (build {int(result.latest_build)})")
+        details_lines.append(f"Latest tag: {result.latest_tag}")
         if result.release_url:
             details_lines.append(f"Release URL: {result.release_url}")
         if result.published_at:

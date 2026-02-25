@@ -17,6 +17,7 @@ class GitHubReleaseRequest:
     tag_name: str
     title: str
     notes: str
+    build_number: int = 0
     prerelease: bool = False
     draft: bool = False
 
@@ -156,7 +157,8 @@ class GitHubReleaseService:
     def create_release(self, req: GitHubReleaseRequest) -> GitHubReleaseResult:
         root = self._canonical(req.repo_root)
         version = self._normalize_version(req.version)
-        tag_name = self._normalize_tag(req.tag_name, version)
+        build_number = self._normalize_build_number(req.build_number)
+        tag_name = self._normalize_tag(req.tag_name, version, build_number)
         title = str(req.title or "").strip() or tag_name
 
         token = ""
@@ -220,10 +222,22 @@ class GitHubReleaseService:
         return text
 
     @staticmethod
-    def _normalize_tag(tag_name: str, version: str) -> str:
+    def _normalize_build_number(value: int) -> int:
+        try:
+            build = int(value)
+        except Exception:
+            raise GitHubReleaseError("Build number must be an integer.", kind="validation") from None
+        if build < 0:
+            raise GitHubReleaseError("Build number cannot be negative.", kind="validation")
+        return build
+
+    @staticmethod
+    def _normalize_tag(tag_name: str, version: str, build_number: int) -> str:
         tag = str(tag_name or "").strip()
         if not tag:
             tag = f"v{version}"
+            if int(build_number) > 0:
+                tag = f"{tag}+build.{int(build_number)}"
         if " " in tag:
             raise GitHubReleaseError("Tag name cannot contain spaces.", kind="validation")
         return tag

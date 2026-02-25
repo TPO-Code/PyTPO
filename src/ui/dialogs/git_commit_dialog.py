@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QSpinBox,
     QStyle,
     QTreeWidget,
     QTreeWidgetItem,
@@ -32,6 +34,10 @@ from src.git.github_release_service import (
 )
 from src.ui.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
+
+_BUILD_TAG_RE = re.compile(
+    r"^v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\+build\.(?P<build>[0-9]+)$"
+)
 
 
 class GitCommitDialog(DialogWindow):
@@ -88,6 +94,8 @@ class GitCommitDialog(DialogWindow):
         self._prefer_push_action = bool(prefer_push_action)
         self._icon_provider = FileIconProvider()
         self._is_syncing_tree_checks = False
+        self._release_build_user_modified = False
+        self._updating_release_build_value = False
 
         self._result_pump = QTimer(self)
         self._result_pump.setInterval(40)
@@ -192,16 +200,22 @@ class GitCommitDialog(DialogWindow):
         self.release_version_edit = QLineEdit()
         self.release_version_edit.setPlaceholderText("1.2.3")
         version_row.addWidget(self.release_version_edit, 1)
+        version_row.addWidget(QLabel("Build"), 0)
+        self.release_build_spin = QSpinBox()
+        self.release_build_spin.setRange(0, 1_000_000_000)
+        self.release_build_spin.setValue(0)
+        self.release_build_spin.setToolTip("Build number used when publishing multiple releases for the same version.")
+        version_row.addWidget(self.release_build_spin, 0)
         version_row.addWidget(QLabel("Tag"), 0)
         self.release_tag_edit = QLineEdit()
-        self.release_tag_edit.setPlaceholderText("v1.2.3")
+        self.release_tag_edit.setPlaceholderText("v1.2.3+build.1")
         version_row.addWidget(self.release_tag_edit, 1)
         release_layout.addLayout(version_row)
 
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("Title"), 0)
         self.release_title_edit = QLineEdit()
-        self.release_title_edit.setPlaceholderText("v1.2.3")
+        self.release_title_edit.setPlaceholderText("v1.2.3 (build 1)")
         title_row.addWidget(self.release_title_edit, 1)
         release_layout.addLayout(title_row)
 
@@ -263,6 +277,7 @@ class GitCommitDialog(DialogWindow):
         self.message_edit.textChanged.connect(self._refresh_commit_enabled)
         self.release_chk.toggled.connect(self._on_release_toggle)
         self.release_version_edit.textChanged.connect(self._on_release_version_changed)
+        self.release_build_spin.valueChanged.connect(self._on_release_build_changed)
         self.release_tag_edit.textChanged.connect(self._refresh_commit_enabled)
         self.release_tag_edit.textEdited.connect(lambda _text: self.release_tag_edit.setModified(True))
         self.release_title_edit.textEdited.connect(lambda _text: self.release_title_edit.setModified(True))
@@ -329,12 +344,87 @@ class GitCommitDialog(DialogWindow):
             version = self._read_pyproject_version()
         if not version and self._repo_has_cargo_toml:
             version = self._read_cargo_version()
+        self._release_build_user_modified = False
         if version:
             self.release_version_edit.setText(version)
-            self.release_tag_edit.setText(f"v{version}")
-            self.release_title_edit.setText(f"v{version}")
-            self.release_tag_edit.setModified(False)
-            self.release_title_edit.setModified(False)
+        else:
+            self.release_version_edit.setText("")
+        self._set_release_build_value(self._next_build_for_version(version) if version else 0)
+        self._sync_release_identity_fields()
+        self.release_tag_edit.setModified(False)
+        self.release_title_edit.setModified(False)
+
+    def _set_release_build_value(self, value: int) -> None:
+        self._updating_release_build_value = True
+        try:
+            self.release_build_spin.setValue(max(0, int(value)))
+        except Exception:
+            self.release_build_spin.setValue(0)
+        finally:
+            self._updating_release_build_value = False
+
+    def _next_build_for_version(self, version: str) -> int:
+        text = str(version or "").strip()
+        if not text:
+            return 0
+
+        tags: list[str] = []
+        list_tags_fn = getattr(self._git_service, "list_tags", None)
+        if callable(list_tags_fn):
+            try:
+                tags = list_tags_fn(self._repo_root, pattern=f"v{text}*")
+            except Exception:
+                tags = []
+
+        max_seen = -1
+        bare_tag = f"v{text}"
+        for raw_tag in tags:
+            tag = str(raw_tag or "").strip()
+            if not tag:
+                continue
+            if tag == bare_tag or tag == text:
+                max_seen = max(max_seen, 0)
+                continue
+            match = _BUILD_TAG_RE.fullmatch(tag)
+            if match is None:
+                continue
+            if str(match.group("version") or "").strip() != text:
+                continue
+            try:
+                build = int(match.group("build") or "0")
+            except Exception:
+                continue
+            max_seen = max(max_seen, build)
+
+        if max_seen < 0:
+            return 0
+        return max_seen + 1
+
+    @staticmethod
+    def _compose_release_tag(version: str, build_number: int) -> str:
+        text = str(version or "").strip()
+        if not text:
+            return ""
+        if int(build_number) <= 0:
+            return f"v{text}"
+        return f"v{text}+build.{int(build_number)}"
+
+    @staticmethod
+    def _compose_release_title(version: str, build_number: int) -> str:
+        text = str(version or "").strip()
+        if not text:
+            return ""
+        if int(build_number) <= 0:
+            return f"v{text}"
+        return f"v{text} (build {int(build_number)})"
+
+    def _sync_release_identity_fields(self) -> None:
+        version = str(self.release_version_edit.text() or "").strip()
+        build = int(self.release_build_spin.value())
+        if not self.release_tag_edit.isModified():
+            self.release_tag_edit.setText(self._compose_release_tag(version, build))
+        if not self.release_title_edit.isModified():
+            self.release_title_edit.setText(self._compose_release_title(version, build))
 
     def _read_pyproject_version(self) -> str:
         pyproject_path = os.path.join(self._repo_root, "pyproject.toml")
@@ -381,10 +471,15 @@ class GitCommitDialog(DialogWindow):
 
     def _on_release_version_changed(self, text: str) -> None:
         version = str(text or "").strip()
-        if not self.release_tag_edit.isModified():
-            self.release_tag_edit.setText(f"v{version}" if version else "")
-        if not self.release_title_edit.isModified():
-            self.release_title_edit.setText(f"v{version}" if version else "")
+        if not self._release_build_user_modified:
+            self._set_release_build_value(self._next_build_for_version(version) if version else 0)
+        self._sync_release_identity_fields()
+        self._refresh_commit_enabled()
+
+    def _on_release_build_changed(self, _value: int) -> None:
+        if not self._updating_release_build_value:
+            self._release_build_user_modified = True
+        self._sync_release_identity_fields()
         self._refresh_commit_enabled()
 
     def _commit_clicked(self, *, push_after: bool) -> None:
@@ -408,6 +503,7 @@ class GitCommitDialog(DialogWindow):
                 self._set_status("Release publishing is not available in this build.", error=True)
                 return
             version = str(self.release_version_edit.text() or "").strip()
+            build_number = int(self.release_build_spin.value())
             tag_name = str(self.release_tag_edit.text() or "").strip()
             title = str(self.release_title_edit.text() or "").strip()
             notes = str(self.release_notes_edit.toPlainText() or "").strip()
@@ -432,6 +528,7 @@ class GitCommitDialog(DialogWindow):
                 tag_name=tag_name,
                 title=title or tag_name,
                 notes=notes,
+                build_number=build_number,
                 prerelease=prerelease,
             )
 

@@ -410,6 +410,19 @@ class GitService:
             return False
         return bool(str(out or "").strip())
 
+    def list_tags(self, repo_root: str, *, pattern: str = "") -> list[str]:
+        root = self._require_repo(repo_root)
+        args = ["tag", "--list"]
+        pattern_text = str(pattern or "").strip()
+        if pattern_text:
+            args.append(pattern_text)
+        try:
+            out = self._run_git(root, args, check=True)
+        except GitServiceError:
+            return []
+        tags = [line.strip() for line in str(out or "").splitlines() if line.strip()]
+        return sorted(tags, key=str.lower)
+
     def create_annotated_tag(self, repo_root: str, tag_name: str, *, message: str = "") -> None:
         root = self._require_repo(repo_root)
         tag = str(tag_name or "").strip()
