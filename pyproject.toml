@@ -1,0 +1,15 @@
+[project]
+name = "pytpo"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "pyside6",
+    "pyte",
+    "ruff",
+    "pyflakes",
+    "jedi",
+    "markdown",
+    "pygments",
+    "pymdown-extensions",
+]
