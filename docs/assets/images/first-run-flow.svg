@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-label="First run workflow">
+  <defs>
+    <style>
+      .bg { fill: #111827; }
+      .node { fill: #1f2937; stroke: #4b5563; stroke-width: 2; rx: 16; }
+      .txt { fill: #e5e7eb; font: 700 20px 'DejaVu Sans', sans-serif; }
+      .sub { fill: #cbd5e1; font: 400 15px 'DejaVu Sans', sans-serif; }
+      .line { stroke: #60a5fa; stroke-width: 3; }
+      .arrow { fill: #60a5fa; }
+      .title { fill: #f8fafc; font: 700 30px 'DejaVu Sans', sans-serif; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="420"/>
+  <text class="title" x="32" y="52">First Run Workflow</text>
+
+  <rect class="node" x="32" y="120" width="205" height="180"/>
+  <text class="txt" x="58" y="164">1. Launch</text>
+  <text class="sub" x="58" y="194">`python3 main.py`</text>
+
+  <rect class="node" x="272" y="120" width="205" height="180"/>
+  <text class="txt" x="296" y="164">2. Open</text>
+  <text class="sub" x="296" y="194">File -> Open Project...</text>
+
+  <rect class="node" x="512" y="120" width="205" height="180"/>
+  <text class="txt" x="536" y="164">3. Verify</text>
+  <text class="sub" x="536" y="194">Settings + tool paths</text>
+
+  <rect class="node" x="752" y="120" width="205" height="180"/>
+  <text class="txt" x="776" y="164">4. Run</text>
+  <text class="sub" x="776" y="194">F5 or Build/Run actions</text>
+
+  <rect class="node" x="992" y="120" width="176" height="180"/>
+  <text class="txt" x="1014" y="164">5. Format</text>
+  <text class="sub" x="1014" y="194">Edit -> Format File</text>
+
+  <line class="line" x1="237" y1="210" x2="268" y2="210"/>
+  <polygon class="arrow" points="268,210 256,202 256,218"/>
+  <line class="line" x1="477" y1="210" x2="508" y2="210"/>
+  <polygon class="arrow" points="508,210 496,202 496,218"/>
+  <line class="line" x1="717" y1="210" x2="748" y2="210"/>
+  <polygon class="arrow" points="748,210 736,202 736,218"/>
+  <line class="line" x1="957" y1="210" x2="988" y2="210"/>
+  <polygon class="arrow" points="988,210 976,202 976,218"/>
+</svg>

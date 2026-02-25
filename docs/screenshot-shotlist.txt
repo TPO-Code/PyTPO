@@ -1,0 +1,54 @@
+PyTPO Documentation Screenshot Shot List
+=======================================
+
+Capture guidance
+- Format: PNG
+- Recommended width: 1600 px or higher
+- Theme: use one consistent theme for all shots in one docs pass
+- Keep personal/private paths hidden where possible
+- Save all files under: docs/assets/screenshots/
+
+01-welcome-screen.png
+- Show the no-project welcome screen with the four primary buttons and recent projects list.
+
+02-open-project-dialog.png
+- Show File -> Open Project... dialog with a project folder selected.
+
+03-settings-dialog-overview.png
+- Show the Settings dialog with left navigation and a settings page selected.
+
+04-project-dock-and-editor.png
+- Show Project Dock + active editor with a representative source file.
+
+05-problems-dock-with-diagnostics.png
+- Show lint or language-server diagnostics in Problems Dock and editor squiggles.
+
+06-run-menu-configurations.png
+- Show Run menu expanded with Run Configuration, Cargo Configuration, and Build Configuration.
+
+07-terminal-run-output.png
+- Show Terminal Dock with a completed run and visible command/output.
+
+08-find-in-files-results.png
+- Show Find in Files dialog and populated multi-file results.
+
+09-git-menu-actions.png
+- Show Git menu expanded with commit/push/pull/rollback actions.
+
+10-cpp-build-and-run-output.png
+- Show a C/C++ build + run session output in terminal tabs.
+
+11-rust-cargo-configuration.png
+- Show Cargo configurations UI/page in Settings.
+
+12-format-missing-ruff-config-dialog.png
+- Show the Ruff "No ruff.toml found" bootstrap dialog.
+
+13-format-missing-clang-format-dialog.png
+- Show the clang-format "No .clang-format found" bootstrap dialog.
+
+14-ai-assist-settings-page.png
+- Show AI Assist settings page with model/base URL fields visible.
+
+15-keybindings-settings-page.png
+- Show Keybindings page with at least one edited shortcut.

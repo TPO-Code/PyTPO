@@ -1,0 +1,295 @@
+/* -----------------------------
+   Global palette (Crimson Core)
+------------------------------ */
+QWidget {
+    color: #eeeeee;
+    background: #181818;
+    selection-background-color: #a71c1c; /* Deep Red */
+    selection-color: #ffffff;
+}
+
+QToolTip {
+    background: #202020;
+    color: #ffffff;
+    border: 1px solid #661010;
+    padding: 6px;
+}
+
+QMenuBar {
+    background: #1f1f1f;
+    color: #dddddd;
+    border-bottom: 1px solid #333333;
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 5px 10px;
+    border-radius: 6px;
+}
+
+QMenuBar::item:selected {
+    background: #a71c1c;
+    color: white;
+}
+
+QMenu {
+    background: #1f1f1f;
+    color: #eeeeee;
+    border: 1px solid #444444;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 12px;
+    border-radius: 6px;
+}
+
+QMenu::item:selected {
+    background: #d32f2f; /* Bright Red */
+}
+
+QStatusBar {
+    background: #121212;
+    color: #999999;
+    border-top: 1px solid #333333;
+}
+
+/* -----------------------------
+   Custom window shell
+------------------------------ */
+#WindowRoot {
+    background: #000000;
+}
+
+#TitleBar {
+    background: #1f1f1f;
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+}
+
+#TopStrip {
+    background: #181818;
+    min-height: 32px;
+    max-height: 32px;
+}
+
+#ContentHost {
+    background: #121212;
+    border-bottom-left-radius: 9px;
+    border-bottom-right-radius: 9px;
+}
+
+#WindowTitleLabel {
+    color: #ffffff;
+    font-weight: 600;
+}
+
+QToolButton#TitleBarControlButton {
+    color: #aaaaaa;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 4px;
+}
+
+QToolButton#TitleBarControlButton:hover {
+    background: rgba(211, 47, 47, 0.2); /* Red tint */
+    border-color: rgba(211, 47, 47, 0.4);
+}
+
+QToolButton#TitleBarControlButton:pressed {
+    background: rgba(211, 47, 47, 0.4);
+}
+
+#TitleBarToolsHost {
+    background: transparent;
+}
+
+QToolButton#TitleBarToolButton {
+    color: #cccccc;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 0px;
+    min-height: 0px;
+}
+
+QToolButton#TitleBarToolButton:hover {
+    background: rgba(211, 47, 47, 0.2);
+    border-color: rgba(211, 47, 47, 0.4);
+}
+
+QToolButton#TitleBarToolButton:pressed {
+    background: rgba(211, 47, 47, 0.4);
+}
+
+QToolButton#TitleBarToolButton:disabled {
+    color: #555555;
+}
+
+/* -----------------------------
+   Shared controls
+------------------------------ */
+QPushButton {
+    background: #2d2d2d;
+    color: #ffffff;
+    border: 1px solid #444444;
+    border-radius: 8px;
+    padding: 7px 12px;
+}
+
+QPushButton:hover {
+    background: #3a3a3a;
+    border-color: #d32f2f; /* Red Border on hover */
+}
+
+QPushButton:pressed {
+    background: #111111;
+    border-color: #a71c1c;
+}
+
+QPushButton:disabled {
+    color: #666666;
+    background: #222222;
+    border-color: #333333;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QTextEdit,
+QPlainTextEdit,
+QListWidget,
+QTreeWidget {
+    background: #1e1e1e;
+    color: #ffffff;
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 5px 8px;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QTextEdit:focus,
+QPlainTextEdit:focus,
+QListWidget:focus,
+QTreeWidget:focus {
+    border-color: #e53935; /* Bright red focus */
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QCheckBox {
+    spacing: 8px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #555555;
+    border-radius: 4px;
+    background: #1e1e1e;
+}
+
+QCheckBox::indicator:checked {
+    background: #d32f2f;
+    border-color: #ff5252;
+}
+
+/* -----------------------------
+   Settings dialog styling
+------------------------------ */
+QDialog#SettingsDialog {
+    background: #121212;
+}
+
+QDialog#SettingsDialog QFrame#LeftFrame,
+QDialog#SettingsDialog QFrame#RightFrame {
+    background: #1a1a1a;
+    border: 1px solid #333333;
+    border-radius: 10px;
+}
+
+QDialog#SettingsDialog QLabel#SettingsTitle {
+    font-size: 21px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+QDialog#SettingsDialog QLabel#PageTitle {
+    font-size: 18px;
+    font-weight: 600;
+    color: #eeeeee;
+}
+
+QDialog#SettingsDialog QLabel#PageScope {
+    color: #d32f2f; /* Red Accent Text */
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QDialog#SettingsDialog QLabel#PageDesc,
+QDialog#SettingsDialog QLabel#SectionDesc {
+    color: #888888;
+}
+
+QDialog#SettingsDialog QLabel#SettingsStatus {
+    color: #666666;
+    font-size: 12px;
+}
+
+QDialog#SettingsDialog QTreeWidget {
+    background: #181818;
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+}
+
+QDialog#SettingsDialog QTreeWidget::item {
+    color: #888888;
+}
+
+QDialog#SettingsDialog QTreeWidget::item:hover {
+    color: #ffffff;
+}
+
+QDialog#SettingsDialog QTreeWidget::item:selected {
+    color: #ff5252; /* Bright Red Text */
+    font-weight: 600;
+}
+
+QDialog#SettingsDialog QGroupBox {
+    border: 1px solid #333333;
+    border-radius: 10px;
+    margin-top: 12px;
+    padding: 10px;
+    font-weight: 600;
+    color: #dddddd;
+}
+
+QDialog#SettingsDialog QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 5px;
+    color: #dddddd;
+}
+
+QDialog#SettingsDialog QScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QDialog#SettingsDialog QPushButton {
+    min-height: 30px;
+}
+
+QDialog#SettingsDialog QPushButton:default {
+    background: #a71c1c;
+    border-color: #d32f2f;
+    color: #ffffff;
+}

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="520" viewBox="0 0 1100 520" role="img" aria-label="IDE settings versus project settings">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .left { fill: #1d4ed8; rx: 18; }
+      .right { fill: #047857; rx: 18; }
+      .title { fill: #f8fafc; font: 700 30px 'DejaVu Sans', sans-serif; }
+      .h { fill: #f8fafc; font: 700 24px 'DejaVu Sans', sans-serif; }
+      .t { fill: #dbeafe; font: 400 16px 'DejaVu Sans', sans-serif; }
+      .tg { fill: #d1fae5; font: 400 16px 'DejaVu Sans', sans-serif; }
+      .mid { fill: #334155; stroke: #64748b; stroke-width: 2; rx: 12; }
+      .m { fill: #e2e8f0; font: 400 16px 'DejaVu Sans', sans-serif; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1100" height="520"/>
+  <text class="title" x="30" y="56">Settings Scope Model</text>
+
+  <rect class="left" x="30" y="96" width="460" height="390"/>
+  <text class="h" x="54" y="136">IDE Scope (Machine Local)</text>
+  <text class="t" x="54" y="170">Stored in ide-settings.json</text>
+  <text class="t" x="54" y="205">- Appearance, keybindings, window behavior</text>
+  <text class="t" x="54" y="235">- Global run defaults</text>
+  <text class="t" x="54" y="265">- Lint defaults and AI assist setup</text>
+  <text class="t" x="54" y="295">- GitHub account and clone defaults</text>
+
+  <rect class="right" x="610" y="96" width="460" height="390"/>
+  <text class="h" x="634" y="136">Project Scope (Per Repository)</text>
+  <text class="tg" x="634" y="170">Stored in .tide/project.json</text>
+  <text class="tg" x="634" y="205">- Interpreter selection + overrides</text>
+  <text class="tg" x="634" y="235">- Indexing + explorer excludes</text>
+  <text class="tg" x="634" y="265">- C/C++ and Rust language settings</text>
+  <text class="tg" x="634" y="295">- Build, run, and cargo configurations</text>
+
+  <rect class="mid" x="465" y="205" width="170" height="120"/>
+  <text class="m" x="487" y="244">Settings UI</text>
+  <text class="m" x="487" y="270">writes both</text>
+  <text class="m" x="487" y="296">scopes safely</text>
+</svg>

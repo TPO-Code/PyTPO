@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-label="PyTPO documentation map">
+  <defs>
+    <style>
+      .bg { fill: #0f172a; }
+      .title { fill: #e2e8f0; font: 700 34px 'DejaVu Sans', sans-serif; }
+      .subtitle { fill: #94a3b8; font: 400 18px 'DejaVu Sans', sans-serif; }
+      .card { fill: #1e293b; stroke: #334155; stroke-width: 2; rx: 14; }
+      .h { fill: #f8fafc; font: 700 22px 'DejaVu Sans', sans-serif; }
+      .t { fill: #cbd5e1; font: 400 16px 'DejaVu Sans', sans-serif; }
+      .line { stroke: #475569; stroke-width: 2; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="760"/>
+  <text class="title" x="40" y="62">PyTPO Docs - Information Map</text>
+  <text class="subtitle" x="40" y="92">How pages are grouped and where to start</text>
+
+  <rect class="card" x="40" y="130" width="255" height="180"/>
+  <text class="h" x="58" y="168">Start Here</text>
+  <text class="t" x="58" y="200">- Getting Started</text>
+  <text class="t" x="58" y="228">- Daily Workflow</text>
+  <text class="t" x="58" y="256">- Troubleshooting</text>
+
+  <rect class="card" x="325" y="130" width="255" height="180"/>
+  <text class="h" x="343" y="168">Concepts</text>
+  <text class="t" x="343" y="200">- Projects and .tide</text>
+  <text class="t" x="343" y="228">- Indexing / Search</text>
+  <text class="t" x="343" y="256">- Run + Terminal Model</text>
+
+  <rect class="card" x="610" y="130" width="255" height="180"/>
+  <text class="h" x="628" y="168">Features</text>
+  <text class="t" x="628" y="200">- Editor + Panels</text>
+  <text class="t" x="628" y="228">- Linting + AI Assist</text>
+  <text class="t" x="628" y="256">- Git + Find/Replace</text>
+
+  <rect class="card" x="895" y="130" width="265" height="180"/>
+  <text class="h" x="913" y="168">Configuration</text>
+  <text class="t" x="913" y="200">- IDE Settings</text>
+  <text class="t" x="913" y="228">- Run Configurations</text>
+  <text class="t" x="913" y="256">- project.json Reference</text>
+
+  <rect class="card" x="130" y="380" width="370" height="230"/>
+  <text class="h" x="148" y="420">Language Support</text>
+  <text class="t" x="148" y="452">- C/C++ (clangd + CMake)</text>
+  <text class="t" x="148" y="480">- Rust (rust-analyzer + Cargo)</text>
+  <text class="t" x="148" y="508">Includes run/debug behavior and setup</text>
+
+  <rect class="card" x="560" y="380" width="500" height="230"/>
+  <text class="h" x="578" y="420">Formatting</text>
+  <text class="t" x="578" y="452">- Python (ruff format)</text>
+  <text class="t" x="578" y="480">- C/C++ (clang-format)</text>
+  <text class="t" x="578" y="508">- Rust (cargo fmt / rustfmt)</text>
+
+  <line class="line" x1="167" y1="310" x2="167" y2="380"/>
+  <line class="line" x1="452" y1="310" x2="452" y2="380"/>
+  <line class="line" x1="737" y1="310" x2="737" y2="380"/>
+  <line class="line" x1="1027" y1="310" x2="1027" y2="380"/>
+</svg>
