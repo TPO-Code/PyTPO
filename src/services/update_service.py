@@ -210,7 +210,7 @@ class UpdateService:
 
     def _ensure_clean_worktree(self, repo_root: str) -> None:
         status = self._run_command(
-            ["git", "-C", repo_root, "status", "--porcelain"],
+            ["git", "-C", repo_root, "status", "--porcelain", "--untracked-files=no"],
             kind="status_failed",
             timeout_s=20,
         )
@@ -221,7 +221,7 @@ class UpdateService:
         if len(lines) > 12:
             preview += f"\n...and {len(lines) - 12} more"
         raise UpdateServiceError(
-            "Working tree is not clean. Commit/stash changes before updating.\n\n" + preview,
+            "Tracked changes are present. Commit/stash tracked changes before updating.\n\n" + preview,
             kind="dirty_worktree",
         )
 
