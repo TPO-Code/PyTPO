@@ -327,6 +327,9 @@ class ActionRegistry:
         act_branches = QAction("Branches...", ide)
         act_branches.triggered.connect(lambda _checked=False: ide.open_git_branches_dialog())
         git_menu.addAction(act_branches)
+        act_releases = QAction("Releases...", ide)
+        act_releases.triggered.connect(lambda _checked=False: ide.open_git_releases_dialog())
+        git_menu.addAction(act_releases)
 
         rollback_menu = git_menu.addMenu("Rollback")
         act_discard_unstaged = QAction("Discard Unstaged Changes...", ide)

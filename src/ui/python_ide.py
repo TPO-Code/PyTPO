@@ -3267,6 +3267,9 @@ class PythonIDE(Window):
     def open_git_branches_dialog(self) -> None:
         self.git_workflow_controller.open_git_branches_dialog()
 
+    def open_git_releases_dialog(self) -> None:
+        self.git_workflow_controller.open_git_releases_dialog()
+
     def rollback_file_changes(self, file_path: str) -> None:
         self.git_workflow_controller.rollback_file_changes(file_path)
 

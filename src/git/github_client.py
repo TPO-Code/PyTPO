@@ -36,6 +36,20 @@ class GitHubCreatedRelease:
     prerelease: bool
 
 
+@dataclass(slots=True)
+class GitHubReleaseInfo:
+    id: int
+    tag_name: str
+    name: str
+    html_url: str
+    body: str
+    draft: bool
+    prerelease: bool
+    target_commitish: str
+    created_at: str
+    published_at: str
+
+
 class GitHubClientError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "unknown", status_code: int | None = None) -> None:
         super().__init__(message)
@@ -102,7 +116,19 @@ class GitHubClient:
             "private": bool(private),
             "auto_init": False,
         }
-        raw = self._request_json("/user/repos", method="POST", payload=payload)
+        try:
+            raw = self._request_json("/user/repos", method="POST", payload=payload)
+        except GitHubClientError as exc:
+            if int(getattr(exc, "status_code", 0) or 0) == 422 or str(exc.kind or "") in {
+                "already_exists",
+                "unprocessable_entity",
+            }:
+                raise GitHubClientError(
+                    "Repository name already exists on GitHub account.",
+                    kind="already_exists",
+                    status_code=getattr(exc, "status_code", 422),
+                ) from None
+            raise
         if not isinstance(raw, dict):
             raise GitHubClientError("Unexpected response from GitHub.", kind="invalid_response")
         created = GitHubCreatedRepo(
@@ -155,7 +181,10 @@ class GitHubClient:
                 payload=payload,
             )
         except GitHubClientError as exc:
-            if int(getattr(exc, "status_code", 0) or 0) == 422 or str(exc.kind or "") == "already_exists":
+            if int(getattr(exc, "status_code", 0) or 0) == 422 or str(exc.kind or "") in {
+                "already_exists",
+                "unprocessable_entity",
+            }:
                 raise GitHubClientError(
                     "Release or tag already exists on GitHub.",
                     kind="already_exists",
@@ -176,6 +205,83 @@ class GitHubClient:
         if created.id <= 0 or not created.tag_name or not created.html_url:
             raise GitHubClientError("GitHub did not return release details.", kind="invalid_response")
         return created
+
+    def list_releases(self, *, owner: str, repo: str, per_page: int = 100) -> list[GitHubReleaseInfo]:
+        owner_text = str(owner or "").strip()
+        repo_text = str(repo or "").strip()
+        if not owner_text or not repo_text:
+            raise GitHubClientError("Repository owner/name is required.", kind="validation")
+
+        page_size = max(1, min(100, int(per_page)))
+        page = 1
+        max_pages = 100
+        releases: list[GitHubReleaseInfo] = []
+
+        while page <= max_pages:
+            query = urllib.parse.urlencode({"per_page": page_size, "page": page})
+            raw = self._request_json(f"/repos/{owner_text}/{repo_text}/releases?{query}")
+            if not isinstance(raw, list):
+                raise GitHubClientError("Unexpected release payload.", kind="invalid_response")
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                release = GitHubReleaseInfo(
+                    id=int(item.get("id") or 0),
+                    tag_name=str(item.get("tag_name") or "").strip(),
+                    name=str(item.get("name") or "").strip(),
+                    html_url=str(item.get("html_url") or "").strip(),
+                    body=str(item.get("body") or ""),
+                    draft=bool(item.get("draft", False)),
+                    prerelease=bool(item.get("prerelease", False)),
+                    target_commitish=str(item.get("target_commitish") or "").strip(),
+                    created_at=str(item.get("created_at") or "").strip(),
+                    published_at=str(item.get("published_at") or "").strip(),
+                )
+                if release.id <= 0 or not release.tag_name:
+                    continue
+                releases.append(release)
+            if len(raw) < page_size:
+                break
+            page += 1
+
+        return releases
+
+    def delete_release(self, *, owner: str, repo: str, release_id: int) -> None:
+        owner_text = str(owner or "").strip()
+        repo_text = str(repo or "").strip()
+        rid = int(release_id or 0)
+        if not owner_text or not repo_text:
+            raise GitHubClientError("Repository owner/name is required.", kind="validation")
+        if rid <= 0:
+            raise GitHubClientError("Release id is required.", kind="validation")
+        try:
+            self._request_json(
+                f"/repos/{owner_text}/{repo_text}/releases/{rid}",
+                method="DELETE",
+            )
+        except GitHubClientError as exc:
+            if int(getattr(exc, "status_code", 0) or 0) == 404 or str(exc.kind or "") == "not_found":
+                raise GitHubClientError("Release was not found on GitHub.", kind="not_found", status_code=404) from None
+            raise
+
+    def delete_tag(self, *, owner: str, repo: str, tag_name: str) -> None:
+        owner_text = str(owner or "").strip()
+        repo_text = str(repo or "").strip()
+        tag_text = str(tag_name or "").strip()
+        if not owner_text or not repo_text:
+            raise GitHubClientError("Repository owner/name is required.", kind="validation")
+        if not tag_text:
+            raise GitHubClientError("Tag name is required.", kind="validation")
+        encoded = urllib.parse.quote(tag_text, safe="")
+        try:
+            self._request_json(
+                f"/repos/{owner_text}/{repo_text}/git/refs/tags/{encoded}",
+                method="DELETE",
+            )
+        except GitHubClientError as exc:
+            if int(getattr(exc, "status_code", 0) or 0) == 404 or str(exc.kind or "") == "not_found":
+                raise GitHubClientError("Tag was not found on GitHub.", kind="not_found", status_code=404) from None
+            raise
 
     def _collect_repos_for_mode(
         self,
@@ -263,8 +369,8 @@ class GitHubClient:
                 ) from None
             if status == 422:
                 raise GitHubClientError(
-                    "Repository name already exists on GitHub account.",
-                    kind="already_exists",
+                    "GitHub request was rejected (validation failed).",
+                    kind="unprocessable_entity",
                     status_code=status,
                 ) from None
             if status == 404:
@@ -278,6 +384,9 @@ class GitHubClient:
             raise GitHubClientError("Network error while contacting GitHub.", kind="network") from exc
         except TimeoutError as exc:
             raise GitHubClientError("GitHub request timed out.", kind="network") from exc
+
+        if not body:
+            return None, headers
 
         try:
             payload = json.loads(body.decode("utf-8"))

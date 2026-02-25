@@ -30,6 +30,29 @@ class GitHubReleaseResult:
     html_url: str
 
 
+@dataclass(slots=True)
+class GitHubReleaseSummary:
+    id: int
+    tag_name: str
+    title: str
+    html_url: str
+    notes: str
+    draft: bool
+    prerelease: bool
+    target_commitish: str
+    created_at: str
+    published_at: str
+
+
+@dataclass(slots=True)
+class GitHubReleaseDeleteResult:
+    repo_root: str
+    release_id: int
+    tag_name: str
+    release_deleted: bool
+    remote_tag_deleted: bool
+
+
 class GitHubReleaseError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "release_failed") -> None:
         super().__init__(message)
@@ -212,6 +235,68 @@ class GitHubReleaseService:
             html_url=created.html_url,
         )
 
+    def list_releases(self, repo_root: str) -> list[GitHubReleaseSummary]:
+        root = self._canonical(repo_root)
+        owner, repo = self._resolve_owner_repo(root)
+        client = self._build_client()
+        try:
+            items = client.list_releases(owner=owner, repo=repo, per_page=100)
+        except GitHubClientError as exc:
+            raise self._map_github_error(exc) from None
+        return [
+            GitHubReleaseSummary(
+                id=int(item.id),
+                tag_name=str(item.tag_name or "").strip(),
+                title=str(item.name or "").strip() or str(item.tag_name or "").strip(),
+                html_url=str(item.html_url or "").strip(),
+                notes=str(item.body or ""),
+                draft=bool(item.draft),
+                prerelease=bool(item.prerelease),
+                target_commitish=str(item.target_commitish or "").strip(),
+                created_at=str(item.created_at or "").strip(),
+                published_at=str(item.published_at or "").strip(),
+            )
+            for item in items
+        ]
+
+    def delete_release(
+        self,
+        *,
+        repo_root: str,
+        release_id: int,
+        tag_name: str = "",
+        delete_tag: bool = False,
+    ) -> GitHubReleaseDeleteResult:
+        root = self._canonical(repo_root)
+        rid = int(release_id or 0)
+        if rid <= 0:
+            raise GitHubReleaseError("Release id is required.", kind="validation")
+        owner, repo = self._resolve_owner_repo(root)
+        client = self._build_client()
+
+        try:
+            client.delete_release(owner=owner, repo=repo, release_id=rid)
+        except GitHubClientError as exc:
+            raise self._map_github_error(exc) from None
+
+        deleted_tag = False
+        tag_text = str(tag_name or "").strip()
+        if bool(delete_tag) and tag_text:
+            try:
+                client.delete_tag(owner=owner, repo=repo, tag_name=tag_text)
+                deleted_tag = True
+            except GitHubClientError as exc:
+                if str(exc.kind or "") != "not_found":
+                    raise self._map_github_error(exc) from None
+
+        return GitHubReleaseDeleteResult(
+            repo_root=root,
+            release_id=rid,
+            tag_name=tag_text,
+            release_deleted=True,
+            remote_tag_deleted=deleted_tag,
+        )
+
     @staticmethod
     def _normalize_version(value: str) -> str:
         text = str(value or "").strip()
@@ -262,6 +347,42 @@ class GitHubReleaseService:
         if not owner or not repo:
             return None
         return owner, repo
+
+    def _build_client(self) -> GitHubClient:
+        token = ""
+        try:
+            token = str(self._github_token_provider() or "").strip()
+        except Exception:
+            token = ""
+        if not token:
+            raise GitHubReleaseError("No GitHub token is configured.", kind="no_token")
+        try:
+            return GitHubClient(token)
+        except GitHubClientError as exc:
+            raise self._map_github_error(exc) from None
+
+    def _resolve_owner_repo(self, root: str) -> tuple[str, str]:
+        try:
+            remote_url = self._git.get_remote_url(root, "origin")
+        except GitServiceError as exc:
+            raise GitHubReleaseError(str(exc), kind=str(exc.kind or "git_error")) from None
+        slug = self._parse_repo_slug(remote_url or "")
+        if slug is None:
+            raise GitHubReleaseError("Could not resolve owner/repo from remote 'origin'.", kind="repo_resolution")
+        return slug
+
+    @staticmethod
+    def _map_github_error(exc: GitHubClientError) -> GitHubReleaseError:
+        kind = str(getattr(exc, "kind", "") or "github_error")
+        if kind == "auth":
+            return GitHubReleaseError("GitHub authentication failed. Verify your token permissions.", kind="auth")
+        if kind == "not_found":
+            return GitHubReleaseError("Release or tag was not found on GitHub.", kind="not_found")
+        if kind == "network":
+            return GitHubReleaseError("Network error while contacting GitHub.", kind="network")
+        if kind == "unprocessable_entity":
+            return GitHubReleaseError("GitHub rejected the request as invalid.", kind="validation")
+        return GitHubReleaseError(str(exc), kind=kind)
 
     def _canonical(self, path: str) -> str:
         if self._canonicalize is not None:

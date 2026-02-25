@@ -11,6 +11,7 @@ from src.git.github_auth import GitHubAuthStore
 from src.git.github_release_service import GitHubReleaseService
 from src.ui.dialogs.git_branches_dialog import GitBranchesDialog
 from src.ui.dialogs.git_commit_dialog import GitCommitDialog
+from src.ui.dialogs.git_releases_dialog import GitReleasesDialog
 from src.ui.dialogs.share_to_github_dialog import ShareToGitHubDialog
 
 
@@ -124,6 +125,36 @@ class GitWorkflowController:
         else:
             self.ide.statusBar().showMessage("Commit completed.", 1800)
         self.schedule_git_status_refresh(delay_ms=80, force=True)
+
+    def open_git_releases_dialog(self) -> None:
+        repo_root = self._ensure_git_repo()
+        if not repo_root:
+            return
+        token = str(self.ide._github_auth_store.get() or "").strip()
+        if not token:
+            answer = QMessageBox.question(
+                self.ide,
+                "GitHub Token Required",
+                "No GitHub token is configured.\n\nOpen Settings > GitHub now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                self.open_settings(initial_page_id="ide-github")
+            return
+
+        release_service = GitHubReleaseService(
+            git_service=self.git_service,
+            github_token_provider=lambda: self.ide._github_auth_store.get(),
+            canonicalize=self._canonical_path,
+        )
+        dialog = GitReleasesDialog(
+            release_service=release_service,
+            repo_root=repo_root,
+            use_native_chrome=self.use_native_chrome,
+            parent=self.ide,
+        )
+        dialog.exec()
 
     def _is_path_filtered_in_workspace(self, abs_path: str) -> bool:
         cpath = self._canonical_path(abs_path)

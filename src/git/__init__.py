@@ -7,7 +7,14 @@ from .git_clone_service import (
 )
 from .auth_bridge import GitAuthBridge, GitCommandRunner, GitRunError, GitRunResult, sanitize_git_text
 from .github_auth import GitHubAuthError, GitHubAuthStore
-from .github_client import GitHubClient, GitHubClientError, GitHubCreatedRelease, GitHubCreatedRepo, GitHubRepo
+from .github_client import (
+    GitHubClient,
+    GitHubClientError,
+    GitHubCreatedRelease,
+    GitHubCreatedRepo,
+    GitHubReleaseInfo,
+    GitHubRepo,
+)
 from .git_service import (
     GitBranchInfo,
     GitChangeEntry,
@@ -24,9 +31,11 @@ from .github_share_service import (
     GitHubShareService,
 )
 from .github_release_service import (
+    GitHubReleaseDeleteResult,
     GitHubReleaseError,
     GitHubReleaseRequest,
     GitHubReleaseResult,
+    GitHubReleaseSummary,
     GitHubReleaseService,
 )
 
@@ -47,10 +56,13 @@ __all__ = [
     "GitHubClientError",
     "GitHubCreatedRelease",
     "GitHubCreatedRepo",
+    "GitHubReleaseInfo",
     "GitHubRepo",
     "GitHubReleaseError",
     "GitHubReleaseRequest",
     "GitHubReleaseResult",
+    "GitHubReleaseSummary",
+    "GitHubReleaseDeleteResult",
     "GitHubReleaseService",
     "GitHubShareError",
     "GitHubShareRequest",
