@@ -1,7 +1,7 @@
 [project]
 name = "pytpo"
 version = "0.1.0"
-description = "Add your description here"
+description = "A simple custom IDE"
 requires-python = ">=3.11"
 dependencies = [
     "pyside6",

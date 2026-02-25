@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import tomllib
+from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
@@ -21,6 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.git.git_service import GitService, GitServiceError
+from src.git.github_release_service import (
+    GitHubReleaseError,
+    GitHubReleaseRequest,
+    GitHubReleaseService,
+)
 from src.ui.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
 
@@ -39,6 +48,7 @@ class GitCommitDialog(DialogWindow):
       - stage_paths(repo_root: str, rel_paths: list[str]) # optional
       - commit_files(repo_root: str, rel_paths: list[str], message: str)
       - push_current_branch(repo_root: str)
+      - optional release_service for tag/release publishing
     """
 
     def __init__(
@@ -46,6 +56,7 @@ class GitCommitDialog(DialogWindow):
         *,
         git_service: GitService,
         repo_root: str,
+        release_service: GitHubReleaseService | None = None,
         exclude_untracked_predicate: Callable[[str], bool] | None = None,
         prefer_push_action: bool = False,
         use_native_chrome: bool = False,
@@ -57,7 +68,10 @@ class GitCommitDialog(DialogWindow):
 
         self._git_service = git_service
         self._repo_root = str(repo_root)
+        self._release_service = release_service
         self._exclude_untracked_predicate = exclude_untracked_predicate
+        self._repo_has_pyproject = os.path.isfile(os.path.join(self._repo_root, "pyproject.toml"))
+        self._repo_has_cargo_toml = os.path.isfile(os.path.join(self._repo_root, "Cargo.toml"))
 
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="pytpo-git-commit"
@@ -82,6 +96,8 @@ class GitCommitDialog(DialogWindow):
         self.commit_output: str = ""
         self.push_output: str = ""
         self.push_error: str = ""
+        self.release_url: str = ""
+        self.release_error: str = ""
 
         self._build_ui()
         self.destroyed.connect(lambda *_args: self._shutdown())
@@ -163,6 +179,55 @@ class GitCommitDialog(DialogWindow):
         self.message_edit.setFixedHeight(120)
         root.addWidget(self.message_edit)
 
+        self.release_chk = QCheckBox("Create GitHub release after push")
+        root.addWidget(self.release_chk)
+
+        self.release_form = QWidget()
+        release_layout = QVBoxLayout(self.release_form)
+        release_layout.setContentsMargins(0, 0, 0, 0)
+        release_layout.setSpacing(8)
+
+        version_row = QHBoxLayout()
+        version_row.addWidget(QLabel("Version"), 0)
+        self.release_version_edit = QLineEdit()
+        self.release_version_edit.setPlaceholderText("1.2.3")
+        version_row.addWidget(self.release_version_edit, 1)
+        version_row.addWidget(QLabel("Tag"), 0)
+        self.release_tag_edit = QLineEdit()
+        self.release_tag_edit.setPlaceholderText("v1.2.3")
+        version_row.addWidget(self.release_tag_edit, 1)
+        release_layout.addLayout(version_row)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("Title"), 0)
+        self.release_title_edit = QLineEdit()
+        self.release_title_edit.setPlaceholderText("v1.2.3")
+        title_row.addWidget(self.release_title_edit, 1)
+        release_layout.addLayout(title_row)
+
+        self.release_notes_edit = QPlainTextEdit()
+        self.release_notes_edit.setPlaceholderText("Release notes (optional)")
+        self.release_notes_edit.setFixedHeight(84)
+        release_layout.addWidget(self.release_notes_edit)
+
+        self.release_prerelease_chk = QCheckBox("Pre-release")
+        release_layout.addWidget(self.release_prerelease_chk)
+
+        self.bump_pyproject_chk: QCheckBox | None = None
+        if self._repo_has_pyproject:
+            self.bump_pyproject_chk = QCheckBox("Update pyproject.toml version")
+            self.bump_pyproject_chk.setChecked(True)
+            release_layout.addWidget(self.bump_pyproject_chk)
+
+        self.bump_cargo_chk: QCheckBox | None = None
+        if self._repo_has_cargo_toml:
+            self.bump_cargo_chk = QCheckBox("Update Cargo.toml version")
+            self.bump_cargo_chk.setChecked(True)
+            release_layout.addWidget(self.bump_cargo_chk)
+
+        root.addWidget(self.release_form)
+        self.release_form.setVisible(False)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
@@ -196,8 +261,15 @@ class GitCommitDialog(DialogWindow):
         self.commit_push_btn.clicked.connect(lambda: self._commit_clicked(push_after=True))
 
         self.message_edit.textChanged.connect(self._refresh_commit_enabled)
+        self.release_chk.toggled.connect(self._on_release_toggle)
+        self.release_version_edit.textChanged.connect(self._on_release_version_changed)
+        self.release_tag_edit.textChanged.connect(self._refresh_commit_enabled)
+        self.release_tag_edit.textEdited.connect(lambda _text: self.release_tag_edit.setModified(True))
+        self.release_title_edit.textEdited.connect(lambda _text: self.release_title_edit.setModified(True))
         self.tracked_tree.itemChanged.connect(self._on_item_changed)
         self.untracked_tree.itemChanged.connect(self._on_item_changed)
+
+        self._seed_release_version()
 
     def _load_changes(self) -> None:
         self._set_busy(True)
@@ -251,6 +323,70 @@ class GitCommitDialog(DialogWindow):
         self._is_syncing_tree_checks = False
         self._refresh_commit_enabled()
 
+    def _seed_release_version(self) -> None:
+        version = ""
+        if self._repo_has_pyproject:
+            version = self._read_pyproject_version()
+        if not version and self._repo_has_cargo_toml:
+            version = self._read_cargo_version()
+        if version:
+            self.release_version_edit.setText(version)
+            self.release_tag_edit.setText(f"v{version}")
+            self.release_title_edit.setText(f"v{version}")
+            self.release_tag_edit.setModified(False)
+            self.release_title_edit.setModified(False)
+
+    def _read_pyproject_version(self) -> str:
+        pyproject_path = os.path.join(self._repo_root, "pyproject.toml")
+        if not os.path.isfile(pyproject_path):
+            return ""
+        try:
+            payload = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        project = payload.get("project")
+        if not isinstance(project, dict):
+            return ""
+        return str(project.get("version") or "").strip()
+
+    def _read_cargo_version(self) -> str:
+        cargo_path = os.path.join(self._repo_root, "Cargo.toml")
+        if not os.path.isfile(cargo_path):
+            return ""
+        try:
+            payload = tomllib.loads(Path(cargo_path).read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        package_cfg = payload.get("package")
+        if isinstance(package_cfg, dict):
+            version = str(package_cfg.get("version") or "").strip()
+            if version:
+                return version
+        workspace_cfg = payload.get("workspace")
+        if isinstance(workspace_cfg, dict):
+            workspace_pkg = workspace_cfg.get("package")
+            if isinstance(workspace_pkg, dict):
+                return str(workspace_pkg.get("version") or "").strip()
+        return ""
+
+    def _on_release_toggle(self, checked: bool) -> None:
+        enabled = bool(checked)
+        self.release_form.setVisible(enabled)
+        self.release_form.setEnabled(enabled and not bool(self._pending))
+        self._refresh_commit_enabled()
+
+    def _on_release_version_changed(self, text: str) -> None:
+        version = str(text or "").strip()
+        if not self.release_tag_edit.isModified():
+            self.release_tag_edit.setText(f"v{version}" if version else "")
+        if not self.release_title_edit.isModified():
+            self.release_title_edit.setText(f"v{version}" if version else "")
+        self._refresh_commit_enabled()
+
     def _commit_clicked(self, *, push_after: bool) -> None:
         message = str(self.message_edit.toPlainText() or "").strip()
         if not message:
@@ -262,13 +398,57 @@ class GitCommitDialog(DialogWindow):
             self._set_status("Select at least one file.", error=True)
             return
 
+        create_release = bool(self.release_chk.isChecked())
+        push_required = bool(push_after or create_release)
+        release_req: GitHubReleaseRequest | None = None
+        pyproject_should_bump = False
+        cargo_should_bump = False
+        if create_release:
+            if self._release_service is None:
+                self._set_status("Release publishing is not available in this build.", error=True)
+                return
+            version = str(self.release_version_edit.text() or "").strip()
+            tag_name = str(self.release_tag_edit.text() or "").strip()
+            title = str(self.release_title_edit.text() or "").strip()
+            notes = str(self.release_notes_edit.toPlainText() or "").strip()
+            prerelease = bool(self.release_prerelease_chk.isChecked())
+            pyproject_should_bump = bool(self.bump_pyproject_chk is not None and self.bump_pyproject_chk.isChecked())
+            cargo_should_bump = bool(self.bump_cargo_chk is not None and self.bump_cargo_chk.isChecked())
+
+            if not version:
+                self._set_status("Release version is required.", error=True)
+                return
+            if not tag_name:
+                self._set_status("Release tag is required.", error=True)
+                return
+            if pyproject_should_bump and "pyproject.toml" not in selected:
+                selected = [*selected, "pyproject.toml"]
+            if cargo_should_bump and "Cargo.toml" not in selected:
+                selected = [*selected, "Cargo.toml"]
+
+            release_req = GitHubReleaseRequest(
+                repo_root=self._repo_root,
+                version=version,
+                tag_name=tag_name,
+                title=title or tag_name,
+                notes=notes,
+                prerelease=prerelease,
+            )
+
         to_add = [p for p in selected if self._file_states.get(p) == "untracked"]
 
         self._set_busy(True)
-        self._commit_with_push = bool(push_after)
-        self._set_status("Committing and pushing..." if push_after else "Committing changes...")
+        self._commit_with_push = push_required
+        self.release_error = ""
+        self.release_url = ""
+        if create_release:
+            self._set_status("Committing, pushing, and publishing release...")
+        else:
+            self._set_status("Committing and pushing..." if push_required else "Committing changes...")
 
         def _run():
+            release_url = ""
+            release_error = ""
             # Add selected untracked files first so they become tracked in this commit.
             if to_add:
                 add_fn = getattr(self._git_service, "add_files", None)
@@ -279,20 +459,34 @@ class GitCommitDialog(DialogWindow):
                     if callable(stage_fn):
                         stage_fn(self._repo_root, to_add)
 
+            if create_release and pyproject_should_bump and self._release_service is not None and release_req is not None:
+                self._release_service.update_pyproject_version(self._repo_root, release_req.version)
+            if create_release and cargo_should_bump and self._release_service is not None and release_req is not None:
+                self._release_service.update_cargo_version(self._repo_root, release_req.version)
+
             commit_output = self._git_service.commit_files(self._repo_root, selected, message)
 
             push_output = ""
             push_error = ""
-            if push_after:
+            if push_required:
                 try:
                     push_output = self._git_service.push_current_branch(self._repo_root)
                 except GitServiceError as exc:
                     push_error = str(exc)
 
+            if create_release and not push_error and self._release_service is not None and release_req is not None:
+                try:
+                    published = self._release_service.create_release(release_req)
+                    release_url = str(published.html_url or "").strip()
+                except GitHubReleaseError as exc:
+                    release_error = str(exc)
+
             return {
                 "commit_output": str(commit_output or "").strip(),
                 "push_output": str(push_output or "").strip(),
                 "push_error": str(push_error or "").strip(),
+                "release_url": release_url,
+                "release_error": release_error,
             }
 
         self._submit_task("commit", _run)
@@ -373,6 +567,8 @@ class GitCommitDialog(DialogWindow):
                 self.commit_output = str(payload.get("commit_output") or "").strip()
                 self.push_output = str(payload.get("push_output") or "").strip()
                 self.push_error = str(payload.get("push_error") or "").strip()
+                self.release_url = str(payload.get("release_url") or "").strip()
+                self.release_error = str(payload.get("release_error") or "").strip()
 
                 if self.push_error:
                     self._set_status("Commit succeeded locally, but push authentication failed.", error=True)
@@ -381,6 +577,15 @@ class GitCommitDialog(DialogWindow):
                         "Commit and Push",
                         f"Commit succeeded locally, but push authentication failed.\n\n{self.push_error}",
                     )
+                elif self.release_error:
+                    self._set_status("Commit/push succeeded, but release publishing failed.", error=True)
+                    QMessageBox.warning(
+                        self,
+                        "Release Publishing",
+                        f"Commit/push succeeded, but release publishing failed.\n\n{self.release_error}",
+                    )
+                elif self.release_url:
+                    self._set_status("Commit, push, and release completed.")
                 else:
                     self._set_status("Commit and push completed." if self._commit_with_push else "Commit completed.")
 
@@ -388,6 +593,9 @@ class GitCommitDialog(DialogWindow):
                 return
 
             if isinstance(error, GitServiceError):
+                self._set_status(str(error), error=True)
+                return
+            if isinstance(error, GitHubReleaseError):
                 self._set_status(str(error), error=True)
                 return
 
@@ -650,7 +858,15 @@ class GitCommitDialog(DialogWindow):
             self.commit_push_btn.setEnabled(False)
             return
 
-        enabled = bool(str(self.message_edit.toPlainText() or "").strip() and self._selected_rel_paths())
+        has_message = bool(str(self.message_edit.toPlainText() or "").strip())
+        has_files = bool(self._selected_rel_paths())
+        release_valid = True
+        if self.release_chk.isChecked():
+            release_valid = bool(
+                str(self.release_version_edit.text() or "").strip()
+                and str(self.release_tag_edit.text() or "").strip()
+            )
+        enabled = bool(has_message and has_files and release_valid)
         self.commit_btn.setEnabled(enabled)
         self.commit_push_btn.setEnabled(enabled)
 
@@ -666,6 +882,8 @@ class GitCommitDialog(DialogWindow):
         self.untracked_select_all_btn.setDisabled(disabled)
         self.untracked_select_none_btn.setDisabled(disabled)
         self.message_edit.setDisabled(disabled)
+        self.release_chk.setDisabled(disabled)
+        self.release_form.setDisabled(disabled or not self.release_chk.isChecked())
         self.cancel_btn.setDisabled(disabled)
 
         if disabled:

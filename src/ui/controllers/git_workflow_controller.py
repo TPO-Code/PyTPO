@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QDialog, QMessageBox
 
 from src.git.github_auth import GitHubAuthStore
+from src.git.github_release_service import GitHubReleaseService
 from src.ui.dialogs.git_branches_dialog import GitBranchesDialog
 from src.ui.dialogs.git_commit_dialog import GitCommitDialog
 from src.ui.dialogs.share_to_github_dialog import ShareToGitHubDialog
@@ -96,9 +97,15 @@ class GitWorkflowController:
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
+        release_service = GitHubReleaseService(
+            git_service=self.git_service,
+            github_token_provider=lambda: self.ide._github_auth_store.get(),
+            canonicalize=self._canonical_path,
+        )
         dialog = GitCommitDialog(
             git_service=self.git_service,
             repo_root=repo_root,
+            release_service=release_service,
             exclude_untracked_predicate=self._is_path_filtered_in_workspace,
             prefer_push_action=prefer_push_action,
             use_native_chrome=self.use_native_chrome,
@@ -108,6 +115,10 @@ class GitWorkflowController:
             return
         if dialog.push_error:
             self.ide.statusBar().showMessage("Commit succeeded locally, but push authentication failed.", 3200)
+        elif dialog.release_error:
+            self.ide.statusBar().showMessage("Commit/push succeeded, but release publishing failed.", 3600)
+        elif dialog.release_url:
+            self.ide.statusBar().showMessage(f"Release published: {dialog.release_url}", 4200)
         elif dialog.push_output:
             self.ide.statusBar().showMessage("Commit and push completed.", 2200)
         else:

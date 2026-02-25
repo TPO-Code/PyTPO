@@ -26,6 +26,16 @@ class GitHubCreatedRepo:
     html_url: str
 
 
+@dataclass(slots=True)
+class GitHubCreatedRelease:
+    id: int
+    tag_name: str
+    name: str
+    html_url: str
+    draft: bool
+    prerelease: bool
+
+
 class GitHubClientError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "unknown", status_code: int | None = None) -> None:
         super().__init__(message)
@@ -105,6 +115,66 @@ class GitHubClient:
         )
         if not created.name or not created.full_name or not created.clone_url:
             raise GitHubClientError("GitHub did not return repository details.", kind="invalid_response")
+        return created
+
+    def create_release(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        tag_name: str,
+        name: str = "",
+        body: str = "",
+        draft: bool = False,
+        prerelease: bool = False,
+        target_commitish: str = "",
+    ) -> GitHubCreatedRelease:
+        owner_text = str(owner or "").strip()
+        repo_text = str(repo or "").strip()
+        tag_text = str(tag_name or "").strip()
+        if not owner_text or not repo_text:
+            raise GitHubClientError("Repository owner/name is required.", kind="validation")
+        if not tag_text:
+            raise GitHubClientError("Tag name is required.", kind="validation")
+
+        payload = {
+            "tag_name": tag_text,
+            "name": str(name or "").strip() or tag_text,
+            "body": str(body or ""),
+            "draft": bool(draft),
+            "prerelease": bool(prerelease),
+        }
+        target_text = str(target_commitish or "").strip()
+        if target_text:
+            payload["target_commitish"] = target_text
+
+        try:
+            raw = self._request_json(
+                f"/repos/{owner_text}/{repo_text}/releases",
+                method="POST",
+                payload=payload,
+            )
+        except GitHubClientError as exc:
+            if int(getattr(exc, "status_code", 0) or 0) == 422 or str(exc.kind or "") == "already_exists":
+                raise GitHubClientError(
+                    "Release or tag already exists on GitHub.",
+                    kind="already_exists",
+                    status_code=getattr(exc, "status_code", 422),
+                ) from None
+            raise
+
+        if not isinstance(raw, dict):
+            raise GitHubClientError("Unexpected response from GitHub.", kind="invalid_response")
+        created = GitHubCreatedRelease(
+            id=int(raw.get("id") or 0),
+            tag_name=str(raw.get("tag_name") or "").strip(),
+            name=str(raw.get("name") or "").strip(),
+            html_url=str(raw.get("html_url") or "").strip(),
+            draft=bool(raw.get("draft", False)),
+            prerelease=bool(raw.get("prerelease", False)),
+        )
+        if created.id <= 0 or not created.tag_name or not created.html_url:
+            raise GitHubClientError("GitHub did not return release details.", kind="invalid_response")
         return created
 
     def _collect_repos_for_mode(

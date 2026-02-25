@@ -399,6 +399,43 @@ class GitService:
             self._raise_push_error(exc)
         return str(out).strip()
 
+    def tag_exists(self, repo_root: str, tag_name: str) -> bool:
+        root = self._require_repo(repo_root)
+        tag = str(tag_name or "").strip()
+        if not tag:
+            return False
+        try:
+            out = self._run_git(root, ["tag", "--list", tag], check=True)
+        except GitServiceError:
+            return False
+        return bool(str(out or "").strip())
+
+    def create_annotated_tag(self, repo_root: str, tag_name: str, *, message: str = "") -> None:
+        root = self._require_repo(repo_root)
+        tag = str(tag_name or "").strip()
+        if not tag:
+            raise GitServiceError("Tag name is required.", kind="validation")
+        note = str(message or "").strip() or tag
+        try:
+            self._run_git(root, ["tag", "-a", tag, "-m", note], check=True)
+        except GitServiceError as exc:
+            text = str(exc).lower()
+            if "already exists" in text:
+                raise GitServiceError("Tag already exists.", kind="tag_exists") from None
+            raise
+
+    def push_tag(self, repo_root: str, tag_name: str, *, remote_name: str = "origin") -> str:
+        root = self._require_repo(repo_root)
+        tag = str(tag_name or "").strip()
+        if not tag:
+            raise GitServiceError("Tag name is required.", kind="validation")
+        remote = str(remote_name or "").strip() or "origin"
+        try:
+            out = self._run_git(root, ["push", remote, tag], check=True)
+        except GitServiceError as exc:
+            self._raise_push_error(exc)
+        return str(out).strip()
+
     def get_remote_url(self, repo_root: str, remote_name: str = "origin") -> str | None:
         root = self._require_repo(repo_root)
         remote = str(remote_name or "").strip() or "origin"
