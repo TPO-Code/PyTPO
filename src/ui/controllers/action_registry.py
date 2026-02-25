@@ -446,6 +446,10 @@ class ActionRegistry:
 
         help_menu = menubar.addMenu("&Help")
 
+        act_help_updates = QAction("Check for Updates...", ide)
+        act_help_updates.triggered.connect(ide.open_check_for_updates_dialog)
+        help_menu.addAction(act_help_updates)
+
         act_help_docs = QAction("Documentation", ide)
         act_help_docs.triggered.connect(ide.open_documentation_viewer)
         help_menu.addAction(act_help_docs)

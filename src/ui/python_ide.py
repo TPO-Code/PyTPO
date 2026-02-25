@@ -2296,6 +2296,21 @@ class PythonIDE(Window):
         viewer.activateWindow()
         self.statusBar().showMessage(f"Opened documentation from {docs_root}", 2500)
 
+    def open_check_for_updates_dialog(self) -> None:
+        from src.services.update_service import UpdateService
+        from src.ui.dialogs.check_for_updates_dialog import CheckForUpdatesDialog
+
+        update_service = UpdateService(
+            app_root=Path(__file__).resolve().parents[2],
+            github_token_provider=lambda: self._github_auth_store.get(),
+        )
+        dialog = CheckForUpdatesDialog(
+            update_service=update_service,
+            use_native_chrome=self.use_native_chrome,
+            parent=self,
+        )
+        dialog.exec()
+
     def show_about_dialog(self) -> None:
         QMessageBox.about(
             self,
