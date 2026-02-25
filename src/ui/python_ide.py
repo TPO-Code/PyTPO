@@ -3,6 +3,7 @@ import re
 import shutil
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
@@ -2311,17 +2312,52 @@ class PythonIDE(Window):
         )
         dialog.exec()
 
-    def show_about_dialog(self) -> None:
-        QMessageBox.about(
-            self,
-            f"About {self.APP_NAME}",
-            (
-                f"{self.APP_NAME}\n"
+    def _app_version_from_pyproject(self) -> str:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            project = payload.get("project")
+            if isinstance(project, dict):
+                version = str(project.get("version") or "").strip()
+                if version:
+                    return version
+        return "unknown"
+
+    def _about_markdown_payload(self, *, version: str) -> tuple[str, QUrl]:
+        about_path = Path(__file__).resolve().parents[2] / "docs" / "about.md"
+        text = ""
+        if about_path.is_file():
+            try:
+                text = about_path.read_text(encoding="utf-8")
+            except Exception:
+                text = ""
+        if not text.strip():
+            text = (
+                f"# {self.APP_NAME}\n\n"
                 "PySide6 IDE with language packs for Python, C/C++, and Rust.\n\n"
-                f"Project root: {self.project_root}\n\n"
-                "Open Help > Documentation to browse local docs."
-            ),
+                "Open Help > Documentation to browse local docs.\n"
+            )
+        text = text.replace("{{APP_NAME}}", self.APP_NAME)
+        base_url = QUrl.fromLocalFile(str(about_path.parent if about_path.is_file() else about_path))
+        return text, base_url
+
+    def show_about_dialog(self) -> None:
+        from src.ui.dialogs.about_dialog import AboutDialog
+
+        version = self._app_version_from_pyproject()
+        markdown_text, markdown_base_url = self._about_markdown_payload(version=version)
+        dialog = AboutDialog(
+            app_name=self.APP_NAME,
+            app_version=version,
+            markdown_text=markdown_text,
+            markdown_base_url=markdown_base_url,
+            use_native_chrome=self.use_native_chrome,
+            parent=self,
         )
+        dialog.exec()
 
     def go_to_definition(self):
         ed = self.current_editor()
