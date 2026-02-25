@@ -13,15 +13,18 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.ai.openai_compatible_client import OpenAICompatibleClient
+from src.ai.prompt_overrides import DEFAULT_INLINE_SYSTEM_PROMPT, infer_language_for_path, resolve_system_prompt
 from src.ai.provider_base import ModelListResult, ProviderResult
 from src.ai.settings_schema import normalize_ai_settings
 from src.settings_models import SettingsScope
@@ -36,6 +39,8 @@ class AIAssistSettingsPage(QWidget):
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pytpo-ai-settings")
         self._pending: dict[concurrent.futures.Future, str] = {}
         self._base_settings: dict[str, Any] = {}
+        self._prompt_profiles: list[dict[str, Any]] = []
+        self._profile_sync_guard = False
 
         self._result_pump = QTimer(self)
         self._result_pump.setInterval(40)
@@ -135,6 +140,87 @@ class AIAssistSettingsPage(QWidget):
         self.min_prefix_spin.setRange(1, 8)
         behavior_form.addRow("Min Prefix Chars", self.min_prefix_spin)
 
+        prompt_group = QGroupBox("Prompt Overrides")
+        prompt_layout = QHBoxLayout(prompt_group)
+        prompt_layout.setSpacing(10)
+
+        profile_left = QWidget()
+        profile_left_layout = QVBoxLayout(profile_left)
+        profile_left_layout.setContentsMargins(0, 0, 0, 0)
+        profile_left_layout.setSpacing(6)
+        profile_left_layout.addWidget(QLabel("Profiles"))
+        self.profile_list = QListWidget()
+        profile_left_layout.addWidget(self.profile_list, 1)
+        profile_btns = QHBoxLayout()
+        self.profile_add_btn = QPushButton("Add")
+        self.profile_remove_btn = QPushButton("Remove")
+        self.profile_duplicate_btn = QPushButton("Duplicate")
+        profile_btns.addWidget(self.profile_add_btn)
+        profile_btns.addWidget(self.profile_remove_btn)
+        profile_btns.addWidget(self.profile_duplicate_btn)
+        profile_left_layout.addLayout(profile_btns)
+        profile_hint = QLabel("Select a profile to edit prompt behavior by file type.")
+        profile_hint.setWordWrap(True)
+        profile_left_layout.addWidget(profile_hint)
+        prompt_layout.addWidget(profile_left, 1)
+
+        profile_right = QWidget()
+        profile_right_form = QFormLayout(profile_right)
+        profile_right_form.setHorizontalSpacing(14)
+        profile_right_form.setVerticalSpacing(8)
+
+        self.profile_enabled_chk = QCheckBox("Enabled")
+        profile_right_form.addRow(self.profile_enabled_chk)
+
+        self.profile_name_edit = QLineEdit()
+        self.profile_name_edit.setPlaceholderText("Text Files Style")
+        profile_right_form.addRow("Name", self.profile_name_edit)
+
+        self.profile_target_kind_combo = QComboBox()
+        self.profile_target_kind_combo.addItem("Language ID", "language")
+        self.profile_target_kind_combo.addItem("File Extension", "extension")
+        self.profile_target_kind_combo.addItem("Path Glob Pattern", "glob")
+        profile_right_form.addRow("Match Type", self.profile_target_kind_combo)
+
+        self.profile_target_value_edit = QLineEdit()
+        self.profile_target_value_edit.setPlaceholderText(".txt or markdown")
+        profile_right_form.addRow("Match Value", self.profile_target_value_edit)
+
+        self.profile_mode_combo = QComboBox()
+        self.profile_mode_combo.addItem("Append To Base Prompt", "append")
+        self.profile_mode_combo.addItem("Replace Base Prompt", "replace")
+        profile_right_form.addRow("Merge Mode", self.profile_mode_combo)
+
+        self.profile_priority_spin = QSpinBox()
+        self.profile_priority_spin.setRange(-100, 100)
+        profile_right_form.addRow("Priority", self.profile_priority_spin)
+
+        self.profile_prompt_edit = QTextEdit()
+        self.profile_prompt_edit.setAcceptRichText(False)
+        self.profile_prompt_edit.setMinimumHeight(140)
+        self.profile_prompt_edit.setPlaceholderText(
+            "Add instructions for matched files.\n"
+            "Example for .txt: keep plain text concise and avoid code formatting unless asked."
+        )
+        profile_right_form.addRow("Prompt", self.profile_prompt_edit)
+
+        self.profile_preview_path_edit = QLineEdit()
+        self.profile_preview_path_edit.setPlaceholderText("Preview file path, e.g. notes/todo.txt")
+        profile_right_form.addRow("Preview File", self.profile_preview_path_edit)
+
+        self.profile_preview_label = QLabel("No profile selected.")
+        self.profile_preview_label.setWordWrap(True)
+        profile_right_form.addRow("Preview Match", self.profile_preview_label)
+
+        self.profile_effective_prompt_edit = QTextEdit()
+        self.profile_effective_prompt_edit.setReadOnly(True)
+        self.profile_effective_prompt_edit.setAcceptRichText(False)
+        self.profile_effective_prompt_edit.setMinimumHeight(140)
+        self.profile_effective_prompt_edit.setPlaceholderText("Resolved system prompt for the preview file will appear here.")
+        profile_right_form.addRow("Effective Prompt", self.profile_effective_prompt_edit)
+
+        prompt_layout.addWidget(profile_right, 2)
+
         context_group = QGroupBox("Context Packing (Advanced)")
         context_form = QFormLayout(context_group)
         context_form.setHorizontalSpacing(14)
@@ -195,6 +281,7 @@ class AIAssistSettingsPage(QWidget):
 
         root.addWidget(conn_group)
         root.addWidget(behavior_group)
+        root.addWidget(prompt_group)
         root.addWidget(context_group)
         root.addWidget(retrieval_group)
         root.addWidget(self.status_label)
@@ -202,6 +289,9 @@ class AIAssistSettingsPage(QWidget):
 
         self.test_btn.clicked.connect(self._on_test_clicked)
         self.fetch_btn.clicked.connect(self._on_fetch_clicked)
+        self.profile_add_btn.clicked.connect(self._add_prompt_profile)
+        self.profile_remove_btn.clicked.connect(self._remove_selected_prompt_profile)
+        self.profile_duplicate_btn.clicked.connect(self._duplicate_selected_prompt_profile)
 
     def _wire_change_notifications(self) -> None:
         self.enabled_chk.toggled.connect(lambda *_args: self._notify_pending_changed())
@@ -226,6 +316,15 @@ class AIAssistSettingsPage(QWidget):
         self.retrieval_total_candidates_spin.valueChanged.connect(lambda *_args: self._notify_pending_changed())
         self.retrieval_snippet_char_cap_spin.valueChanged.connect(lambda *_args: self._notify_pending_changed())
         self.retrieval_snippet_segments_spin.valueChanged.connect(lambda *_args: self._notify_pending_changed())
+        self.profile_list.currentRowChanged.connect(self._on_prompt_profile_selection_changed)
+        self.profile_enabled_chk.toggled.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_name_edit.textEdited.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_target_kind_combo.currentIndexChanged.connect(lambda *_args: self._on_prompt_profile_kind_changed())
+        self.profile_target_value_edit.textEdited.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_mode_combo.currentIndexChanged.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_priority_spin.valueChanged.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_prompt_edit.textChanged.connect(lambda *_args: self._on_prompt_profile_fields_changed())
+        self.profile_preview_path_edit.textEdited.connect(lambda *_args: self._refresh_prompt_profile_preview())
 
     def _current_settings_value(self) -> dict[str, Any]:
         raw = {
@@ -251,6 +350,7 @@ class AIAssistSettingsPage(QWidget):
             "retrieval_total_candidate_limit": int(self.retrieval_total_candidates_spin.value()),
             "retrieval_snippet_char_cap": int(self.retrieval_snippet_char_cap_spin.value()),
             "retrieval_snippet_segment_limit": int(self.retrieval_snippet_segments_spin.value()),
+            "prompt_overrides": [dict(item) for item in self._prompt_profiles],
         }
         normalized = normalize_ai_settings(raw)
         return {str(k): normalized[k] for k in normalized}
@@ -279,6 +379,201 @@ class AIAssistSettingsPage(QWidget):
         self.retrieval_total_candidates_spin.setValue(int(normalized["retrieval_total_candidate_limit"]))
         self.retrieval_snippet_char_cap_spin.setValue(int(normalized["retrieval_snippet_char_cap"]))
         self.retrieval_snippet_segments_spin.setValue(int(normalized["retrieval_snippet_segment_limit"]))
+        self._set_prompt_profiles(normalized["prompt_overrides"])
+
+    def _set_prompt_profiles(self, profiles: Any) -> None:
+        self._prompt_profiles = [dict(item) for item in profiles if isinstance(item, dict)]
+        self._rebuild_prompt_profile_list()
+        if self._prompt_profiles:
+            self.profile_list.setCurrentRow(0)
+        else:
+            self._load_prompt_profile_into_form(None)
+
+    def _empty_prompt_profile(self) -> dict[str, Any]:
+        idx = len(self._prompt_profiles) + 1
+        return {
+            "id": "",
+            "enabled": True,
+            "name": f"Profile {idx}",
+            "target_kind": "extension",
+            "target_value": ".txt",
+            "mode": "append",
+            "priority": 0,
+            "prompt": "",
+        }
+
+    def _profile_list_label(self, profile: dict[str, Any]) -> str:
+        enabled = bool(profile.get("enabled", True))
+        mark = "[x]" if enabled else "[ ]"
+        name = str(profile.get("name") or "Profile").strip() or "Profile"
+        kind = str(profile.get("target_kind") or "extension").strip()
+        value = str(profile.get("target_value") or "").strip()
+        mode = str(profile.get("mode") or "append").strip()
+        if value:
+            return f"{mark} {name} ({kind}:{value}, {mode})"
+        return f"{mark} {name} ({kind}, {mode})"
+
+    def _rebuild_prompt_profile_list(self) -> None:
+        self._profile_sync_guard = True
+        try:
+            current = self.profile_list.currentRow()
+            self.profile_list.clear()
+            for profile in self._prompt_profiles:
+                self.profile_list.addItem(self._profile_list_label(profile))
+            if self._prompt_profiles:
+                self.profile_list.setCurrentRow(min(max(current, 0), len(self._prompt_profiles) - 1))
+            self.profile_remove_btn.setEnabled(bool(self._prompt_profiles))
+            self.profile_duplicate_btn.setEnabled(bool(self._prompt_profiles))
+        finally:
+            self._profile_sync_guard = False
+        self._refresh_prompt_profile_preview()
+
+    def _selected_prompt_profile_index(self) -> int:
+        idx = int(self.profile_list.currentRow())
+        if idx < 0 or idx >= len(self._prompt_profiles):
+            return -1
+        return idx
+
+    def _on_prompt_profile_selection_changed(self, _index: int) -> None:
+        idx = self._selected_prompt_profile_index()
+        profile = self._prompt_profiles[idx] if idx >= 0 else None
+        self._load_prompt_profile_into_form(profile)
+
+    def _load_prompt_profile_into_form(self, profile: dict[str, Any] | None) -> None:
+        self._profile_sync_guard = True
+        try:
+            enabled = profile is not None
+            self.profile_enabled_chk.setEnabled(enabled)
+            self.profile_name_edit.setEnabled(enabled)
+            self.profile_target_kind_combo.setEnabled(enabled)
+            self.profile_target_value_edit.setEnabled(enabled)
+            self.profile_mode_combo.setEnabled(enabled)
+            self.profile_priority_spin.setEnabled(enabled)
+            self.profile_prompt_edit.setEnabled(enabled)
+            if profile is None:
+                self.profile_enabled_chk.setChecked(False)
+                self.profile_name_edit.setText("")
+                self.profile_target_kind_combo.setCurrentIndex(0)
+                self.profile_target_value_edit.setText("")
+                self.profile_mode_combo.setCurrentIndex(0)
+                self.profile_priority_spin.setValue(0)
+                self.profile_prompt_edit.setPlainText("")
+                self.profile_target_value_edit.setPlaceholderText(".txt")
+            else:
+                self.profile_enabled_chk.setChecked(bool(profile.get("enabled", True)))
+                self.profile_name_edit.setText(str(profile.get("name") or ""))
+                kind = str(profile.get("target_kind") or "extension")
+                idx = self.profile_target_kind_combo.findData(kind)
+                self.profile_target_kind_combo.setCurrentIndex(max(0, idx))
+                self.profile_target_value_edit.setText(str(profile.get("target_value") or ""))
+                mode = str(profile.get("mode") or "append")
+                mode_idx = self.profile_mode_combo.findData(mode)
+                self.profile_mode_combo.setCurrentIndex(max(0, mode_idx))
+                self.profile_priority_spin.setValue(int(profile.get("priority") or 0))
+                self.profile_prompt_edit.setPlainText(str(profile.get("prompt") or ""))
+                self._update_prompt_target_placeholder(kind)
+        finally:
+            self._profile_sync_guard = False
+        self._refresh_prompt_profile_preview()
+
+    def _add_prompt_profile(self) -> None:
+        self._prompt_profiles.append(self._empty_prompt_profile())
+        self._rebuild_prompt_profile_list()
+        self.profile_list.setCurrentRow(len(self._prompt_profiles) - 1)
+        self._notify_pending_changed()
+
+    def _remove_selected_prompt_profile(self) -> None:
+        idx = self._selected_prompt_profile_index()
+        if idx < 0:
+            return
+        self._prompt_profiles.pop(idx)
+        self._rebuild_prompt_profile_list()
+        self._notify_pending_changed()
+
+    def _duplicate_selected_prompt_profile(self) -> None:
+        idx = self._selected_prompt_profile_index()
+        if idx < 0:
+            return
+        clone = dict(self._prompt_profiles[idx])
+        clone["name"] = f"{str(clone.get('name') or 'Profile').strip()} Copy"
+        clone["id"] = ""
+        self._prompt_profiles.insert(idx + 1, clone)
+        self._rebuild_prompt_profile_list()
+        self.profile_list.setCurrentRow(idx + 1)
+        self._notify_pending_changed()
+
+    def _on_prompt_profile_kind_changed(self) -> None:
+        if self._profile_sync_guard:
+            return
+        kind = str(self.profile_target_kind_combo.currentData() or "extension")
+        self._update_prompt_target_placeholder(kind)
+        self._on_prompt_profile_fields_changed()
+
+    def _update_prompt_target_placeholder(self, kind: str) -> None:
+        k = str(kind or "extension").strip().lower()
+        if k == "language":
+            self.profile_target_value_edit.setPlaceholderText("python, cpp, markdown, text")
+            return
+        if k == "glob":
+            self.profile_target_value_edit.setPlaceholderText("docs/**/*.md")
+            return
+        self.profile_target_value_edit.setPlaceholderText(".txt")
+
+    def _on_prompt_profile_fields_changed(self) -> None:
+        if self._profile_sync_guard:
+            return
+        idx = self._selected_prompt_profile_index()
+        if idx < 0:
+            return
+        profile = self._prompt_profiles[idx]
+        profile["enabled"] = bool(self.profile_enabled_chk.isChecked())
+        name = str(self.profile_name_edit.text() or "").strip() or f"Profile {idx + 1}"
+        profile["name"] = name
+        profile["target_kind"] = str(self.profile_target_kind_combo.currentData() or "extension").strip()
+        target_value = str(self.profile_target_value_edit.text() or "").strip()
+        profile["target_value"] = target_value
+        profile["mode"] = str(self.profile_mode_combo.currentData() or "append").strip()
+        profile["priority"] = int(self.profile_priority_spin.value())
+        profile["prompt"] = str(self.profile_prompt_edit.toPlainText() or "")
+        item = self.profile_list.item(idx)
+        if item is not None:
+            item.setText(self._profile_list_label(profile))
+        self._refresh_prompt_profile_preview()
+        self._notify_pending_changed()
+
+    def _refresh_prompt_profile_preview(self) -> None:
+        path = str(self.profile_preview_path_edit.text() or "").strip().replace("\\", "/")
+        if not path:
+            self.profile_preview_label.setText("Enter a preview file path to see profile matching.")
+            self.profile_effective_prompt_edit.setPlainText(DEFAULT_INLINE_SYSTEM_PROMPT)
+            return
+        language = infer_language_for_path(path)
+        resolved_prompt, meta = resolve_system_prompt(
+            DEFAULT_INLINE_SYSTEM_PROMPT,
+            self._prompt_profiles,
+            file_path=path,
+            language=language,
+            project_root="",
+        )
+        self.profile_effective_prompt_edit.setPlainText(resolved_prompt)
+
+        if not meta:
+            self.profile_preview_label.setText(f"No enabled prompt profile matches this file. (language: {language})")
+            return
+
+        matched = list(meta.get("applied") or [])
+        replace_name = str(meta.get("replace_profile") or "").strip()
+        append_names = list(meta.get("append_profiles") or [])
+
+        summary_parts: list[str] = []
+        if matched:
+            summary_parts.append("Matches: " + ", ".join(str(name) for name in matched))
+        if replace_name:
+            summary_parts.append(f"Replace: {replace_name}")
+        if append_names:
+            summary_parts.append("Append: " + ", ".join(str(name) for name in append_names))
+        summary_parts.append(f"Language: {language}")
+        self.profile_preview_label.setText(" | ".join(summary_parts))
 
     def has_pending_settings_changes(self) -> bool:
         return self._current_settings_value() != self._base_settings

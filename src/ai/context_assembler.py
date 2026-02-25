@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.ai.prompt_overrides import DEFAULT_INLINE_SYSTEM_PROMPT, infer_language_for_path
+
 
 @dataclass(slots=True)
 class AssembledContext:
@@ -138,11 +140,7 @@ class ContextAssembler:
             },
         }
         return AssembledContext(
-            system_prompt=(
-                "You are an inline coding assistant. "
-                "Generate only the minimal continuation text that should appear at the cursor. "
-                "Never include explanations."
-            ),
+            system_prompt=DEFAULT_INLINE_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             token_estimate=token_estimate,
             metadata=metadata,
@@ -454,44 +452,7 @@ class ContextAssembler:
             return str(path or "")
 
     def _language_for_path(self, file_path: str) -> str:
-        suffix = Path(str(file_path or "")).suffix.lower()
-        mapping = {
-            ".py": "python",
-            ".pyw": "python",
-            ".pyi": "python",
-            ".js": "javascript",
-            ".mjs": "javascript",
-            ".cjs": "javascript",
-            ".jsx": "javascript",
-            ".ts": "typescript",
-            ".tsx": "typescript",
-            ".json": "json",
-            ".html": "html",
-            ".htm": "html",
-            ".css": "css",
-            ".scss": "scss",
-            ".less": "less",
-            ".sh": "bash",
-            ".zsh": "bash",
-            ".ksh": "bash",
-            ".bash": "bash",
-            ".php": "php",
-            ".c": "c",
-            ".h": "c",
-            ".cpp": "cpp",
-            ".hpp": "cpp",
-            ".cc": "cpp",
-            ".cxx": "cpp",
-            ".rs": "rust",
-            ".md": "markdown",
-            ".xml": "xml",
-            ".yaml": "yaml",
-            ".yml": "yaml",
-            ".toml": "toml",
-            ".ini": "ini",
-            ".qss": "css",
-        }
-        return mapping.get(suffix, "text")
+        return infer_language_for_path(file_path)
 
     def _fence_lang(self, language: str) -> str:
         return language if str(language or "").strip() else "text"

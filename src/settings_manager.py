@@ -59,6 +59,26 @@ def _normalize_query_driver_text(value: object) -> str:
         cleaned.append(part)
     return ",".join(cleaned)
 
+
+def _normalize_word_wrap_file_type_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("."):
+        if "/" in text or "\\" in text:
+            return ""
+        if len(text) < 2 or text == ".":
+            return ""
+        return text
+    if text.startswith("lang:"):
+        lang = text[5:].strip()
+        if not lang:
+            return ""
+        if not re.match(r"^[a-z0-9_+\-]+$", lang):
+            return ""
+        return f"lang:{lang}"
+    return ""
+
 IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
@@ -1053,6 +1073,17 @@ class SettingsManager:
             )
         except Exception:
             editor_cfg["background_tint_strength"] = 0
+        raw_wrap_types = editor_cfg.get("word_wrap_enabled_file_types")
+        clean_wrap_types: list[str] = []
+        seen_wrap_types: set[str] = set()
+        if isinstance(raw_wrap_types, list):
+            for item in raw_wrap_types:
+                key = _normalize_word_wrap_file_type_key(item)
+                if not key or key in seen_wrap_types:
+                    continue
+                seen_wrap_types.add(key)
+                clean_wrap_types.append(key)
+        editor_cfg["word_wrap_enabled_file_types"] = clean_wrap_types
         data["editor"] = editor_cfg
 
         file_dialog_cfg = data.get("file_dialog")

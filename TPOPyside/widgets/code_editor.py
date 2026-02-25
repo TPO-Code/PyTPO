@@ -689,6 +689,7 @@ class CodeEditor(QPlainTextEdit):
     extractVariableRequested = Signal(object)
     extractMethodRequested = Signal(object)
     contextMenuAboutToShow = Signal(object, object)  # menu, payload
+    wordWrapPreferenceChanged = Signal(object)  # {enabled, file_path, language_id}
     editorFontSizeStepRequested = Signal(int)  # +1 / -1
     _tooltip_style_installed = False
     _default_keybindings: dict[str, dict[str, list[str]]] = {
@@ -1050,6 +1051,17 @@ class CodeEditor(QPlainTextEdit):
         self._file_path = str(file_path) if file_path else None
         self._apply_highlighter()
         self._apply_fold_provider()
+
+    def is_word_wrap_enabled(self) -> bool:
+        return self.lineWrapMode() != QPlainTextEdit.LineWrapMode.NoWrap
+
+    def set_word_wrap_enabled(self, enabled: bool) -> None:
+        mode = (
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+            if bool(enabled)
+            else QPlainTextEdit.LineWrapMode.NoWrap
+        )
+        self.setLineWrapMode(mode)
 
     def language_id(self) -> str:
         return get_language_id(self._file_path, fallback="plaintext")
@@ -3974,6 +3986,13 @@ class CodeEditor(QPlainTextEdit):
         act_replace.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.replace")))
         menu.addAction(act_replace)
 
+        menu.addSeparator()
+
+        act_word_wrap = QAction("Word Wrap", menu)
+        act_word_wrap.setCheckable(True)
+        act_word_wrap.setChecked(self.is_word_wrap_enabled())
+        menu.addAction(act_word_wrap)
+
         payload = {
             "line": int(cursor.blockNumber() + 1),
             "column": int(cursor.positionInBlock() + 1),
@@ -4010,6 +4029,17 @@ class CodeEditor(QPlainTextEdit):
             return
         if chosen is act_replace:
             self.show_replace_bar()
+            return
+        if chosen is act_word_wrap:
+            enabled = bool(act_word_wrap.isChecked())
+            self.set_word_wrap_enabled(enabled)
+            self.wordWrapPreferenceChanged.emit(
+                {
+                    "enabled": enabled,
+                    "file_path": str(getattr(self, "file_path", "") or ""),
+                    "language_id": str(self.language_id() or "plaintext"),
+                }
+            )
             return
         return
 

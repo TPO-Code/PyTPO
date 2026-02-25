@@ -109,6 +109,11 @@ class DiagnosticsController:
         ed.contextMenuAboutToShow.connect(
             lambda menu, payload, e=ed_ref: self._on_editor_context_menu_about_to_show(e, menu, payload)
         )
+        wrap_pref_signal = getattr(ed, "wordWrapPreferenceChanged", None)
+        if wrap_pref_signal is not None and hasattr(wrap_pref_signal, "connect"):
+            wrap_pref_signal.connect(
+                lambda payload, e=ed_ref: self.ide._on_editor_word_wrap_preference_changed(e, payload)
+            )
 
         def _on_editor_destroyed(*_args):
             self.ide._lint_hooked_editors.discard(editor_id)

@@ -34,6 +34,7 @@ class AIAssistSettings(TypedDict, total=False):
     retrieval_total_candidate_limit: int
     retrieval_snippet_char_cap: int
     retrieval_snippet_segment_limit: int
+    prompt_overrides: list[dict[str, Any]]
 
 
 def default_ai_settings() -> AIAssistSettings:
@@ -60,7 +61,52 @@ def default_ai_settings() -> AIAssistSettings:
         "retrieval_total_candidate_limit": 180,
         "retrieval_snippet_char_cap": 420,
         "retrieval_snippet_segment_limit": 80,
+        "prompt_overrides": [],
     }
+
+
+def _normalize_prompt_overrides(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    def _clamp_priority(raw: Any) -> int:
+        try:
+            return max(-100, min(100, int(raw)))
+        except Exception:
+            return 0
+
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        target_kind = str(item.get("target_kind") or "extension").strip().lower()
+        if target_kind not in {"language", "extension", "glob"}:
+            target_kind = "extension"
+        target_value = str(item.get("target_value") or "").strip()
+        if target_kind == "extension" and target_value and not target_value.startswith("."):
+            if "*" not in target_value and "/" not in target_value and "\\" not in target_value:
+                target_value = f".{target_value}"
+        mode = str(item.get("mode") or "append").strip().lower()
+        if mode not in {"append", "replace"}:
+            mode = "append"
+        name = str(item.get("name") or "").strip()
+        if not name:
+            name = f"Profile {index + 1}"
+        out.append(
+            {
+                "id": str(item.get("id") or "").strip(),
+                "enabled": bool(item.get("enabled", True)),
+                "name": name,
+                "target_kind": target_kind,
+                "target_value": target_value,
+                "mode": mode,
+                "priority": _clamp_priority(item.get("priority")),
+                "prompt": str(item.get("prompt") or ""),
+            }
+        )
+        if len(out) >= 128:
+            break
+    return out
 
 
 def normalize_ai_settings(raw: Any) -> AIAssistSettings:
@@ -103,6 +149,7 @@ def normalize_ai_settings(raw: Any) -> AIAssistSettings:
         "retrieval_total_candidate_limit": _clamp_int(data.get("retrieval_total_candidate_limit"), 0, 4000, int(defaults["retrieval_total_candidate_limit"])),
         "retrieval_snippet_char_cap": _clamp_int(data.get("retrieval_snippet_char_cap"), 80, 8000, int(defaults["retrieval_snippet_char_cap"])),
         "retrieval_snippet_segment_limit": _clamp_int(data.get("retrieval_snippet_segment_limit"), 1, 400, int(defaults["retrieval_snippet_segment_limit"])),
+        "prompt_overrides": _normalize_prompt_overrides(data.get("prompt_overrides")),
     }
 
 
@@ -130,6 +177,7 @@ class NormalizedAIAssistConfig:
     retrieval_total_candidate_limit: int
     retrieval_snippet_char_cap: int
     retrieval_snippet_segment_limit: int
+    prompt_overrides: list[dict[str, Any]]
 
     @classmethod
     def from_mapping(cls, data: Any) -> "NormalizedAIAssistConfig":
@@ -157,4 +205,5 @@ class NormalizedAIAssistConfig:
             retrieval_total_candidate_limit=int(n["retrieval_total_candidate_limit"]),
             retrieval_snippet_char_cap=int(n["retrieval_snippet_char_cap"]),
             retrieval_snippet_segment_limit=int(n["retrieval_snippet_segment_limit"]),
+            prompt_overrides=[dict(item) for item in n["prompt_overrides"]],
         )

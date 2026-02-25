@@ -9,6 +9,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from src.ai.context_assembler import ContextAssembler
+from src.ai.prompt_overrides import resolve_system_prompt
 from src.ai.provider_base import AIProviderClient, InlineCompletionRequest
 from src.ai.settings_schema import NormalizedAIAssistConfig, default_ai_settings
 
@@ -339,6 +340,16 @@ class InlineSuggestionController(QObject):
             retrieval_snippet_segment_limit=cfg.retrieval_snippet_segment_limit,
             recent_files=item.recent_files,
         )
+        system_prompt, prompt_meta = resolve_system_prompt(
+            assembled.system_prompt,
+            cfg.prompt_overrides,
+            file_path=item.file_path,
+            language=str(assembled.metadata.get("language") or ""),
+            project_root=str(getattr(self._assembler, "project_root", "") or ""),
+        )
+        metadata = dict(assembled.metadata)
+        if prompt_meta:
+            metadata["prompt_overrides"] = prompt_meta
 
         request = InlineCompletionRequest(
             base_url=cfg.base_url,
@@ -346,7 +357,7 @@ class InlineSuggestionController(QObject):
             org_id="",
             project_id="",
             model=cfg.model,
-            system_prompt=assembled.system_prompt,
+            system_prompt=system_prompt,
             user_prompt=assembled.user_prompt,
             max_output_tokens=cfg.max_output_tokens,
             timeout_s=max(0.5, float(cfg.inline_timeout_ms) / 1000.0),
@@ -360,7 +371,7 @@ class InlineSuggestionController(QObject):
                 "text": "",
                 "ok": False,
                 "status_text": str(result.status_text or "AI request failed."),
-                "metadata": dict(assembled.metadata),
+                "metadata": metadata,
             }
 
         text = self._sanitize_completion(str(result.text or ""), prefix=item.prefix)
@@ -371,7 +382,7 @@ class InlineSuggestionController(QObject):
             "text": text,
             "ok": True,
             "status_text": str(result.status_text or ""),
-            "metadata": dict(assembled.metadata),
+            "metadata": metadata,
         }
 
     def _sanitize_completion(self, text: str, *, prefix: str) -> str:

@@ -234,6 +234,7 @@ class IdeEditorSettings(TypedDict, total=False):
     background_image_brightness: int
     background_tint_color: str
     background_tint_strength: int
+    word_wrap_enabled_file_types: list[str]
 
 
 class IdeFileDialogSettings(TypedDict, total=False):
@@ -414,6 +415,7 @@ def default_ide_settings() -> IdeSettings:
             "background_image_brightness": 100,
             "background_tint_color": "#000000",
             "background_tint_strength": 0,
+            "word_wrap_enabled_file_types": [],
         },
         "file_dialog": {
             "background_image_path": "",

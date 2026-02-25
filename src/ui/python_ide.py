@@ -445,6 +445,7 @@ class PythonIDE(Window):
         )
         self._diagnostics_by_file: dict[str, list[dict]] = {}
         self._lint_hooked_editors: set[str] = set()
+        self._word_wrap_enabled_file_types: set[str] = set()
         self._completion_next_token = 0
         self._completion_latest_by_editor: dict[str, int] = {}
         self._completion_request_meta: dict[int, dict] = {}
@@ -564,6 +565,8 @@ class PythonIDE(Window):
         self._project_fs_watch_sync_timer.setSingleShot(True)
         self._project_fs_watch_sync_timer.setInterval(280)
         self._project_fs_watch_sync_timer.timeout.connect(self._sync_project_fs_watches)
+
+        self._word_wrap_enabled_file_types = self._load_word_wrap_enabled_file_types()
 
         self.project_context = ProjectContext(
             project_root=self.project_root,
@@ -2047,6 +2050,106 @@ class PythonIDE(Window):
         cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
         return cfg if isinstance(cfg, dict) else {}
 
+    @staticmethod
+    def _normalize_word_wrap_file_type_key(value: object) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if text.startswith("."):
+            if "/" in text or "\\" in text or text == "." or len(text) < 2:
+                return ""
+            return text
+        if text.startswith("lang:"):
+            lang = text[5:].strip()
+            if not lang:
+                return ""
+            if not re.match(r"^[a-z0-9_+\-]+$", lang):
+                return ""
+            return f"lang:{lang}"
+        return ""
+
+    def _load_word_wrap_enabled_file_types(self) -> set[str]:
+        raw = self.settings_manager.get(
+            "editor.word_wrap_enabled_file_types",
+            scope_preference="ide",
+            default=[],
+        )
+        out: set[str] = set()
+        if not isinstance(raw, list):
+            return out
+        for item in raw:
+            key = self._normalize_word_wrap_file_type_key(item)
+            if key:
+                out.add(key)
+        return out
+
+    def _save_word_wrap_enabled_file_types(self) -> None:
+        ordered = sorted(self._word_wrap_enabled_file_types)
+        self.settings_manager.set("editor.word_wrap_enabled_file_types", ordered, "ide")
+        try:
+            self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+        except Exception:
+            pass
+
+    def _word_wrap_file_type_key(self, *, file_path: str | None, language_id: str | None) -> str:
+        path_text = str(file_path or "").strip()
+        if path_text:
+            suffix = Path(path_text).suffix.lower()
+            if suffix:
+                return suffix
+        lang = str(language_id or "").strip().lower() or "plaintext"
+        return f"lang:{lang}"
+
+    def _word_wrap_enabled_for_editor(self, ed: EditorWidget) -> bool:
+        key = self._word_wrap_file_type_key(
+            file_path=getattr(ed, "file_path", None),
+            language_id=ed.language_id() if hasattr(ed, "language_id") else "plaintext",
+        )
+        return key in self._word_wrap_enabled_file_types
+
+    def _apply_word_wrap_to_editor(self, ed: EditorWidget) -> None:
+        if not isinstance(ed, EditorWidget):
+            return
+        enabled = self._word_wrap_enabled_for_editor(ed)
+        setter = getattr(ed, "set_word_wrap_enabled", None)
+        if not callable(setter):
+            return
+        try:
+            setter(enabled)
+        except Exception:
+            pass
+
+    def _apply_word_wrap_to_matching_editors(self, *, type_key: str, enabled: bool) -> None:
+        for candidate in self.editor_workspace.all_editors():
+            if not isinstance(candidate, EditorWidget):
+                continue
+            candidate_key = self._word_wrap_file_type_key(
+                file_path=getattr(candidate, "file_path", None),
+                language_id=candidate.language_id() if hasattr(candidate, "language_id") else "plaintext",
+            )
+            if candidate_key != type_key:
+                continue
+            setter = getattr(candidate, "set_word_wrap_enabled", None)
+            if callable(setter):
+                try:
+                    setter(enabled)
+                except Exception:
+                    pass
+
+    def _set_word_wrap_enabled_for_type_key(self, type_key: str, enabled: bool) -> bool:
+        key = self._normalize_word_wrap_file_type_key(type_key)
+        if not key:
+            return False
+        before = set(self._word_wrap_enabled_file_types)
+        if enabled:
+            self._word_wrap_enabled_file_types.add(key)
+        else:
+            self._word_wrap_enabled_file_types.discard(key)
+        if before == self._word_wrap_enabled_file_types:
+            return False
+        self._save_word_wrap_enabled_file_types()
+        return True
+
     def _apply_editor_background_to_editor(self, ed: EditorWidget) -> None:
         if not isinstance(ed, EditorWidget):
             return
@@ -2068,6 +2171,7 @@ class PythonIDE(Window):
 
     def _attach_editor_lint_hooks(self, ed: EditorWidget):
         self.diagnostics_controller._attach_editor_lint_hooks(ed)
+        self._apply_word_wrap_to_editor(ed)
         self._attach_editor_cpp_hooks(ed)
         self._attach_editor_rust_hooks(ed)
 
@@ -2111,6 +2215,24 @@ class PythonIDE(Window):
 
     def _on_editor_context_menu_about_to_show(self, ed_ref, menu_obj: object, payload_obj: object):
         self.diagnostics_controller._on_editor_context_menu_about_to_show(ed_ref, menu_obj, payload_obj)
+
+    def _on_editor_word_wrap_preference_changed(self, ed_ref, payload_obj: object) -> None:
+        ed = ed_ref() if callable(ed_ref) else ed_ref
+        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+            return
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+        enabled = bool(payload.get("enabled", False))
+        file_path = str(payload.get("file_path") or getattr(ed, "file_path", "") or "")
+        language_id = str(payload.get("language_id") or ed.language_id() or "plaintext").strip().lower()
+        type_key = self._word_wrap_file_type_key(file_path=file_path, language_id=language_id)
+        changed = self._set_word_wrap_enabled_for_type_key(type_key, enabled)
+        self._apply_word_wrap_to_matching_editors(type_key=type_key, enabled=enabled)
+        if changed:
+            human = type_key
+            if type_key.startswith("lang:"):
+                human = type_key.split(":", 1)[1]
+            mode = "ON" if enabled else "OFF"
+            self.statusBar().showMessage(f"Word wrap {mode} for file type {human}", 2200)
 
     def _append_import_fix_actions_to_menu(self, parent_menu: QMenu, ed_ref, symbol: str, candidates: list[dict]) -> None:
         self.diagnostics_controller._append_import_fix_actions_to_menu(parent_menu, ed_ref, symbol, candidates)
