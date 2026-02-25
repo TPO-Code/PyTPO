@@ -31,6 +31,34 @@ IDE_COMPLETION_KEYS: set[str] = {
     "doc_tooltip_delay_ms",
 }
 
+
+def _normalize_query_driver_text(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower() in {"off", "none", "disabled"}:
+        return raw.lower()
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[\s,]+", raw):
+        part = str(token or "").strip()
+        if not part:
+            continue
+        if part.lower().startswith("--query-driver="):
+            part = part.split("=", 1)[1].strip()
+            if not part:
+                continue
+        if part.startswith("="):
+            part = part[1:].strip()
+            if not part:
+                continue
+        dedupe = part.lower()
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        cleaned.append(part)
+    return ",".join(cleaned)
+
 IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
@@ -697,7 +725,7 @@ class SettingsManager:
         cpp_cfg = deep_merge_defaults(cpp_cfg, project_defaults["c_cpp"])
         cpp_cfg["enable_cpp"] = bool(cpp_cfg.get("enable_cpp", True))
         cpp_cfg["clangd_path"] = str(cpp_cfg.get("clangd_path") or "clangd").strip() or "clangd"
-        cpp_cfg["query_driver"] = str(cpp_cfg.get("query_driver") or "").strip()
+        cpp_cfg["query_driver"] = _normalize_query_driver_text(cpp_cfg.get("query_driver"))
         mode = str(cpp_cfg.get("compile_commands_mode") or "auto").strip().lower()
         if mode not in {"auto", "manual"}:
             mode = "auto"

@@ -430,24 +430,56 @@ class PhpHighlighter(QSyntaxHighlighter):
 class CppHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
-        kw = QTextCharFormat(); kw.setForeground(QColor("#569Cff")); kw.setFontWeight(QFont.Bold)
-        self.rules = [(re.compile(r"\\b" + w + r"\\b"), kw) for w in (
-            "auto","break","case","char","const","continue","default","do","double","else","enum",
-            "extern","float","for","goto","if","int","long","register","return","short","signed",
-            "sizeof","static","struct","switch","typedef","union","unsigned","void","volatile",
-            "while","class","private","protected","public","new","delete","this","try","catch","throw",
-            "namespace","using","template","typename","true","false","nullptr"
-        )]
-        pre = QTextCharFormat(); pre.setForeground(QColor("#C586C0"))
-        self.rules.append((re.compile(r"^\\s*#.*"), pre))
-        strf = QTextCharFormat(); strf.setForeground(QColor("#CE9178"))
+        kw = QTextCharFormat()
+        kw.setForeground(QColor("#569Cff"))
+        kw.setFontWeight(QFont.Bold)
+        keywords = (
+            "alignas", "alignof", "asm", "auto", "bool", "break", "case", "catch", "char",
+            "char8_t", "char16_t", "char32_t", "class", "concept", "const", "consteval",
+            "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return",
+            "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast",
+            "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend",
+            "goto", "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept",
+            "nullptr", "operator", "private", "protected", "public", "register", "reinterpret_cast",
+            "requires", "return", "short", "signed", "sizeof", "static", "static_assert",
+            "static_cast", "struct", "switch", "template", "this", "thread_local", "throw",
+            "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+            "virtual", "void", "volatile", "wchar_t", "while",
+        )
+        self.rules = [(re.compile(rf"\b{re.escape(w)}\b"), kw) for w in keywords]
+
+        pre = QTextCharFormat()
+        pre.setForeground(QColor("#C586C0"))
+        self.rules.append((re.compile(r"^\s*#.*"), pre))
+
+        strf = QTextCharFormat()
+        strf.setForeground(QColor("#CE9178"))
         self.rules += [
-            (re.compile(r'"[^"\\\\]*(\\\\.[^"\\\\]*)*"'), strf),
-            (re.compile(r"'[^'\\\\]*(\\\\.[^'\\\\]*)*'"), strf),
+            (re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), strf),
+            (re.compile(r"'[^'\\]*(\\.[^'\\]*)*'"), strf),
         ]
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955"))
+
+        num = QTextCharFormat()
+        num.setForeground(QColor("#B5CEA8"))
+        self.rules.append(
+            (
+                re.compile(
+                    r"\b(?:"
+                    r"0b[01](?:'?[01])*"
+                    r"|0x[0-9a-fA-F](?:'?[0-9a-fA-F])*"
+                    r"|0[0-7](?:'?[0-7])*"
+                    r"|\d(?:'?\d)*(?:\.\d(?:'?\d)*)?(?:[eE][+-]?\d(?:'?\d)*)?"
+                    r")(?:u|U|l|L|ll|LL|f|F)?\b"
+                ),
+                num,
+            )
+        )
+
+        com = QTextCharFormat()
+        com.setForeground(QColor("#6A9955"))
         self.rules += [
-            (re.compile(r"//[^\n]*"), com), (re.compile(r"/\\*.*?\\*/"), com)
+            (re.compile(r"//[^\n]*"), com),
+            (re.compile(r"/\*.*?\*/"), com),
         ]
     def highlightBlock(self, text):
         for pat, fmt in self.rules:

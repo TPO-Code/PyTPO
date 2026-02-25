@@ -239,6 +239,86 @@ def rust_fold_ranges(source_text: str) -> list[tuple[int, int]]:
     return _normalize_fold_ranges(ranges, len(lines))
 
 
+def cpp_fold_ranges(source_text: str) -> list[tuple[int, int]]:
+    lines = str(source_text or "").splitlines()
+    ranges: list[tuple[int, int]] = []
+    stack: list[int] = []
+    in_block_comment = False
+
+    for line_no, raw in enumerate(lines, start=1):
+        cleaned, in_block_comment = _strip_cpp_line_for_braces(raw, in_block_comment)
+        for ch in cleaned:
+            if ch == "{":
+                stack.append(line_no)
+                continue
+            if ch != "}":
+                continue
+            if not stack:
+                continue
+            start = stack.pop()
+            if line_no > start:
+                ranges.append((start, line_no))
+    return _normalize_fold_ranges(ranges, len(lines))
+
+
+def _strip_cpp_line_for_braces(line: str, in_block_comment: bool) -> tuple[str, bool]:
+    src = str(line or "")
+    if not src:
+        return "", in_block_comment
+
+    out: list[str] = []
+    i = 0
+    n = len(src)
+    block = bool(in_block_comment)
+    in_string = False
+    quote = ""
+    escaped = False
+
+    while i < n:
+        ch = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+
+        if block:
+            if ch == "*" and nxt == "/":
+                block = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                escaped = True
+                i += 1
+                continue
+            if ch == quote:
+                in_string = False
+                quote = ""
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            break
+        if ch == "/" and nxt == "*":
+            block = True
+            i += 2
+            continue
+        if ch in {'"', "'"}:
+            in_string = True
+            quote = ch
+            escaped = False
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out), block
+
+
 def _strip_rust_line_for_braces(line: str, in_block_comment: bool) -> tuple[str, bool]:
     src = str(line or "")
     if not src:
@@ -363,6 +443,8 @@ def todo_fold_ranges(source_text: str) -> list[tuple[int, int]]:
 
 
 LANGUAGE_FOLD_PROVIDERS: dict[str, FoldProvider] = {
+    "c": cpp_fold_ranges,
+    "cpp": cpp_fold_ranges,
     "python": python_fold_ranges,
     "json": json_fold_ranges,
     "jsonc": json_fold_ranges,
@@ -427,6 +509,7 @@ __all__ = [
     "get_fold_provider",
     "compute_folding_regions",
     "update_folding",
+    "cpp_fold_ranges",
     "python_fold_ranges",
     "json_fold_ranges",
     "rust_fold_ranges",

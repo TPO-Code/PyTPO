@@ -9,6 +9,7 @@ from PySide6.QtCore import QMimeData, QPoint, QUrl
 from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox
 
 from src.ui.dialogs.interpreter_picker_dialog import InterpreterPickerDialog
+from src.ui.dialogs.paste_conflict_dialog import confirm_multi_paste_overwrite, prompt_single_paste_conflict
 
 
 class ExplorerController:
@@ -22,6 +23,28 @@ class ExplorerController:
     def _show_tree_error(self, title: str, message: str):
         QMessageBox.warning(self.ide, title, message)
         self.ide.statusBar().showMessage(message.replace("\n", " "), 3000)
+
+    def _apply_context_shortcut(self, action: object, source_attr: str) -> None:
+        src = getattr(self.ide, source_attr, None)
+        if action is None or src is None:
+            return
+        try:
+            seq = src.shortcut()
+        except Exception:
+            return
+        try:
+            if seq is None or seq.isEmpty():
+                return
+        except Exception:
+            return
+        try:
+            action.setShortcut(seq)
+        except Exception:
+            pass
+        try:
+            action.setShortcutVisibleInContextMenu(True)
+        except Exception:
+            pass
 
     def _show_project_tree_context_menu(self, path_obj: object, global_pos: QPoint):
         path = self._canonical_path(path_obj) if isinstance(path_obj, str) else None
@@ -51,6 +74,9 @@ class ExplorerController:
 
     def _copy_tree_selection(self):
         self._copy_tree_paths(None)
+
+    def _cut_tree_selection(self):
+        self._cut_tree_paths(None)
 
     def _paste_tree_into_selection(self):
         selected = self.tree.selected_path()
@@ -105,9 +131,15 @@ class ExplorerController:
 
         act_copy = menu.addAction(f"Copy ({len(targets)})")
         act_copy.triggered.connect(lambda: self._copy_tree_paths(targets[0]))
+        self._apply_context_shortcut(act_copy, "_act_tree_copy")
+
+        act_cut = menu.addAction(f"Cut ({len(targets)})")
+        act_cut.triggered.connect(lambda: self._cut_tree_paths(targets[0]))
+        self._apply_context_shortcut(act_cut, "_act_tree_cut")
 
         act_delete = menu.addAction(f"Delete Selected ({len(targets)})...")
         act_delete.triggered.connect(lambda: self._delete_paths(targets))
+        self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         if file_paths:
             menu.addSeparator()
@@ -150,15 +182,44 @@ class ExplorerController:
             return
 
         self.ide._tree_clipboard_paths = chosen
+        self.ide._tree_clipboard_mode = "copy"
         self._set_system_clipboard_paths(chosen)
         if len(chosen) == 1:
             self.ide.statusBar().showMessage(f"Copied {os.path.basename(chosen[0])}", 1500)
         else:
             self.ide.statusBar().showMessage(f"Copied {len(chosen)} items", 1500)
 
+    def _cut_tree_paths(self, path: str | None):
+        selected = self._selected_tree_paths()
+        chosen: list[str]
+        if path:
+            cpath = self._canonical_path(path)
+            if cpath in selected:
+                chosen = selected
+            else:
+                chosen = [cpath] if cpath != self.project_root and os.path.exists(cpath) else []
+        else:
+            chosen = selected
+
+        chosen = self._filter_nested_paths(chosen)
+        if not chosen:
+            self.ide.statusBar().showMessage("Nothing to cut.", 1500)
+            return
+
+        self.ide._tree_clipboard_paths = chosen
+        self.ide._tree_clipboard_mode = "cut"
+        self._set_system_clipboard_paths(chosen)
+        if len(chosen) == 1:
+            self.ide.statusBar().showMessage(f"Cut {os.path.basename(chosen[0])}", 1500)
+        else:
+            self.ide.statusBar().showMessage(f"Cut {len(chosen)} items", 1500)
+
     def _paste_tree_paths_into(self, dest_dir: str):
         destination = self._canonical_path(dest_dir)
-        sources = self._resolve_tree_paste_paths()
+        cut_mode = str(getattr(self.ide, "_tree_clipboard_mode", "copy") or "copy").strip().lower() == "cut"
+        internal_sources = self._filter_nested_paths(getattr(self.ide, "_tree_clipboard_paths", []))
+        prefer_internal = bool(cut_mode and internal_sources)
+        sources = self._resolve_tree_paste_paths(prefer_internal=prefer_internal)
         if not sources:
             self.ide.statusBar().showMessage("Clipboard is empty.", 1500)
             return
@@ -166,7 +227,12 @@ class ExplorerController:
             self._show_tree_error("Paste", f"Destination is not a folder:\n{destination}")
             return
 
-        copied: list[str] = []
+        move_mode = bool(
+            cut_mode
+            and internal_sources
+            and set(self._filter_nested_paths(sources)) == set(internal_sources)
+        )
+        operations: list[dict[str, object]] = []
         failures: list[str] = []
         for source in sources:
             src = self._canonical_path(source)
@@ -178,7 +244,54 @@ class ExplorerController:
                 failures.append(f"Cannot copy folder into itself:\n{src}")
                 continue
 
-            target = self._next_copy_target(destination, os.path.basename(src))
+            target = self._canonical_path(os.path.join(destination, os.path.basename(src)))
+            if move_mode and target == src:
+                continue
+            operations.append(
+                {
+                    "src": src,
+                    "target": target,
+                    "overwrite": False,
+                    "conflict": bool(os.path.exists(target) and target != src),
+                }
+            )
+
+        if not operations and failures:
+            summary = "\n".join(failures[:8])
+            self._show_tree_error("Paste", summary)
+            return
+
+        if not self._resolve_paste_conflicts(destination=destination, operations=operations):
+            self.ide.statusBar().showMessage("Paste canceled.", 1600)
+            return
+
+        copied: list[str] = []
+        moved_pairs: list[tuple[str, str]] = []
+        for op in operations:
+            src = str(op.get("src") or "")
+            target = str(op.get("target") or "")
+            overwrite = bool(op.get("overwrite"))
+            if not src or not target:
+                continue
+            if overwrite and target != src and os.path.exists(target):
+                try:
+                    self._remove_existing_path(target)
+                except Exception as exc:
+                    failures.append(f"Could not overwrite '{target}': {exc}")
+                    continue
+
+            if not overwrite and os.path.exists(target):
+                target = self._next_copy_target(destination, os.path.basename(target))
+
+            if move_mode:
+                try:
+                    shutil.move(src, target)
+                except Exception as exc:
+                    failures.append(f"Could not move '{src}': {exc}")
+                    continue
+                moved_pairs.append((src, target))
+                continue
+
             try:
                 if os.path.isdir(src):
                     shutil.copytree(src, target)
@@ -189,23 +302,103 @@ class ExplorerController:
                 continue
             copied.append(target)
 
+        refresh_dirs: list[str] = [destination]
+        if moved_pairs:
+            refresh_dirs.extend(os.path.dirname(old_path) for old_path, _new_path in moved_pairs)
+            refresh_dirs.extend(os.path.dirname(new_path) for _old_path, new_path in moved_pairs)
+        for folder in self._filter_nested_paths(refresh_dirs):
+            self.refresh_subtree(folder)
+
+        for old_path, new_path in moved_pairs:
+            self._update_open_editors_for_move(old_path, new_path)
+
         if copied:
-            self.refresh_subtree(destination)
             self.tree.select_path(copied[0])
             if len(copied) == 1:
                 self.ide.statusBar().showMessage(f"Pasted {os.path.basename(copied[0])}", 1800)
             else:
                 self.ide.statusBar().showMessage(f"Pasted {len(copied)} items", 1800)
 
+        if moved_pairs:
+            self.tree.select_path(moved_pairs[0][1])
+            if len(moved_pairs) == 1:
+                self.ide.statusBar().showMessage(f"Moved {os.path.basename(moved_pairs[0][1])}", 1800)
+            else:
+                self.ide.statusBar().showMessage(f"Moved {len(moved_pairs)} items", 1800)
+            self.schedule_git_status_refresh(delay_ms=120)
+            remaining = [path for path in internal_sources if os.path.exists(path)]
+            self.ide._tree_clipboard_paths = remaining
+            if not remaining:
+                self.ide._tree_clipboard_mode = "copy"
+
         if failures:
             summary = "\n".join(failures[:8])
             self._show_tree_error("Paste", summary)
 
-    def _resolve_tree_paste_paths(self) -> list[str]:
+    def _resolve_paste_conflicts(self, *, destination: str, operations: list[dict[str, object]]) -> bool:
+        conflicts = [op for op in operations if bool(op.get("conflict"))]
+        if not conflicts:
+            return True
+
+        if len(conflicts) == 1:
+            op = conflicts[0]
+            src = str(op.get("src") or "")
+            target = str(op.get("target") or "")
+            choice, rename_name = prompt_single_paste_conflict(
+                source_name=os.path.basename(src),
+                destination_dir=destination,
+                existing_name=os.path.basename(target),
+                use_native_chrome=bool(self.use_native_chrome),
+                parent=self.ide,
+            )
+            if choice == "cancel":
+                return False
+            if choice == "overwrite":
+                op["overwrite"] = True
+                return True
+            if choice == "rename":
+                renamed_target = self._canonical_path(os.path.join(destination, str(rename_name or "").strip()))
+                if not self._path_has_prefix(renamed_target, destination):
+                    self._show_tree_error("Paste", "Rename target must stay inside the destination folder.")
+                    return False
+                if os.path.exists(renamed_target):
+                    self._show_tree_error("Paste", f"Path already exists:\n{renamed_target}")
+                    return False
+                op["target"] = renamed_target
+                op["overwrite"] = False
+                return True
+            return False
+
+        conflict_names = [self._rel_to_project(str(op.get("target") or "")) for op in conflicts]
+        confirmed = confirm_multi_paste_overwrite(
+            conflict_names=conflict_names,
+            use_native_chrome=bool(self.use_native_chrome),
+            parent=self.ide,
+        )
+        if not confirmed:
+            return False
+        for op in conflicts:
+            op["overwrite"] = True
+        return True
+
+    @staticmethod
+    def _remove_existing_path(path: str) -> None:
+        target = str(path or "").strip()
+        if not target:
+            return
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target)
+            return
+        os.unlink(target)
+
+    def _resolve_tree_paste_paths(self, *, prefer_internal: bool = False) -> list[str]:
+        internal = self._filter_nested_paths(getattr(self.ide, "_tree_clipboard_paths", []))
+        if prefer_internal and internal:
+            return internal
         external = self._system_clipboard_paths()
         if external:
             return self._filter_nested_paths(external)
-        return self._filter_nested_paths(self.ide._tree_clipboard_paths)
+        return internal
 
     def _set_system_clipboard_paths(self, paths: list[str]) -> None:
         app = QApplication.instance()
@@ -314,18 +507,26 @@ class ExplorerController:
 
         act_copy = menu.addAction("Copy")
         act_copy.triggered.connect(lambda: self._copy_tree_paths(folder_path))
+        self._apply_context_shortcut(act_copy, "_act_tree_copy")
+
+        act_cut = menu.addAction("Cut")
+        act_cut.triggered.connect(lambda: self._cut_tree_paths(folder_path))
+        self._apply_context_shortcut(act_cut, "_act_tree_cut")
 
         act_paste = menu.addAction("Paste")
         act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(folder_path))
+        self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
         menu.addSeparator()
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(folder_path))
+        self._apply_context_shortcut(act_rename, "_act_tree_rename")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(folder_path))
+        self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         menu.addSeparator()
 
@@ -355,10 +556,16 @@ class ExplorerController:
 
         act_copy = menu.addAction("Copy")
         act_copy.triggered.connect(lambda: self._copy_tree_paths(file_path))
+        self._apply_context_shortcut(act_copy, "_act_tree_copy")
+
+        act_cut = menu.addAction("Cut")
+        act_cut.triggered.connect(lambda: self._cut_tree_paths(file_path))
+        self._apply_context_shortcut(act_cut, "_act_tree_cut")
 
         act_paste = menu.addAction("Paste Into Parent Folder")
         act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(os.path.dirname(file_path)))
+        self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
         repo_root = self._repo_root_for_path(file_path)
 
@@ -366,9 +573,11 @@ class ExplorerController:
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(file_path))
+        self._apply_context_shortcut(act_rename, "_act_tree_rename")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(file_path))
+        self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         excluded = self._is_file_explicitly_excluded(file_path)
         act_toggle_excluded = menu.addAction(
@@ -405,6 +614,7 @@ class ExplorerController:
         act_paste = menu.addAction("Paste")
         act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(self.project_root))
+        self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
         menu.addSeparator()
 
@@ -441,16 +651,24 @@ class ExplorerController:
             self._show_tree_error("Create File", "Target directory does not exist.")
             return
 
-        name = self._prompt_simple_name("New File", "File name:")
+        name = self._prompt_simple_name(
+            "New File",
+            "File name:",
+            allow_path_separators=True,
+        )
         if name is None:
             return
 
         target = self._canonical_path(os.path.join(base, name))
+        if not self._path_has_prefix(target, base):
+            self._show_tree_error("Create File", "File path must stay inside the selected folder.")
+            return
         if os.path.exists(target):
             self._show_tree_error("Create File", f"Path already exists:\n{target}")
             return
 
         try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "x", encoding="utf-8"):
                 pass
         except Exception as exc:
@@ -660,7 +878,14 @@ class ExplorerController:
         except Exception:
             return False
 
-    def _prompt_simple_name(self, title: str, label: str, initial: str = "") -> str | None:
+    def _prompt_simple_name(
+        self,
+        title: str,
+        label: str,
+        initial: str = "",
+        *,
+        allow_path_separators: bool = False,
+    ) -> str | None:
         while True:
             value, ok = QInputDialog.getText(self.ide, title, label, text=initial)
             if not ok:
@@ -672,7 +897,17 @@ class ExplorerController:
             if name in (".", ".."):
                 QMessageBox.warning(self.ide, title, "Invalid name.")
                 continue
-            if "/" in name or "\\" in name:
+            if not allow_path_separators and ("/" in name or "\\" in name):
                 QMessageBox.warning(self.ide, title, "Use a simple name without path separators.")
                 continue
+            if allow_path_separators:
+                rel = name.replace("\\", "/")
+                if os.path.isabs(rel):
+                    QMessageBox.warning(self.ide, title, "Use a relative path inside the selected folder.")
+                    continue
+                parts = rel.split("/")
+                if any(part in {"", ".", ".."} for part in parts):
+                    QMessageBox.warning(self.ide, title, "Path contains invalid segments.")
+                    continue
+                name = rel
             return name

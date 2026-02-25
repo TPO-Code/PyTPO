@@ -25,6 +25,7 @@ except Exception:
         return True
 
 _IDENTIFIER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CPP_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl"}
 
 
 class LanguageIntelligenceController:
@@ -61,7 +62,11 @@ class LanguageIntelligenceController:
     def _editor_language_id(self, ed: EditorWidget) -> str:
         file_path = getattr(ed, "file_path", None)
         if isinstance(file_path, str) and file_path.strip():
-            return language_id_for_path(file_path, default="plaintext")
+            language_id = language_id_for_path(file_path, default="plaintext")
+            suffix = os.path.splitext(file_path)[1].lower()
+            if language_id == "c" and suffix in _CPP_HEADER_SUFFIXES:
+                return "cpp"
+            return language_id
         # Avoid forcing unsaved/unknown files through Python fallback providers.
         try:
             from_editor = str(ed.language_id() or "").strip().lower()

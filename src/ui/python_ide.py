@@ -6,7 +6,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QEvent, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
+from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QFontDatabase, QIcon, QTextCursor
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QWidget
 
@@ -32,6 +32,7 @@ from src.git.github_share_service import GitHubShareService
 from src.git.git_service import GitService
 from src.instance_coordinator import ProjectInstanceServer, request_project_activation
 from src.lang_cpp import CppLanguagePack
+from src.lang_cpp.clangd_repair import missing_std_header_from_diagnostic, repair_clangd_includes
 from src.lang_rust import RustLanguagePack
 from src.settings_manager import SettingsManager
 from src.services.document_outline_service import build_document_outline
@@ -513,6 +514,7 @@ class PythonIDE(Window):
         self._toolbar_stop_menu: QMenu | None = None
         self._toolbar_settings_btn: QToolButton | None = None
         self._tree_clipboard_paths: list[str] = []
+        self._tree_clipboard_mode: str = "copy"
         self._import_symbol_probe_cache: dict[tuple[str, str], bool] = {}
         self._import_module_probe_cache: dict[str, bool] = {}
         self._qt_symbol_namespace_cache: dict[str, list[tuple[str, str]]] = {}
@@ -522,6 +524,8 @@ class PythonIDE(Window):
         self._toolbar_ai_checkbox: QCheckBox | None = None
         self._toolbar_ai_toggle_guard = False
         self._lsp_noise_notice_shown = False
+        self._clangd_std_header_prompt_keys: set[str] = set()
+        self._clangd_repair_active = False
         self._last_status_debug_message = ""
         self._last_status_debug_at = 0.0
         self._status_git_branch_label: QLabel | None = None
@@ -548,6 +552,18 @@ class PythonIDE(Window):
         self._project_config_reload_honor_open_editors = False
         self._project_config_reload_source = ""
         self._project_config_reload_active = False
+        self._project_fs_watcher: QFileSystemWatcher | None = None
+        self._project_fs_watched_dirs: set[str] = set()
+        self._project_fs_pending_dirs: set[str] = set()
+        self._project_fs_focus_refresh_at = 0.0
+        self._project_fs_refresh_timer = QTimer(self)
+        self._project_fs_refresh_timer.setSingleShot(True)
+        self._project_fs_refresh_timer.setInterval(260)
+        self._project_fs_refresh_timer.timeout.connect(self._flush_project_fs_refreshes)
+        self._project_fs_watch_sync_timer = QTimer(self)
+        self._project_fs_watch_sync_timer.setSingleShot(True)
+        self._project_fs_watch_sync_timer.setInterval(280)
+        self._project_fs_watch_sync_timer.timeout.connect(self._sync_project_fs_watches)
 
         self.project_context = ProjectContext(
             project_root=self.project_root,
@@ -574,6 +590,7 @@ class PythonIDE(Window):
         self.setup_editor_workspace_service()
         self.setup_project_explorer()
         self.explorer_controller.tree = self.tree
+        self._setup_project_fs_watcher()
         self.version_control_controller = VersionControlController(self, self.git_service, self.tree, parent=self)
         self.version_control_controller.statusChanged.connect(self._on_git_status_changed)
         self.setup_bottom_panels()
@@ -628,6 +645,7 @@ class PythonIDE(Window):
         super().changeEvent(event)
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
             self.schedule_git_status_refresh(delay_ms=60)
+            self._maybe_refresh_project_tree_on_focus()
 
     def _run_startup_pipeline(self):
         if not self._window_geometry_restored:
@@ -780,14 +798,203 @@ class PythonIDE(Window):
         self.tree.addAction(act_tree_copy)
         self._act_tree_copy = act_tree_copy
 
+        act_tree_cut = QAction("Cut", self.tree)
+        act_tree_cut.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        act_tree_cut.triggered.connect(self._cut_tree_selection)
+        self.tree.addAction(act_tree_cut)
+        self._act_tree_cut = act_tree_cut
+
         act_tree_paste = QAction("Paste", self.tree)
         act_tree_paste.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         act_tree_paste.triggered.connect(self._paste_tree_into_selection)
         self.tree.addAction(act_tree_paste)
         self._act_tree_paste = act_tree_paste
 
+        act_tree_rename = QAction("Rename", self.tree)
+        act_tree_rename.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        act_tree_rename.triggered.connect(self._rename_tree_selection)
+        self.tree.addAction(act_tree_rename)
+        self._act_tree_rename = act_tree_rename
+
+        act_tree_delete = QAction("Delete", self.tree)
+        act_tree_delete.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        act_tree_delete.triggered.connect(self._delete_tree_selection)
+        self.tree.addAction(act_tree_delete)
+        self._act_tree_delete = act_tree_delete
+
         self.dock_project.setWidget(self.tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_project)
+
+    def _setup_project_fs_watcher(self) -> None:
+        if self.no_project_mode:
+            return
+        if not isinstance(getattr(self, "tree", None), FileSystemTreeWidget):
+            return
+        watcher = QFileSystemWatcher(self)
+        watcher.directoryChanged.connect(self._on_project_fs_directory_changed)
+        self._project_fs_watcher = watcher
+        try:
+            self.tree.expanded.connect(self._on_tree_folder_expanded)
+            self.tree.collapsed.connect(self._on_tree_folder_collapsed)
+        except Exception:
+            pass
+        self._sync_project_fs_watches()
+
+    def _on_tree_folder_expanded(self, index) -> None:
+        tree = getattr(self, "tree", None)
+        if not isinstance(tree, FileSystemTreeWidget):
+            return
+        path = tree.path_from_index(index)
+        if isinstance(path, str) and os.path.isdir(path):
+            self._queue_project_fs_refresh(path)
+        self._schedule_project_fs_watch_sync()
+
+    def _on_tree_folder_collapsed(self, _index) -> None:
+        self._schedule_project_fs_watch_sync()
+
+    def _on_project_fs_directory_changed(self, path: str) -> None:
+        self._queue_project_fs_refresh(path)
+        self._schedule_project_fs_watch_sync()
+
+    def _queue_project_fs_refresh(self, path: str) -> None:
+        tree = getattr(self, "tree", None)
+        if not isinstance(tree, FileSystemTreeWidget):
+            return
+        if self.no_project_mode:
+            return
+        cpath = self._canonical_existing_watch_dir(path)
+        if not cpath:
+            return
+        if cpath != self.project_root and self._is_tree_path_excluded(cpath, True):
+            return
+        self._project_fs_pending_dirs.add(cpath)
+        self._project_fs_refresh_timer.start()
+
+    def _flush_project_fs_refreshes(self) -> None:
+        pending = set(self._project_fs_pending_dirs)
+        self._project_fs_pending_dirs.clear()
+        if not pending:
+            return
+        targets = self._filter_nested_paths(sorted(pending, key=lambda path: (len(path), path.lower())))
+        if len(targets) > 14:
+            self.refresh_project_tree()
+        else:
+            for target in targets:
+                self.refresh_subtree(target)
+        self._schedule_project_fs_watch_sync()
+
+    def _schedule_project_fs_watch_sync(self) -> None:
+        if self.no_project_mode:
+            return
+        self._project_fs_watch_sync_timer.start()
+
+    def _sync_project_fs_watches(self) -> None:
+        watcher = self._project_fs_watcher
+        if watcher is None:
+            return
+        desired = self._desired_project_watch_dirs()
+        current = {self._canonical_path(path) for path in watcher.directories() if isinstance(path, str)}
+        remove_paths = sorted(current - desired)
+        if remove_paths:
+            try:
+                watcher.removePaths(remove_paths)
+            except Exception:
+                pass
+        add_paths = sorted(desired - current)
+        if add_paths:
+            try:
+                watcher.addPaths(add_paths)
+            except Exception:
+                pass
+        self._project_fs_watched_dirs = {
+            self._canonical_path(path)
+            for path in watcher.directories()
+            if isinstance(path, str) and path
+        }
+
+    def _desired_project_watch_dirs(self) -> set[str]:
+        if self.no_project_mode:
+            return set()
+        root = self._canonical_existing_watch_dir(self.project_root)
+        if not root:
+            return set()
+
+        watch_dirs: set[str] = {root}
+
+        try:
+            with os.scandir(root) as it:
+                for entry in it:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    cpath = self._canonical_existing_watch_dir(entry.path)
+                    if not cpath:
+                        continue
+                    if self._is_tree_path_excluded(cpath, True):
+                        continue
+                    watch_dirs.add(cpath)
+        except Exception:
+            pass
+
+        tree = getattr(self, "tree", None)
+        if isinstance(tree, FileSystemTreeWidget):
+            for path in tree.expanded_paths():
+                cpath = self._canonical_existing_watch_dir(path)
+                if not cpath:
+                    continue
+                if cpath != root and self._is_tree_path_excluded(cpath, True):
+                    continue
+                watch_dirs.add(cpath)
+            selected = tree.selected_path()
+            if isinstance(selected, str) and selected:
+                base = selected if os.path.isdir(selected) else os.path.dirname(selected)
+                cbase = self._canonical_existing_watch_dir(base)
+                if cbase:
+                    watch_dirs.add(cbase)
+
+        filtered: list[str] = []
+        for path in watch_dirs:
+            if not self._path_has_prefix(path, root):
+                continue
+            if not os.path.isdir(path):
+                continue
+            filtered.append(path)
+
+        filtered.sort(key=lambda path: (path.count(os.sep), len(path), path.lower()))
+        max_watch_dirs = 600
+        if len(filtered) > max_watch_dirs:
+            keep = set(filtered[: max_watch_dirs - 1])
+            keep.add(root)
+            return keep
+        return set(filtered)
+
+    def _canonical_existing_watch_dir(self, path: str) -> str:
+        cpath = self._canonical_path(path)
+        if not self._path_has_prefix(cpath, self.project_root):
+            return ""
+        if os.path.isdir(cpath):
+            return cpath
+        parent = cpath
+        root = self._canonical_path(self.project_root)
+        while parent and parent != root and not os.path.isdir(parent):
+            parent = self._canonical_path(os.path.dirname(parent))
+        if os.path.isdir(parent) and self._path_has_prefix(parent, root):
+            return parent
+        if os.path.isdir(root):
+            return root
+        return ""
+
+    def _maybe_refresh_project_tree_on_focus(self) -> None:
+        if self.no_project_mode or not self._startup_done:
+            return
+        now = time.monotonic()
+        if now - float(self._project_fs_focus_refresh_at) < 4.0:
+            return
+        self._project_fs_focus_refresh_at = now
+        if self._project_fs_pending_dirs:
+            self._flush_project_fs_refreshes()
+            return
+        self.refresh_project_tree()
+        self._schedule_project_fs_watch_sync()
 
     def setup_bottom_panels(self):
         features = (
@@ -1047,6 +1254,7 @@ class PythonIDE(Window):
 
     def setup_menus(self):
         ActionRegistry.create_actions(self)
+        self._apply_runtime_keybindings()
 
     def _toolbar_icon_roots(self) -> list[Path]:
         base = Path(__file__).resolve().parents[1]
@@ -1660,10 +1868,25 @@ class PythonIDE(Window):
             tree_copy.setShortcut(
                 ",".join(get_action_sequence(bindings, scope="general", action_id="action.tree_copy"))
             )
+        tree_cut = getattr(self, "_act_tree_cut", None)
+        if isinstance(tree_cut, QAction):
+            tree_cut.setShortcut(
+                ",".join(get_action_sequence(bindings, scope="general", action_id="action.tree_cut"))
+            )
         tree_paste = getattr(self, "_act_tree_paste", None)
         if isinstance(tree_paste, QAction):
             tree_paste.setShortcut(
                 ",".join(get_action_sequence(bindings, scope="general", action_id="action.tree_paste"))
+            )
+        tree_rename = getattr(self, "_act_tree_rename", None)
+        if isinstance(tree_rename, QAction):
+            tree_rename.setShortcut(
+                ",".join(get_action_sequence(bindings, scope="general", action_id="action.rename_symbol"))
+            )
+        tree_delete = getattr(self, "_act_tree_delete", None)
+        if isinstance(tree_delete, QAction):
+            tree_delete.setShortcut(
+                ",".join(get_action_sequence(bindings, scope="general", action_id="action.tree_delete"))
             )
 
         for ed in self.editor_workspace.all_editors():
@@ -2011,9 +2234,97 @@ class PythonIDE(Window):
 
     def _on_cpp_file_diagnostics_updated(self, file_path: str, diagnostics_obj: object) -> None:
         self.diagnostics_controller._on_file_diagnostics_updated(file_path, diagnostics_obj)
+        self._maybe_prompt_clangd_std_header_repair(file_path, diagnostics_obj)
 
     def _on_rust_file_diagnostics_updated(self, file_path: str, diagnostics_obj: object) -> None:
         self.diagnostics_controller._on_file_diagnostics_updated(file_path, diagnostics_obj)
+
+    def _maybe_prompt_clangd_std_header_repair(self, file_path: str, diagnostics_obj: object) -> None:
+        if self._clangd_repair_active:
+            return
+        diagnostics = diagnostics_obj if isinstance(diagnostics_obj, list) else []
+        missing_headers: list[str] = []
+        for diag in diagnostics:
+            if not isinstance(diag, dict):
+                continue
+            header = missing_std_header_from_diagnostic(diag)
+            if not header:
+                continue
+            missing_headers.append(header)
+        if not missing_headers:
+            return
+
+        first_header = str(missing_headers[0] or "").strip()
+        cpath = self._canonical_path(file_path)
+        prompt_key = f"{cpath.lower()}|{first_header.lower()}"
+        if prompt_key in self._clangd_std_header_prompt_keys:
+            return
+        self._clangd_std_header_prompt_keys.add(prompt_key)
+
+        def _prompt() -> None:
+            message = (
+                f"clangd cannot resolve standard header '{first_header}' in this project.\n\n"
+                "Apply automatic C/C++ include repair now?\n"
+                "This tries query-driver first, then writes a project .clangd include patch only if still needed."
+            )
+            choice = QMessageBox.question(
+                self,
+                "Repair Clangd Includes",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            ok, detail = self._run_clangd_include_repair(target_file_path=cpath)
+            if ok:
+                self.statusBar().showMessage(detail, 4800)
+                return
+            self.statusBar().showMessage(detail, 5200)
+            # Allow another prompt later if repair did not succeed.
+            self._clangd_std_header_prompt_keys.discard(prompt_key)
+
+        QTimer.singleShot(0, _prompt)
+
+    def _run_clangd_include_repair(self, *, target_file_path: str = "") -> tuple[bool, str]:
+        if self._clangd_repair_active:
+            return False, "Clangd include repair is already running."
+        self._clangd_repair_active = True
+        try:
+            cpp_cfg = self._cpp_config()
+            clangd_path = str(cpp_cfg.get("clangd_path") or "clangd").strip() or "clangd"
+            query_driver = str(cpp_cfg.get("query_driver") or "").strip()
+            compile_mode = str(cpp_cfg.get("compile_commands_mode") or "auto").strip().lower()
+            compile_path = str(cpp_cfg.get("compile_commands_path") or "").strip()
+            result = repair_clangd_includes(
+                project_root=self.project_root,
+                clangd_path=clangd_path,
+                query_driver=query_driver,
+                compile_commands_mode=compile_mode,
+                compile_commands_path=compile_path,
+                target_file_path=target_file_path,
+            )
+
+            if result.query_driver_changed and result.query_driver:
+                self.settings_manager.set("c_cpp.query_driver", result.query_driver, "project")
+                self.settings_manager.save_all(scopes={"project"}, only_dirty=True)
+
+            # Always refresh once so clangd restarts with updated settings and/or .clangd.
+            self._refresh_runtime_settings_from_manager()
+
+            if result.ok:
+                if result.fixed_by_query_driver:
+                    return True, "Clangd include repair applied via query-driver."
+                if result.wrote_clangd_file:
+                    return True, f"Clangd include repair applied ({result.clangd_file_path})."
+                return True, result.message
+            if result.wrote_clangd_file:
+                return False, f"{result.message} ({result.clangd_file_path})"
+            return False, result.message
+        except Exception as exc:
+            return False, f"Clangd include repair failed: {exc}"
+        finally:
+            self._clangd_repair_active = False
 
     def _on_editor_font_size_step_requested(self, ed_ref, step: int) -> None:
         ed = ed_ref() if callable(ed_ref) else ed_ref
@@ -2074,7 +2385,26 @@ class PythonIDE(Window):
             widget = widget.parentWidget()
         return False
 
+    def _is_project_tree_focus_context(self) -> bool:
+        tree = getattr(self, "tree", None)
+        if not isinstance(tree, FileSystemTreeWidget):
+            return False
+        widget = QApplication.focusWidget()
+        visited: set[int] = set()
+        while isinstance(widget, QWidget):
+            wid = id(widget)
+            if wid in visited:
+                break
+            visited.add(wid)
+            if widget is tree:
+                return True
+            widget = widget.parentWidget()
+        return False
+
     def copy_focused_widget(self) -> None:
+        if self._is_project_tree_focus_context():
+            self._copy_tree_selection()
+            return
         if self._invoke_focus_chain_edit_method("copy"):
             return
         ed = self.current_editor()
@@ -2082,6 +2412,9 @@ class PythonIDE(Window):
             ed.copy()
 
     def paste_into_focused_widget(self) -> None:
+        if self._is_project_tree_focus_context():
+            self._paste_tree_into_selection()
+            return
         if self._invoke_focus_chain_edit_method("paste"):
             return
         ed = self.current_editor()
@@ -2378,6 +2711,9 @@ class PythonIDE(Window):
             self.statusBar().showMessage("No symbol under cursor.", 1600)
 
     def rename_symbol(self):
+        if self._is_project_tree_focus_context():
+            self._rename_tree_selection()
+            return
         self.language_intelligence_controller.rename_symbol_for_current_editor()
 
     def extract_variable(self):
@@ -2581,6 +2917,9 @@ class PythonIDE(Window):
     def _copy_tree_selection(self):
         self.explorer_controller._copy_tree_selection()
 
+    def _cut_tree_selection(self):
+        self.explorer_controller._cut_tree_selection()
+
     def _paste_tree_into_selection(self):
         self.explorer_controller._paste_tree_into_selection()
 
@@ -2595,6 +2934,9 @@ class PythonIDE(Window):
 
     def _copy_tree_paths(self, path: str | None):
         self.explorer_controller._copy_tree_paths(path)
+
+    def _cut_tree_paths(self, path: str | None):
+        self.explorer_controller._cut_tree_paths(path)
 
     def _paste_tree_paths_into(self, dest_dir: str):
         self.explorer_controller._paste_tree_paths_into(dest_dir)
@@ -2625,9 +2967,12 @@ class PythonIDE(Window):
 
     def refresh_project_tree(self, include_excluded: bool = False):
         self.explorer_controller.refresh_project_tree(include_excluded=include_excluded)
+        if not include_excluded:
+            self._schedule_project_fs_watch_sync()
 
     def refresh_subtree(self, path: str):
         self.explorer_controller.refresh_subtree(path)
+        self._schedule_project_fs_watch_sync()
 
     def _on_tree_path_moved(self, old_path: str, new_path: str):
         self.explorer_controller._on_tree_path_moved(old_path, new_path)
@@ -2641,11 +2986,25 @@ class PythonIDE(Window):
     def _rename_path(self, path: str):
         self.explorer_controller._rename_path(path)
 
+    def _rename_tree_selection(self) -> None:
+        targets = self._selected_tree_paths()
+        if len(targets) != 1:
+            self.statusBar().showMessage("Select a single file or folder to rename.", 2200)
+            return
+        self._rename_path(targets[0])
+
     def _delete_path(self, path: str):
         self.explorer_controller._delete_path(path)
 
     def _delete_paths(self, paths: list[str]) -> None:
         self.explorer_controller._delete_paths(paths)
+
+    def _delete_tree_selection(self) -> None:
+        targets = self._selected_tree_paths()
+        if not targets:
+            self.statusBar().showMessage("Select file(s) or folder(s) to delete.", 2200)
+            return
+        self._delete_paths(targets)
 
     def _set_interpreter_for_folder_dialog(self, folder_path: str):
         self.explorer_controller._set_interpreter_for_folder_dialog(folder_path)
@@ -3815,6 +4174,20 @@ class PythonIDE(Window):
         if not skip_prompt and not self._confirm_save_modified_editors():
             event.ignore()
             return
+
+        self._project_fs_refresh_timer.stop()
+        self._project_fs_watch_sync_timer.stop()
+        watcher = self._project_fs_watcher
+        if watcher is not None:
+            try:
+                dirs = [path for path in watcher.directories() if isinstance(path, str) and path]
+                if dirs:
+                    watcher.removePaths(dirs)
+            except Exception:
+                pass
+            self._project_fs_watcher = None
+            self._project_fs_watched_dirs.clear()
+            self._project_fs_pending_dirs.clear()
 
         rename_token = int(getattr(self, "_active_rename_token", 0) or 0)
         if rename_token > 0:

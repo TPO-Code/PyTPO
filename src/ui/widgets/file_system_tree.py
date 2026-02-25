@@ -670,6 +670,9 @@ class FileSystemTreeWidget(QTreeView):
         if selected:
             self.select_path(selected)
 
+    def expanded_paths(self) -> set[str]:
+        return self._collect_expanded_paths()
+
     def select_path(self, path: str):
         if not path:
             return

@@ -122,6 +122,9 @@ class ProjectLifecycleController:
         target = str(dialog.created_project_path or "").strip()
         if not target:
             return
+        post_create_note = str(dialog.created_project_post_create_note or "").strip()
+        if post_create_note:
+            QMessageBox.warning(self.ide, "New Project", post_create_note)
         self.ide.statusBar().showMessage(f"Created project: {target}", 2200)
         self.open_project_path(target)
 

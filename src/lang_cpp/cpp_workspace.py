@@ -562,12 +562,37 @@ def _normalize_extra_flags(value: object) -> list[str]:
 
 
 def _normalize_query_driver_value(value: object) -> str:
-    if isinstance(value, str):
-        return value.strip()
     if isinstance(value, list):
-        cleaned = [str(item).strip() for item in value if str(item).strip()]
-        return ",".join(cleaned)
-    return ""
+        text = ",".join(str(item or "").strip() for item in value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = ""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if raw.lower() in {"off", "none", "disabled"}:
+        return raw.lower()
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[\s,]+", raw):
+        part = str(token or "").strip()
+        if not part:
+            continue
+        if part.lower().startswith("--query-driver="):
+            part = part.split("=", 1)[1].strip()
+            if not part:
+                continue
+        if part.startswith("="):
+            part = part[1:].strip()
+            if not part:
+                continue
+        dedupe = part.lower()
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        cleaned.append(part)
+    return ",".join(cleaned)
 
 
 def _effective_query_driver_globs(value: object) -> str:

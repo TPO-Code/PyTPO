@@ -129,7 +129,9 @@ KEYBINDING_ACTIONS: tuple[KeybindingAction, ...] = (
     KeybindingAction("general", "action.rerun_current_file", "Rerun Current File", ("Ctrl+F5",)),
     KeybindingAction("general", "action.stop_current_run", "Stop Current Run", ("Shift+F5",)),
     KeybindingAction("general", "action.tree_copy", "Explorer Copy", ("Ctrl+C",)),
+    KeybindingAction("general", "action.tree_cut", "Explorer Cut", ("Ctrl+X",)),
     KeybindingAction("general", "action.tree_paste", "Explorer Paste", ("Ctrl+V",)),
+    KeybindingAction("general", "action.tree_delete", "Explorer Delete", ("Delete",)),
     KeybindingAction("python", "action.python_comment_toggle", "Toggle Comment", ("Ctrl+/",)),
     KeybindingAction("cpp", "action.cpp_comment_toggle", "Toggle Comment", ("Shift+/",)),
 )

@@ -47,6 +47,7 @@ from src.ui.settings.build_configs_settings_page import BuildConfigsSettingsPage
 from src.ui.settings.github_settings_page import GitHubSettingsPage
 from src.ui.settings.git_settings_page import GitSettingsPage
 from src.ui.settings.keybindings_settings_page import KeybindingsSettingsPage
+from src.ui.settings.clangd_repair_settings_page import ClangdRepairSettingsPage
 from src.ui.settings.project_maintenance_page import ProjectMaintenancePage
 from src.ui.settings.python_run_configs_settings_page import PythonRunConfigsSettingsPage
 from src.ui.settings.rust_run_configs_settings_page import RustRunConfigsSettingsPage
@@ -70,6 +71,7 @@ FieldType = Literal[
     "python_run_configs_editor",
     "rust_run_configs_editor",
     "project_maintenance_tools",
+    "clangd_repair_tools",
 ]
 
 
@@ -134,6 +136,7 @@ PANEL_FIELD_TYPES: set[str] = {
     "python_run_configs_editor",
     "rust_run_configs_editor",
     "project_maintenance_tools",
+    "clangd_repair_tools",
 }
 
 
@@ -559,6 +562,30 @@ class SettingsDialog(DialogWindow):
 
         if field.type == "project_maintenance_tools":
             page = ProjectMaintenancePage(manager=self.manager, parent=self)
+            return FieldBinding(
+                key=field.key,
+                scope=field.scope,
+                widget=page,
+                getter=lambda: None,
+                setter=lambda _value: None,
+                on_change=lambda _cb: None,
+                validate=lambda: [],
+                persist=False,
+                has_pending_changes=page.has_pending_settings_changes,
+                apply_changes=page.apply_settings_changes,
+            )
+
+        if field.type == "clangd_repair_tools":
+            page = ClangdRepairSettingsPage(
+                manager=self.manager,
+                on_runtime_refresh=self.on_applied,
+                on_query_driver_updated=lambda value: self._set_bound_value(
+                    key="c_cpp.query_driver",
+                    scope="project",
+                    value=value,
+                ),
+                parent=self,
+            )
             return FieldBinding(
                 key=field.key,
                 scope=field.scope,
@@ -998,6 +1025,24 @@ class SettingsDialog(DialogWindow):
                         continue
                     value = self.manager.get(binding.key, scope_preference=binding.scope)
                     binding.setter(value)
+        finally:
+            self._ignore_changes = False
+
+    def _set_bound_value(self, *, key: str, scope: SettingsScope, value: Any) -> None:
+        self._ignore_changes = True
+        try:
+            for bindings in self._bindings_by_page.values():
+                for binding in bindings:
+                    if not binding.persist:
+                        continue
+                    if str(binding.key) != str(key):
+                        continue
+                    if str(binding.scope) != str(scope):
+                        continue
+                    try:
+                        binding.setter(value)
+                    except Exception:
+                        continue
         finally:
             self._ignore_changes = False
 
@@ -1654,6 +1699,19 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 label="Extra Flags",
                                 type="list_str",
                                 scope="project",
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="Repair",
+                        fields=[
+                            SchemaField(
+                                id="project-cpp-repair-tools",
+                                key="c_cpp.repair_tools",
+                                label="Clangd Repair Tools",
+                                type="clangd_repair_tools",
+                                scope="project",
+                                description="Detect and repair missing C/C++ standard include paths for clangd.",
                             ),
                         ],
                     ),
