@@ -2518,6 +2518,17 @@ class TDocEditorWidget(QTextEdit):
             return False
         return True
 
+    def _cursor_is_prepending_to_link(self, cursor: QTextCursor | None = None) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        pos = int(cur.position())
+        right = self._link_target_at_doc_pos(pos)
+        if not right:
+            return False
+        left = self._link_target_at_doc_pos(pos - 1)
+        if left and left == right:
+            return False
+        return True
+
     def _try_convert_recent_bracket_link(self) -> bool:
         cur = self.textCursor()
         block = cur.block()
@@ -2604,12 +2615,15 @@ class TDocEditorWidget(QTextEdit):
 
     def keyPressEvent(self, event):
         text = str(event.text() or "")
-        should_break_link_append = bool(
+        should_break_link_boundary = bool(
             text
             and not bool(event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
-            and self._cursor_is_appending_to_link(self.textCursor())
+            and (
+                self._cursor_is_appending_to_link(self.textCursor())
+                or self._cursor_is_prepending_to_link(self.textCursor())
+            )
         )
-        if should_break_link_append:
+        if should_break_link_boundary:
             self.setCurrentCharFormat(QTextCharFormat())
 
         was_internal = bool(self._is_internal_change)
