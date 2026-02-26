@@ -56,6 +56,7 @@ EXT_TO_LANG: dict[str, str] = {
     ".todo": "todo",
     ".task": "todo",
     ".tasks": "todo",
+    ".lst": "todo",
 }
 
 NAME_TO_LANG: dict[str, str] = {
