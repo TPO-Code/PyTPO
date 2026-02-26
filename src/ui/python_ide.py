@@ -4,6 +4,7 @@ import shutil
 import sys
 import time
 import tomllib
+import weakref
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
@@ -68,6 +69,16 @@ from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
 from src.ui.widgets.usages_panel import UsagesPanel
 from src.ui.widgets.welcome_screen import WelcomeScreenWidget
+from TPOPyside.widgets.tdoc_support import (
+    PROJECT_MARKER_FILENAME,
+    TDocDocumentWidget,
+    TDocProjectIndex,
+    collect_tdoc_diagnostics,
+    is_tdoc_document_path,
+    is_tdoc_related_path,
+    parse_file_link,
+    resolve_tdoc_root_for_path,
+)
 
 try:
     from shiboken6 import isValid as _is_qobject_valid
@@ -444,6 +455,9 @@ class PythonIDE(Window):
             parent=self,
         )
         self._diagnostics_by_file: dict[str, list[dict]] = {}
+        self._tdoc_diagnostics_by_root: dict[str, dict[str, list[dict]]] = {}
+        self._tdoc_validation_timers: dict[str, QTimer] = {}
+        self._tdoc_pending_paths_by_root: dict[str, str] = {}
         self._lint_hooked_editors: set[str] = set()
         self._word_wrap_enabled_file_types: set[str] = set()
         self._completion_next_token = 0
@@ -509,6 +523,7 @@ class PythonIDE(Window):
         self._toolbar_controls_host: QWidget | None = None
         self._toolbar_build_btn: QToolButton | None = None
         self._toolbar_build_run_btn: QToolButton | None = None
+        self._toolbar_tdoc_index_btn: QToolButton | None = None
         self._toolbar_run_btn: QToolButton | None = None
         self._toolbar_run_menu: QMenu | None = None
         self._toolbar_stop_btn: QToolButton | None = None
@@ -1040,6 +1055,8 @@ class PythonIDE(Window):
         self.problems_panel.problemActivated.connect(self._on_problem_activated)
         self.problems_panel.importSymbolRequested.connect(self._on_problem_import_symbol_requested)
         self.problems_panel.removeUnusedImportRequested.connect(self._on_problem_remove_unused_import_requested)
+        self.problems_panel.addTdocSymbolRequested.connect(self._on_problem_add_tdoc_symbol_requested)
+        self.problems_panel.capitalizeTdocSectionRequested.connect(self._on_problem_capitalize_tdoc_section_requested)
         self.problems_panel.clearFileRequested.connect(self._on_problem_clear_file_requested)
         self.problems_panel.clearAllRequested.connect(self._on_problem_clear_all_requested)
         self.problems_panel.countChanged.connect(self._on_problem_count_changed)
@@ -1385,6 +1402,16 @@ class PythonIDE(Window):
         )
         build_run_btn.clicked.connect(self.build_and_run_current_file)
 
+        tdoc_index_btn = QToolButton(host)
+        self._configure_titlebar_button(
+            tdoc_index_btn,
+            icon_key="index",
+            fallback_text="Index",
+            tooltip="Build TDOC Index",
+            kind="build",
+        )
+        tdoc_index_btn.clicked.connect(self.build_open_tdoc_indexes)
+
         stop_btn = QToolButton(host)
         self._configure_titlebar_button(
             stop_btn,
@@ -1410,12 +1437,14 @@ class PythonIDE(Window):
         host_layout.addWidget(run_btn)
         host_layout.addWidget(build_btn)
         host_layout.addWidget(build_run_btn)
+        host_layout.addWidget(tdoc_index_btn)
         host_layout.addWidget(stop_btn)
         host_layout.addWidget(settings_btn)
 
         self._toolbar_controls_host = host
         self._toolbar_build_btn = build_btn
         self._toolbar_build_run_btn = build_run_btn
+        self._toolbar_tdoc_index_btn = tdoc_index_btn
         self._toolbar_run_btn = run_btn
         self._toolbar_run_menu = run_menu
         self._toolbar_stop_btn = stop_btn
@@ -1766,6 +1795,7 @@ class PythonIDE(Window):
         has_runnable = self._has_runnable_target()
         has_buildable = bool(project_loaded and self.execution_controller.can_build_current_file())
         has_build_and_run = bool(project_loaded and self.execution_controller.can_build_and_run_current_file())
+        has_open_tdoc = bool(project_loaded and self._open_tdoc_roots())
 
         if self._act_build_current is not None:
             self._act_build_current.setEnabled(has_buildable)
@@ -1815,6 +1845,9 @@ class PythonIDE(Window):
         if self._toolbar_build_run_btn is not None:
             self._toolbar_build_run_btn.setEnabled(has_build_and_run)
             self._toolbar_build_run_btn.setVisible(has_build_and_run)
+        if self._toolbar_tdoc_index_btn is not None:
+            self._toolbar_tdoc_index_btn.setEnabled(has_open_tdoc)
+            self._toolbar_tdoc_index_btn.setVisible(has_open_tdoc)
         if self._run_build_config_menu is not None:
             show_build_menu = bool(project_loaded and (has_buildable or has_build_and_run))
             self._run_build_config_menu.menuAction().setVisible(show_build_menu)
@@ -2003,11 +2036,12 @@ class PythonIDE(Window):
             font_size=int(self.font_size),
             font_family=str(self.font_family or "").strip(),
         )
-        for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+        for widget in self.editor_workspace.all_document_widgets():
+            setter = getattr(widget, "set_editor_font_preferences", None)
+            if not callable(setter):
                 continue
             try:
-                ed.set_editor_font_preferences(
+                setter(
                     family=str(self.font_family or "").strip(),
                     point_size=int(self.font_size),
                 )
@@ -2150,12 +2184,13 @@ class PythonIDE(Window):
         self._save_word_wrap_enabled_file_types()
         return True
 
-    def _apply_editor_background_to_editor(self, ed: EditorWidget) -> None:
-        if not isinstance(ed, EditorWidget):
+    def _apply_editor_background_to_editor(self, ed: object) -> None:
+        setter = getattr(ed, "set_editor_background", None)
+        if not callable(setter):
             return
         cfg = self._editor_background_config()
         try:
-            ed.set_editor_background(
+            setter(
                 background_color=str(cfg.get("background_color", "#252526") or "#252526"),
                 background_image_path=str(cfg.get("background_image_path", "") or ""),
                 background_image_scale_mode=str(cfg.get("background_image_scale_mode", "stretch") or "stretch"),
@@ -2188,6 +2223,8 @@ class PythonIDE(Window):
             ed.clear_lint_diagnostics()
         elif self._is_python_file_path(ed.file_path):
             self._request_lint_for_editor(ed, reason="idle", include_source_if_modified=True)
+        elif self._is_tdoc_related_path(ed.file_path):
+            self._schedule_tdoc_validation(ed.file_path)
         self._request_completion_for_editor(ed, reason="auto")
         self._request_ai_inline_for_editor(ed, reason="passive")
 
@@ -2449,8 +2486,8 @@ class PythonIDE(Window):
             self._clangd_repair_active = False
 
     def _on_editor_font_size_step_requested(self, ed_ref, step: int) -> None:
-        ed = ed_ref() if callable(ed_ref) else ed_ref
-        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+        widget = ed_ref() if callable(ed_ref) else ed_ref
+        if widget is None or not _is_qobject_valid(widget):
             return
         delta = 1 if int(step or 0) > 0 else -1
         target = self._clamp_editor_font_size(int(self.font_size) + delta)
@@ -2558,18 +2595,20 @@ class PythonIDE(Window):
         self._request_ai_inline_for_editor(ed, reason="manual")
 
     def show_find_in_editor(self):
-        ed = self.current_editor()
-        if not isinstance(ed, EditorWidget):
+        widget = self._current_document_widget()
+        show_find = getattr(widget, "show_find_bar", None)
+        if not callable(show_find):
             self.statusBar().showMessage("No active editor.", 1500)
             return
-        ed.show_find_bar()
+        show_find()
 
     def show_replace_in_editor(self):
-        ed = self.current_editor()
-        if not isinstance(ed, EditorWidget):
+        widget = self._current_document_widget()
+        show_replace = getattr(widget, "show_replace_bar", None)
+        if not callable(show_replace):
             self.statusBar().showMessage("No active editor.", 1500)
             return
-        ed.show_replace_bar()
+        show_replace()
 
     def format_current_file(self) -> None:
         self._format_active_editor(selection_only=False)
@@ -2884,6 +2923,51 @@ class PythonIDE(Window):
     def _on_problem_count_changed(self, count: int):
         self.diagnostics_controller._on_problem_count_changed(count)
 
+    def _navigate_to_problem_location(self, file_path: str, line: int, col: int) -> bool:
+        cpath = self._canonical_path(file_path)
+        if os.path.exists(cpath):
+            self.open_file(cpath)
+
+        widget = self._find_open_document_for_path(cpath)
+        if widget is None:
+            return False
+
+        line_num = max(1, int(line or 1))
+        col_num = max(1, int(col or 1))
+        if isinstance(widget, EditorWidget):
+            block = widget.document().findBlockByNumber(line_num - 1)
+            if not block.isValid():
+                block = widget.document().lastBlock()
+            cursor = QTextCursor(block)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Right,
+                QTextCursor.MoveMode.MoveAnchor,
+                col_num - 1,
+            )
+            widget.setTextCursor(cursor)
+            widget.centerCursor()
+        elif isinstance(widget, TDocDocumentWidget):
+            widget.jump_to_line(line_num, col_num)
+        else:
+            cursor_getter = getattr(widget, "textCursor", None)
+            doc_getter = getattr(widget, "document", None)
+            if callable(cursor_getter) and callable(doc_getter):
+                try:
+                    doc = doc_getter()
+                    block = doc.findBlockByNumber(line_num - 1)
+                    if block.isValid():
+                        cursor = QTextCursor(block)
+                        cursor.movePosition(
+                            QTextCursor.MoveOperation.Right,
+                            QTextCursor.MoveMode.MoveAnchor,
+                            col_num - 1,
+                        )
+                        widget.setTextCursor(cursor)
+                except Exception:
+                    pass
+        self._focus_document_widget(widget)
+        return True
+
     def _on_problem_activated(self, file_path: str, line: int, col: int):
         self.diagnostics_controller._on_problem_activated(file_path, line, col)
 
@@ -2893,16 +2977,24 @@ class PythonIDE(Window):
     def _on_problem_remove_unused_import_requested(self, diag_obj: object):
         self.diagnostics_controller._on_problem_remove_unused_import_requested(diag_obj)
 
+    def _on_problem_add_tdoc_symbol_requested(self, diag_obj: object):
+        self.diagnostics_controller._on_problem_add_tdoc_symbol_requested(diag_obj)
+
+    def _on_problem_capitalize_tdoc_section_requested(self, diag_obj: object):
+        self.diagnostics_controller._on_problem_capitalize_tdoc_section_requested(diag_obj)
+
     def _on_problem_clear_file_requested(self, file_path: str) -> None:
         cpath = self._canonical_path(file_path)
         self.lint_manager.clear_file(cpath)
         self.cpp_language_pack.clear_file_diagnostics(cpath)
         self.rust_language_pack.clear_file_diagnostics(cpath)
+        self._clear_tdoc_diagnostics_for_path(cpath)
 
     def _on_problem_clear_all_requested(self) -> None:
         self.lint_manager.clear_all()
         self.cpp_language_pack.clear_all_diagnostics()
         self.rust_language_pack.clear_all_diagnostics()
+        self._clear_all_tdoc_diagnostics()
 
     def _apply_import_candidate_to_editor(self, ed: EditorWidget, candidate: dict, symbol: str) -> str:
         return self.diagnostics_controller._apply_import_candidate_to_editor(ed, candidate, symbol)
@@ -2999,15 +3091,29 @@ class PythonIDE(Window):
         )
 
     def lint_current_file(self):
-        ed = self.current_editor()
-        if not isinstance(ed, EditorWidget):
+        widget = self._current_document_widget()
+        if widget is None:
             self.statusBar().showMessage("No active editor to lint.", 1800)
             return
-        if not ed.file_path:
+        file_path = self._document_widget_path(widget)
+        if not file_path:
             self.statusBar().showMessage("Save the file before linting.", 2200)
             return
+
+        cpath = self._canonical_path(file_path)
+        if self._is_tdoc_related_path(cpath):
+            self._refresh_tdoc_diagnostics_for_path(cpath)
+            if self.dock_problems is not None:
+                self.dock_problems.show()
+            self.statusBar().showMessage(f"TDOC validation completed for {os.path.basename(cpath)}", 1800)
+            return
+
+        ed = widget if isinstance(widget, EditorWidget) else None
+        if not isinstance(ed, EditorWidget):
+            self.statusBar().showMessage("Linting is available for Python and TDOC files.", 2200)
+            return
         if not self._is_python_file_path(ed.file_path):
-            self.statusBar().showMessage("Linting is available for Python files only.", 2200)
+            self.statusBar().showMessage("Linting is available for Python and TDOC files.", 2200)
             self.lint_manager.clear_file(self._canonical_path(ed.file_path))
             ed.clear_lint_diagnostics()
             return
@@ -3019,6 +3125,7 @@ class PythonIDE(Window):
 
     def lint_project(self):
         self.lint_manager.request_lint_project()
+        self._refresh_tdoc_diagnostics_for_project()
         if self.dock_problems is not None:
             self.dock_problems.show()
 
@@ -3026,6 +3133,7 @@ class PythonIDE(Window):
         self.lint_manager.clear_all()
         self.cpp_language_pack.clear_all_diagnostics()
         self.rust_language_pack.clear_all_diagnostics()
+        self._clear_all_tdoc_diagnostics()
         self.statusBar().showMessage("Diagnostics cleared.", 1500)
 
     # ---------- Project Explorer ----------
@@ -3360,12 +3468,11 @@ class PythonIDE(Window):
 
     def _collect_open_file_paths(self) -> set[str]:
         paths: set[str] = set()
-        for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
                 continue
-            if not isinstance(ed.file_path, str) or not ed.file_path.strip():
-                continue
-            paths.add(self._canonical_path(ed.file_path))
+            paths.add(self._canonical_path(path))
         config_path = str(self.project_config_path or "").strip()
         if config_path:
             paths.add(self._canonical_path(config_path))
@@ -3400,7 +3507,7 @@ class PythonIDE(Window):
         self._project_config_reload_source = ""
         self._reload_project_config_from_disk(source=source, honor_open_editors=honor_open_editors)
 
-    def _note_editor_saved(self, ed: EditorWidget, *, source: str) -> None:
+    def _note_editor_saved(self, ed: object, *, source: str) -> None:
         self.workspace_controller._note_editor_saved(ed, source=source)
 
     def _external_file_signature(self, path: str) -> tuple[bool, int, int] | None:
@@ -3533,32 +3640,582 @@ class PythonIDE(Window):
     def _set_active_terminal(self, terminal: TerminalWidget | None):
         self.terminal = terminal
 
+    @staticmethod
+    def _document_widget_path(widget: QWidget | None) -> str:
+        return str(getattr(widget, "file_path", "") or "").strip()
+
+    def _iter_open_document_widgets(self) -> list[QWidget]:
+        return self.editor_workspace.all_document_widgets()
+
+    def _is_tdoc_path(self, file_path: str | None) -> bool:
+        return is_tdoc_document_path(file_path)
+
+    def _is_tdoc_related_path(self, file_path: str | None) -> bool:
+        return is_tdoc_related_path(file_path)
+
+    def _current_document_widget(self) -> QWidget | None:
+        return self.editor_workspace.active_document_widget()
+
+    def _find_open_document_for_path(self, canonical_path: str) -> QWidget | None:
+        target = self._canonical_path(canonical_path)
+        found = self.editor_workspace.find_document_by_path(target)
+        return found if isinstance(found, QWidget) else None
+
+    def _focus_document_widget(self, widget: QWidget) -> None:
+        if not isinstance(widget, QWidget):
+            return
+        for tabs in self.editor_workspace.all_tabs():
+            idx = tabs.indexOf(widget)
+            if idx < 0:
+                continue
+            tabs.setCurrentIndex(idx)
+            widget.setFocus()
+            return
+
     def _find_open_editor_for_path(self, canonical_path: str) -> EditorWidget | None:
         target = self._canonical_path(canonical_path)
-        preferred_tabs = None
-        try:
-            preferred_tabs = self.editor_workspace._current_tabs()
-        except Exception:
-            preferred_tabs = None
-        if preferred_tabs is not None:
-            for i in range(preferred_tabs.count()):
-                w = preferred_tabs.widget(i)
-                if isinstance(w, EditorWidget) and w.file_path and self._canonical_path(w.file_path) == target:
-                    return w
-        for ed in self.editor_workspace.all_editors():
-            if not ed.file_path:
-                continue
-            if self._canonical_path(ed.file_path) == target:
-                return ed
-        return None
+        found = self._find_open_document_for_path(target)
+        return found if isinstance(found, EditorWidget) else None
 
     def _focus_editor(self, ed: EditorWidget):
-        for tabs in self.editor_workspace.all_tabs():
-            idx = tabs.indexOf(ed)
-            if idx >= 0:
-                tabs.setCurrentIndex(idx)
-                ed.setFocus()
+        self._focus_document_widget(ed)
+
+    def _set_source_diagnostics_for_file(self, file_path: str, source: str, rows: list[dict]) -> None:
+        key = self._canonical_path(file_path)
+        clean_rows = [d for d in rows if isinstance(d, dict)]
+        existing = self._diagnostics_by_file.get(key, [])
+        keep = [
+            d
+            for d in existing
+            if isinstance(d, dict) and str(d.get("source") or "").strip().lower() != str(source).strip().lower()
+        ]
+        merged = keep + clean_rows
+        if merged:
+            self._diagnostics_by_file[key] = merged
+        else:
+            self._diagnostics_by_file.pop(key, None)
+        self._set_problems_panel_data()
+        self._apply_lint_to_open_editors_for_file(key)
+
+    def _set_tdoc_diagnostics_for_root(self, root: str, diagnostics_by_file: dict[str, list[dict]]) -> None:
+        root_key = self._canonical_path(root)
+        previous = self._tdoc_diagnostics_by_root.get(root_key, {})
+        previous_files = set(previous.keys())
+
+        normalized: dict[str, list[dict]] = {}
+        for file_path, rows in diagnostics_by_file.items():
+            cpath = self._canonical_path(file_path)
+            clean_rows = [d for d in rows if isinstance(d, dict)]
+            if clean_rows:
+                normalized[cpath] = clean_rows
+
+        self._tdoc_diagnostics_by_root[root_key] = normalized
+        current_files = set(normalized.keys())
+
+        for file_path in sorted(previous_files | current_files):
+            self._set_source_diagnostics_for_file(file_path, "tdoc", normalized.get(file_path, []))
+
+    def _clear_tdoc_diagnostics_for_path(self, file_path: str) -> None:
+        cpath = self._canonical_path(file_path)
+        for root, by_file in list(self._tdoc_diagnostics_by_root.items()):
+            if cpath not in by_file:
+                continue
+            remaining = dict(by_file)
+            remaining.pop(cpath, None)
+            if remaining:
+                self._tdoc_diagnostics_by_root[root] = remaining
+            else:
+                self._tdoc_diagnostics_by_root.pop(root, None)
+            self._set_source_diagnostics_for_file(cpath, "tdoc", [])
+
+    def _clear_all_tdoc_diagnostics(self) -> None:
+        roots = list(self._tdoc_diagnostics_by_root.items())
+        self._tdoc_diagnostics_by_root.clear()
+        for root, by_file in roots:
+            _ = root
+            for file_path in by_file.keys():
+                self._set_source_diagnostics_for_file(file_path, "tdoc", [])
+
+    def _schedule_tdoc_validation(self, file_path: str, *, delay_ms: int = 520) -> None:
+        cpath = self._canonical_path(file_path)
+        if not self._is_tdoc_related_path(cpath):
+            return
+        root = self._canonical_path(resolve_tdoc_root_for_path(cpath, project_root=self.project_root))
+        self._tdoc_pending_paths_by_root[root] = cpath
+        timer = self._tdoc_validation_timers.get(root)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda r=root: self._flush_tdoc_validation(r))
+            self._tdoc_validation_timers[root] = timer
+        timer.start(max(120, int(delay_ms)))
+
+    def _flush_tdoc_validation(self, root: str) -> None:
+        target = self._tdoc_pending_paths_by_root.pop(root, "")
+        if not target:
+            return
+        self._refresh_tdoc_diagnostics_for_path(target)
+
+    def _refresh_tdoc_diagnostics_for_path(self, file_path: str) -> None:
+        cpath = self._canonical_path(file_path)
+        if not self._is_tdoc_related_path(cpath):
+            return
+        root, by_file = collect_tdoc_diagnostics(
+            file_path=cpath,
+            project_root=self.project_root,
+            canonicalize=self._canonical_path,
+            source="tdoc",
+        )
+        self._set_tdoc_diagnostics_for_root(root, by_file)
+
+    def _refresh_all_tdoc_diagnostics(self) -> None:
+        roots: set[str] = set()
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not self._is_tdoc_related_path(path):
+                continue
+            root, by_file = collect_tdoc_diagnostics(
+                file_path=path,
+                project_root=self.project_root,
+                canonicalize=self._canonical_path,
+                source="tdoc",
+            )
+            roots.add(root)
+            self._set_tdoc_diagnostics_for_root(root, by_file)
+        stale_roots = [root for root in self._tdoc_diagnostics_by_root.keys() if root not in roots]
+        for root in stale_roots:
+            by_file = self._tdoc_diagnostics_by_root.pop(root, {})
+            for file_path in by_file.keys():
+                self._set_source_diagnostics_for_file(file_path, "tdoc", [])
+        if not roots and not stale_roots:
+            self._clear_all_tdoc_diagnostics()
+
+    def _refresh_tdoc_diagnostics_for_project(self) -> None:
+        candidates: list[str] = []
+        visited_roots: set[str] = set()
+        for walk_root, _dirs, files in os.walk(self.project_root):
+            marker = os.path.join(walk_root, ".tdocproject")
+            if ".tdocproject" in files:
+                candidates.append(marker)
+            has_doc = any(name.lower().endswith(".tdoc") for name in files)
+            if has_doc:
+                # one sample document path per folder is enough to resolve/project-validate the root
+                sample = next((name for name in files if name.lower().endswith(".tdoc")), "")
+                if sample:
+                    candidates.append(os.path.join(walk_root, sample))
+
+        if not candidates:
+            self._clear_all_tdoc_diagnostics()
+            return
+
+        for candidate in candidates:
+            root = self._canonical_path(resolve_tdoc_root_for_path(candidate, project_root=self.project_root))
+            if root in visited_roots:
+                continue
+            visited_roots.add(root)
+            self._refresh_tdoc_diagnostics_for_path(candidate)
+
+    def _on_tdoc_file_link_requested(self, widget_ref, target: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+        target_path, jump_line = widget.resolve_file_link_target(target)
+        if not target_path:
+            return
+        if not os.path.exists(target_path):
+            answer = QMessageBox.question(
+                self,
+                "Missing TDOC File",
+                f"Create linked file?\n\n{target_path}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
                 return
+            try:
+                Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(target_path).write_text("", encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.warning(self, "TDOC", f"Could not create file:\n{exc}")
+                return
+            self.refresh_subtree(os.path.dirname(target_path))
+        self.open_file(target_path)
+        opened = self._find_open_document_for_path(target_path)
+        if isinstance(opened, TDocDocumentWidget) and jump_line:
+            opened.jump_to_line(jump_line, 1)
+        elif isinstance(opened, EditorWidget) and jump_line:
+            block = opened.document().findBlockByNumber(max(0, int(jump_line) - 1))
+            if block.isValid():
+                cursor = QTextCursor(block)
+                opened.setTextCursor(cursor)
+                opened.centerCursor()
+
+    def _on_tdoc_symbol_link_requested(self, widget_ref, symbol: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+        index_path = widget.ensure_index_file()
+        if not index_path:
+            QMessageBox.information(
+                self,
+                "TDOC Index",
+                "No TDOC project marker found. Create a .tdocproject file first.",
+            )
+            return
+        self.open_file(index_path)
+        opened = self._find_open_document_for_path(index_path)
+        if isinstance(opened, TDocDocumentWidget):
+            opened.jump_to_symbol(symbol)
+
+    def _tdoc_root_for_widget(self, widget: TDocDocumentWidget | None) -> str:
+        if not isinstance(widget, TDocDocumentWidget):
+            return ""
+        root = str(widget.tdoc_root or "").strip()
+        if root:
+            return self._canonical_path(root)
+        path = self._document_widget_path(widget)
+        if not path:
+            return ""
+        return self._canonical_path(resolve_tdoc_root_for_path(path, project_root=self.project_root))
+
+    def _open_tdoc_roots(self) -> list[str]:
+        roots: list[str] = []
+        seen: set[str] = set()
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
+                continue
+            cpath = self._canonical_path(path)
+            if not self._is_tdoc_related_path(cpath):
+                continue
+            if isinstance(widget, TDocDocumentWidget) and str(widget.tdoc_root or "").strip():
+                root = self._canonical_path(str(widget.tdoc_root))
+            else:
+                root = self._canonical_path(resolve_tdoc_root_for_path(cpath, project_root=self.project_root))
+            if root in seen:
+                continue
+            seen.add(root)
+            roots.append(root)
+        return roots
+
+    def build_open_tdoc_indexes(self) -> None:
+        roots = self._open_tdoc_roots()
+        if not roots:
+            self.statusBar().showMessage("No open TDOC documents.", 1800)
+            return
+
+        built = 0
+        missing_marker = 0
+        refreshed_roots: set[str] = set()
+        for root in roots:
+            if not self._save_dirty_tdoc_documents_for_root(root):
+                return
+            if not TDocProjectIndex.has_project_marker(root):
+                missing_marker += 1
+                continue
+            out = TDocProjectIndex.build_index(root)
+            if out is None:
+                continue
+            built += 1
+            refreshed_roots.add(root)
+            self._reload_open_tdoc_documents_for_root(root)
+            marker_path = self._canonical_path(str(Path(root) / PROJECT_MARKER_FILENAME))
+            self._refresh_tdoc_diagnostics_for_path(marker_path if os.path.exists(marker_path) else str(out))
+
+        for root in refreshed_roots:
+            self.refresh_subtree(root)
+        if refreshed_roots:
+            self.schedule_git_status_refresh(delay_ms=90)
+
+        if built and missing_marker:
+            self.statusBar().showMessage(
+                f"Built TDOC index for {built} project(s); {missing_marker} missing .tdocproject.",
+                3200,
+            )
+            return
+        if built:
+            self.statusBar().showMessage(f"Built TDOC index for {built} project(s).", 2200)
+            return
+        if missing_marker:
+            self.statusBar().showMessage(
+                "TDOC index not built: no .tdocproject found for open TDOC files.",
+                3200,
+            )
+            return
+        self.statusBar().showMessage("TDOC index build failed.", 2200)
+
+    def _save_dirty_tdoc_documents_for_root(self, root: str) -> bool:
+        root_c = self._canonical_path(root)
+        seen: set[str] = set()
+        refresh_dirs: set[str] = set()
+        saved_count = 0
+
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
+                continue
+            cpath = self._canonical_path(path)
+            if not self._path_has_prefix(cpath, root_c):
+                continue
+            if not self._is_tdoc_related_path(cpath):
+                continue
+
+            key = cpath if not isinstance(widget, EditorWidget) else self._doc_key_for_editor(widget)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            doc_getter = getattr(widget, "document", None)
+            if not callable(doc_getter):
+                continue
+            try:
+                doc = doc_getter()
+                modified = bool(doc.isModified())
+            except Exception:
+                continue
+            if not modified:
+                continue
+
+            saver = getattr(widget, "save_file", None)
+            if not callable(saver):
+                continue
+            if not saver():
+                self.statusBar().showMessage(
+                    f"TDOC operation canceled: could not save {os.path.basename(cpath)}.",
+                    2600,
+                )
+                return False
+
+            saved_count += 1
+            self._note_editor_saved(widget, source="tdoc operation pre-save")
+            refresh_dirs.add(os.path.dirname(cpath))
+
+        for folder in refresh_dirs:
+            self.refresh_subtree(folder)
+        if saved_count:
+            self.schedule_git_status_refresh(delay_ms=90)
+        return True
+
+    def _reload_open_tdoc_documents_for_root(self, root: str) -> None:
+        root_c = self._canonical_path(root)
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
+                continue
+            cpath = self._canonical_path(path)
+            if not self._path_has_prefix(cpath, root_c):
+                continue
+            if not self._is_tdoc_related_path(cpath):
+                continue
+            if not os.path.exists(cpath):
+                continue
+
+            loaded = False
+            if isinstance(widget, EditorWidget):
+                try:
+                    widget.load_file(cpath)
+                    loaded = True
+                except Exception:
+                    loaded = False
+            else:
+                loader = getattr(widget, "load_file", None)
+                if callable(loader):
+                    try:
+                        loaded = bool(loader(cpath))
+                    except Exception:
+                        loaded = False
+            if not loaded and callable(getattr(widget, "setPlainText", None)):
+                try:
+                    widget.setPlainText(Path(cpath).read_text(encoding="utf-8"))
+                    doc_getter = getattr(widget, "document", None)
+                    if callable(doc_getter):
+                        try:
+                            doc_getter().setModified(False)
+                        except Exception:
+                            pass
+                    loaded = True
+                except Exception:
+                    loaded = False
+
+            if not loaded:
+                continue
+
+            for tabs in self.editor_workspace.all_tabs():
+                idx = tabs.indexOf(widget)
+                if idx >= 0:
+                    tabs._refresh_tab_title(widget)
+                    break
+
+    def _on_tdoc_rename_alias_requested(self, widget_ref, old_alias: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+
+        old = str(old_alias or "").strip()
+        if not old:
+            return
+        linked_file, _ = parse_file_link(old)
+        if linked_file:
+            return
+
+        root = self._tdoc_root_for_widget(widget)
+        if not root or not TDocProjectIndex.has_project_marker(root):
+            QMessageBox.information(
+                self,
+                "Rename TDOC Alias",
+                "No TDOC project marker found. Create a .tdocproject file first.",
+            )
+            return
+
+        new_alias, ok = QInputDialog.getText(
+            self,
+            "Rename TDOC Alias",
+            f"Rename alias '{old}' to:",
+            text=old,
+        )
+        if not ok:
+            return
+        new_alias = str(new_alias or "").strip()
+        if not new_alias:
+            QMessageBox.warning(self, "Rename TDOC Alias", "Alias cannot be empty.")
+            return
+        if parse_file_link(new_alias)[0]:
+            QMessageBox.warning(self, "Rename TDOC Alias", "Alias cannot be a file-link value.")
+            return
+        if new_alias.casefold() == old.casefold():
+            return
+
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+
+        marker_changed = TDocProjectIndex.rename_alias_in_marker(root, old, new_alias)
+        docs_changed = TDocProjectIndex.rename_alias_in_documents(root, old, new_alias)
+
+        if not marker_changed and docs_changed == 0:
+            QMessageBox.information(self, "Rename TDOC Alias", f"No matches found for '{old}'.")
+            return
+
+        TDocProjectIndex.build_index(root)
+        self._reload_open_tdoc_documents_for_root(root)
+        marker_path = self._canonical_path(str(Path(root) / PROJECT_MARKER_FILENAME))
+        if os.path.exists(marker_path):
+            self._refresh_tdoc_diagnostics_for_path(marker_path)
+        else:
+            self._refresh_tdoc_diagnostics_for_path(widget.file_path or root)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+
+        QMessageBox.information(
+            self,
+            "Rename TDOC Alias",
+            f"Renamed '{old}' to '{new_alias}'. Updated {docs_changed} document file(s).",
+        )
+
+    def _on_tdoc_normalize_symbol_requested(self, widget_ref, symbol_or_alias: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+
+        current = str(symbol_or_alias or "").strip()
+        if not current:
+            return
+        linked_file, _ = parse_file_link(current)
+        if linked_file:
+            return
+
+        root = self._tdoc_root_for_widget(widget)
+        if not root or not TDocProjectIndex.has_project_marker(root):
+            QMessageBox.information(
+                self,
+                "Normalize TDOC Symbol",
+                "No TDOC project marker found. Create a .tdocproject file first.",
+            )
+            return
+
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+
+        alias_to_symbol, _sym, _sec, _inc, _ign, _meta = TDocProjectIndex.load_aliases(root)
+        canonical_symbol = alias_to_symbol.get(current.casefold())
+        if not canonical_symbol:
+            QMessageBox.information(
+                self,
+                "Normalize TDOC Symbol",
+                f"'{current}' is not defined in .tdocproject.",
+            )
+            return
+
+        touched_files, replacements = TDocProjectIndex.normalize_symbol_in_documents(
+            root,
+            alias_to_symbol,
+            canonical_symbol,
+        )
+
+        TDocProjectIndex.build_index(root)
+        self._reload_open_tdoc_documents_for_root(root)
+        marker_path = self._canonical_path(str(Path(root) / PROJECT_MARKER_FILENAME))
+        if os.path.exists(marker_path):
+            self._refresh_tdoc_diagnostics_for_path(marker_path)
+        else:
+            self._refresh_tdoc_diagnostics_for_path(widget.file_path or root)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+
+        QMessageBox.information(
+            self,
+            "Normalize TDOC Symbol",
+            (
+                f"Normalized '{canonical_symbol}'. Updated {replacements} link(s) "
+                f"across {touched_files} file(s)."
+            ),
+        )
+
+    def _open_tdoc_file(self, file_path: str) -> TDocDocumentWidget | None:
+        cpath = self._canonical_path(file_path)
+        existing = self._find_open_document_for_path(cpath)
+        if isinstance(existing, TDocDocumentWidget):
+            self._focus_document_widget(existing)
+            self._schedule_tdoc_validation(cpath, delay_ms=0)
+            return existing
+
+        widget = TDocDocumentWidget(
+            file_path=cpath,
+            project_root=self.project_root,
+            canonicalize=self._canonical_path,
+        )
+        if not widget.file_path:
+            return None
+        self._apply_editor_background_to_editor(widget)
+        try:
+            widget.set_editor_font_preferences(
+                family=str(self.font_family or "").strip(),
+                point_size=int(self.font_size),
+            )
+        except Exception:
+            pass
+
+        ref = weakref.ref(widget)
+        widget.open_file_by_name = lambda target, w=ref: self._on_tdoc_file_link_requested(w, target)
+        widget.open_symbol = lambda symbol, w=ref: self._on_tdoc_symbol_link_requested(w, symbol)
+        widget.rename_alias = lambda label, w=ref: self._on_tdoc_rename_alias_requested(w, label)
+        widget.normalize_symbol = lambda label, w=ref: self._on_tdoc_normalize_symbol_requested(w, label)
+        font_step_signal = getattr(widget, "editorFontSizeStepRequested", None)
+        if font_step_signal is not None and hasattr(font_step_signal, "connect"):
+            font_step_signal.connect(lambda step, w=ref: self._on_editor_font_size_step_requested(w, step))
+        def _on_tdoc_changed(wref=ref):
+            obj = wref()
+            if not isinstance(obj, TDocDocumentWidget):
+                return
+            path = self._document_widget_path(obj)
+            if path:
+                self._schedule_tdoc_validation(path)
+        widget.textChanged.connect(_on_tdoc_changed)
+        widget.textChanged.connect(self._schedule_autosave)
+
+        tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+        tabs.add_editor(widget)
+        self._schedule_tdoc_validation(cpath, delay_ms=0)
+        return widget
 
     def _save_editor_for_run(self, ed: EditorWidget) -> str | None:
         if not ed.file_path:
@@ -3617,65 +4274,84 @@ class PythonIDE(Window):
         old_c = self._canonical_path(old_path)
         new_c = self._canonical_path(new_path)
         moved_editors: list[EditorWidget] = []
-        processed_docs: set[str] = set()
+        processed_code_docs: set[str] = set()
 
-        for ed in self.editor_workspace.all_editors():
-            doc_key = self._doc_key_for_editor(ed)
-            if doc_key in processed_docs:
+        for widget in self._iter_open_document_widgets():
+            if isinstance(widget, EditorWidget):
+                doc_key = self._doc_key_for_editor(widget)
+                if doc_key in processed_code_docs:
+                    continue
+                processed_code_docs.add(doc_key)
+
+            current_path = self._document_widget_path(widget)
+            if not current_path:
                 continue
-            processed_docs.add(doc_key)
-            if not ed.file_path:
-                continue
-            src = self._canonical_path(ed.file_path)
+            src = self._canonical_path(current_path)
             if src == old_c:
-                ed.file_path = new_c
-                ed.set_file_path(new_c)
-                self._refresh_editor_title(ed)
-                moved_editors.append(ed)
-                continue
-            if self._path_has_prefix(src, old_c):
+                relocated = new_c
+            elif self._path_has_prefix(src, old_c):
                 try:
                     suffix = os.path.relpath(src, old_c)
                 except Exception:
                     continue
                 relocated = self._canonical_path(os.path.join(new_c, suffix))
-                ed.file_path = relocated
-                ed.set_file_path(relocated)
-                self._refresh_editor_title(ed)
-                moved_editors.append(ed)
+            else:
+                continue
+
+            if isinstance(widget, EditorWidget):
+                widget.file_path = relocated
+                widget.set_file_path(relocated)
+                self._refresh_editor_title(widget)
+                moved_editors.append(widget)
+            elif hasattr(widget, "set_file_path"):
+                try:
+                    widget.set_file_path(relocated)
+                except Exception:
+                    pass
+                for tabs in self.editor_workspace.all_tabs():
+                    idx = tabs.indexOf(widget)
+                    if idx >= 0:
+                        tabs._refresh_tab_title(widget)
+                        break
 
         self.lint_manager.clear_paths_under(old_c)
+        self._clear_tdoc_diagnostics_for_path(old_c)
         for ed in moved_editors:
             self._attach_editor_lint_hooks(ed)
             self._request_lint_for_editor(ed, reason="open", include_source_if_modified=True)
+        self._refresh_all_tdoc_diagnostics()
 
     def _detach_deleted_editors(self, deleted_path: str):
         deleted_c = self._canonical_path(deleted_path)
         self.lint_manager.clear_paths_under(deleted_c)
-        doc_keys_to_close: set[str] = set()
-        for ed in self.editor_workspace.all_editors():
-            doc_key = self._doc_key_for_editor(ed)
-            if doc_key in doc_keys_to_close:
-                continue
-            if not ed.file_path:
-                continue
-            src = self._canonical_path(ed.file_path)
-            if src == deleted_c or self._path_has_prefix(src, deleted_c):
-                doc_keys_to_close.add(doc_key)
+        widgets_to_close: set[QWidget] = set()
+        seen_code_doc_keys: set[str] = set()
 
-        if not doc_keys_to_close:
+        for widget in self._iter_open_document_widgets():
+            if isinstance(widget, EditorWidget):
+                doc_key = self._doc_key_for_editor(widget)
+                if doc_key in seen_code_doc_keys:
+                    continue
+                seen_code_doc_keys.add(doc_key)
+            path = self._document_widget_path(widget)
+            if not path:
+                continue
+            src = self._canonical_path(path)
+            if src == deleted_c or self._path_has_prefix(src, deleted_c):
+                widgets_to_close.add(widget)
+
+        if not widgets_to_close:
             return
 
         for tabs in list(self.editor_workspace.all_tabs()):
             for idx in range(tabs.count() - 1, -1, -1):
                 widget = tabs.widget(idx)
-                if not isinstance(widget, EditorWidget):
-                    continue
-                if self._doc_key_for_editor(widget) not in doc_keys_to_close:
+                if widget not in widgets_to_close:
                     continue
                 tabs.removeTab(idx)
                 widget.hide()
-                self.editor_workspace.release_document_view(widget, self._doc_key_for_editor(widget))
+                if isinstance(widget, EditorWidget):
+                    self.editor_workspace.release_document_view(widget, self._doc_key_for_editor(widget))
                 widget.deleteLater()
             owner = getattr(tabs, "owner_window", None)
             if owner is not None and tabs.count() == 0:
@@ -3683,6 +4359,8 @@ class PythonIDE(Window):
                     owner.close()
                 except Exception:
                     pass
+        self._clear_tdoc_diagnostics_for_path(deleted_c)
+        self._refresh_all_tdoc_diagnostics()
         self.editor_workspace.request_cleanup_empty_panes()
         self._refresh_runtime_action_states()
 
@@ -3783,14 +4461,25 @@ class PythonIDE(Window):
         if os.path.isdir(cpath):
             return
 
-        existing = self._find_open_editor_for_path(cpath)
+        existing = self._find_open_document_for_path(cpath)
         if existing:
-            self._attach_editor_lint_hooks(existing)
-            self._focus_editor(existing)
-            self._schedule_symbol_outline_refresh(immediate=True)
+            if isinstance(existing, EditorWidget):
+                self._attach_editor_lint_hooks(existing)
+                self._schedule_symbol_outline_refresh(immediate=True)
+            self._focus_document_widget(existing)
+            if self._is_tdoc_related_path(cpath):
+                self._schedule_tdoc_validation(cpath, delay_ms=0)
             self.statusBar().showMessage(f"Focused already-open file: {cpath}", 1800)
             self._refresh_runtime_action_states()
             return
+
+        if self._is_tdoc_path(cpath):
+            opened_tdoc = self._open_tdoc_file(cpath)
+            if opened_tdoc is not None:
+                self._refresh_runtime_action_states()
+                QTimer.singleShot(0, self.apply_default_layout)
+                QTimer.singleShot(80, self.apply_default_layout)
+                return
 
         self.editor_workspace.open_editor(
             os.path.basename(cpath),
@@ -3808,6 +4497,8 @@ class PythonIDE(Window):
             self._assign_dock_identity(ed)
             self._attach_editor_lint_hooks(ed)
             self._schedule_symbol_outline_refresh(immediate=True)
+            if self._is_tdoc_related_path(cpath):
+                self._schedule_tdoc_validation(cpath, delay_ms=0)
         self._refresh_runtime_action_states()
 
         QTimer.singleShot(0, self.apply_default_layout)
@@ -3817,26 +4508,37 @@ class PythonIDE(Window):
         return self.editor_workspace.active_editor()
 
     def save_current_editor(self):
-        ed = self.current_editor()
-        if not ed:
+        widget = self._current_document_widget()
+        if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
             return
 
-        if not ed.file_path:
+        path = self._document_widget_path(widget)
+        if not path:
             self.statusBar().showMessage("Cannot save: editor has no backing file.", 2200)
             return
 
-        if ed.save_file():
-            self._assign_dock_identity(ed)
-            self.refresh_subtree(os.path.dirname(ed.file_path))
-            self._note_editor_saved(ed, source="manual save")
-            self._attach_editor_lint_hooks(ed)
-            self._request_lint_for_editor(ed, reason="save", include_source_if_modified=False)
-            self.schedule_git_status_refresh(delay_ms=90)
+        if not callable(getattr(widget, "save_file", None)):
+            self.statusBar().showMessage("This tab cannot be saved.", 2200)
+            return
+
+        if not widget.save_file():
+            return
+
+        cpath = self._canonical_path(path)
+        self._note_editor_saved(widget, source="manual save")
+        if isinstance(widget, EditorWidget):
+            self._assign_dock_identity(widget)
+            self._attach_editor_lint_hooks(widget)
+            self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+        if self._is_tdoc_related_path(cpath):
+            self._schedule_tdoc_validation(cpath, delay_ms=0)
+        self.refresh_subtree(os.path.dirname(cpath))
+        self.schedule_git_status_refresh(delay_ms=90)
 
     def save_current_editor_as(self):
-        ed = self.current_editor()
-        if not ed:
+        widget = self._current_document_widget()
+        if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
             return
 
@@ -3849,28 +4551,50 @@ class PythonIDE(Window):
         if not path:
             return
 
-        old_path = self._canonical_path(ed.file_path) if ed.file_path else None
-        ed.file_path = self._canonical_path(path)
+        old_path = self._canonical_path(self._document_widget_path(widget)) if self._document_widget_path(widget) else None
+        new_path = self._canonical_path(path)
 
-        if ed.save_file():
-            self._assign_dock_identity(ed)
-            if old_path and old_path != ed.file_path:
+        if isinstance(widget, EditorWidget):
+            widget.file_path = new_path
+        elif hasattr(widget, "set_file_path"):
+            try:
+                widget.set_file_path(new_path)
+            except Exception:
+                self.statusBar().showMessage("Could not update target path for this tab.", 2200)
+                return
+        else:
+            setattr(widget, "file_path", new_path)
+
+        saver = getattr(widget, "save_file", None)
+        if not callable(saver):
+            self.statusBar().showMessage("This tab cannot be saved.", 2200)
+            return
+        if not saver():
+            return
+
+        self._note_editor_saved(widget, source="save as")
+        if isinstance(widget, EditorWidget):
+            self._assign_dock_identity(widget)
+            if old_path and old_path != new_path:
                 self.lint_manager.clear_file(old_path)
-            if old_path:
-                self.refresh_subtree(os.path.dirname(old_path))
-            self.refresh_subtree(os.path.dirname(ed.file_path))
-            self._note_editor_saved(ed, source="save as")
-            self._attach_editor_lint_hooks(ed)
-            self._request_lint_for_editor(ed, reason="save", include_source_if_modified=False)
-            self.schedule_git_status_refresh(delay_ms=90)
+            self._attach_editor_lint_hooks(widget)
+            self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+        elif old_path and old_path != new_path:
+            self._clear_tdoc_diagnostics_for_path(old_path)
+        if old_path:
+            self.refresh_subtree(os.path.dirname(old_path))
+        self.refresh_subtree(os.path.dirname(new_path))
+        if self._is_tdoc_related_path(new_path):
+            self._schedule_tdoc_validation(new_path, delay_ms=0)
+        self.schedule_git_status_refresh(delay_ms=90)
 
     def close_active_editor(self):
-        ed = self.current_editor()
-        if not ed:
+        widget = self._current_document_widget()
+        if widget is None:
             return
 
         tabs = None
-        w = ed.parentWidget()
+        w = widget.parentWidget()
         while w is not None:
             if isinstance(w, EditorTabs):
                 tabs = w
@@ -3880,7 +4604,7 @@ class PythonIDE(Window):
         if tabs is None:
             return
 
-        idx = tabs.indexOf(ed)
+        idx = tabs.indexOf(widget)
         if idx < 0:
             return
 
@@ -4154,6 +4878,9 @@ class PythonIDE(Window):
             self._attach_editor_rust_hooks(ed)
             if not bool(ai_cfg.get("enabled", False)):
                 ed.clear_inline_suggestion()
+        for widget in self._iter_open_document_widgets():
+            if isinstance(widget, TDocDocumentWidget):
+                self._apply_editor_background_to_editor(widget)
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()

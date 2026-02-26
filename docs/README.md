@@ -41,6 +41,7 @@ User documentation for running, configuring, and troubleshooting PyTPO.
 - [Language Support Index](languages/README.md)
 - [C/C++ Support (clangd)](languages/cpp-support.md)
 - [Rust Support (rust-analyzer + Cargo)](languages/rust-support.md)
+- [TDOC Support (`.tdoc` + `.tdocproject`)](languages/tdoc-support.md)
 
 ## Formatting
 

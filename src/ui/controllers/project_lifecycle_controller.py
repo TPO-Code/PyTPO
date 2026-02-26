@@ -154,33 +154,48 @@ class ProjectLifecycleController:
 
     def _confirm_save_modified_editors(self) -> bool:
         seen_docs: set[str] = set()
-        for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+        for widget in self.editor_workspace.all_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
                 continue
-            doc_key = self._doc_key_for_editor(ed)
+            if isinstance(widget, EditorWidget):
+                doc_key = self._doc_key_for_editor(widget)
+            else:
+                doc_key = self._canonical_path(path)
             if doc_key in seen_docs:
                 continue
             seen_docs.add(doc_key)
-            if not ed.document().isModified():
+
+            doc_getter = getattr(widget, "document", None)
+            if not callable(doc_getter):
+                continue
+            try:
+                modified = bool(doc_getter().isModified())
+            except Exception:
+                continue
+            if not modified:
                 continue
 
-            ed.setFocus()
+            widget.setFocus()
+            name_getter = getattr(widget, "display_name", None)
+            label = str(name_getter()) if callable(name_getter) else "File"
             answer = QMessageBox.question(
                 self.ide,
                 "Unsaved Changes",
-                f"Save changes to '{ed.display_name()}' before continuing?",
+                f"Save changes to '{label}' before continuing?",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
                 QMessageBox.Yes,
             )
             if answer == QMessageBox.Cancel:
                 return False
             if answer == QMessageBox.Yes:
-                if not ed.file_path:
+                if not path:
                     self.ide.statusBar().showMessage("Cannot save: editor has no backing file.", 2200)
                     return False
-                if not ed.save_file():
+                saver = getattr(widget, "save_file", None)
+                if not callable(saver) or not saver():
                     return False
-                self._note_editor_saved(ed, source="save before action")
+                self._note_editor_saved(widget, source="save before action")
         return True
 
     def _launch_project_window(self, project_path: str) -> bool:
@@ -287,20 +302,29 @@ class ProjectLifecycleController:
     def _collect_open_editor_payload(self):
         docs = []
         seen_keys: set[str] = set()
-        for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+        for widget in self.editor_workspace.all_document_widgets():
+            file_path = self._document_widget_path(widget)
+            if not file_path:
                 continue
-            if not isinstance(ed.file_path, str) or not ed.file_path.strip():
-                continue
-            key = self._doc_key_for_editor(ed)
+            if isinstance(widget, EditorWidget):
+                key = self._doc_key_for_editor(widget)
+            else:
+                key = self._canonical_path(file_path)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
+            doc_getter = getattr(widget, "document", None)
+            modified = False
+            if callable(doc_getter):
+                try:
+                    modified = bool(doc_getter().isModified())
+                except Exception:
+                    modified = False
             docs.append(
                 {
                     "key": key,
-                    "file_path": self._canonical_path(ed.file_path),
-                    "modified": bool(ed.document().isModified()),
+                    "file_path": self._canonical_path(file_path),
+                    "modified": modified,
                 }
             )
         return docs
@@ -321,11 +345,10 @@ class ProjectLifecycleController:
             while tabs.count() > 0:
                 widget = tabs.widget(0)
                 tabs.removeTab(0)
-                if not isinstance(widget, EditorWidget):
-                    continue
-                doc_key = self._doc_key_for_editor(widget)
                 widget.hide()
-                self.editor_workspace.release_document_view(widget, doc_key)
+                if isinstance(widget, EditorWidget):
+                    doc_key = self._doc_key_for_editor(widget)
+                    self.editor_workspace.release_document_view(widget, doc_key)
                 widget.deleteLater()
             owner = getattr(tabs, "owner_window", None)
             if owner is not None:
@@ -398,21 +421,7 @@ class ProjectLifecycleController:
                 restored_keys.add(dedupe_key)
 
             if isinstance(fp, str) and fp and os.path.exists(fp):
-                self.editor_workspace.open_editor(
-                    os.path.basename(fp),
-                    fp,
-                    font_size=self.font_size,
-                    font_family=self.font_family,
-                )
-                ed = self.current_editor()
-                if ed:
-                    ed.file_path = self._canonical_path(fp)
-                    try:
-                        ed.configure_keybindings(self._keybindings_config())
-                    except Exception:
-                        pass
-                    self._assign_dock_identity(ed)
-                    self._attach_editor_lint_hooks(ed)
+                self.open_file(fp)
 
     def save_session_to_config(self):
         self.config["open_editors"] = self._collect_open_editor_payload()

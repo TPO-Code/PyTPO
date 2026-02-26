@@ -62,35 +62,54 @@ class WorkspaceController(QObject):
             return
 
         seen_docs: set[str] = set()
-        save_targets: list[EditorWidget] = []
-        for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+        save_targets: list[object] = []
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not path:
                 continue
-            doc_key = self._doc_key_for_editor(ed)
+            if isinstance(widget, EditorWidget):
+                doc_key = self._doc_key_for_editor(widget)
+            else:
+                doc_key = self._canonical_path(path)
             if doc_key in seen_docs:
                 continue
             seen_docs.add(doc_key)
-            if not ed.file_path:
+
+            doc_getter = getattr(widget, "document", None)
+            if not callable(doc_getter):
                 continue
-            if not ed.document().isModified():
+            try:
+                doc = doc_getter()
+                modified = bool(doc.isModified())
+            except Exception:
                 continue
-            save_targets.append(ed)
+            if not modified:
+                continue
+            save_targets.append(widget)
 
         if not save_targets:
             return
 
         saved_count = 0
         refresh_dirs: set[str] = set()
-        for ed in save_targets:
-            if not ed.file_path:
+        for widget in save_targets:
+            path = self._document_widget_path(widget)
+            if not path:
                 continue
-            if not ed.save_file():
+            saver = getattr(widget, "save_file", None)
+            if not callable(saver):
+                continue
+            if not saver():
                 continue
             saved_count += 1
-            refresh_dirs.add(os.path.dirname(self._canonical_path(ed.file_path)))
-            self._note_editor_saved(ed, source="autosave")
-            self._attach_editor_lint_hooks(ed)
-            self._request_lint_for_editor(ed, reason="save", include_source_if_modified=False)
+            cpath = self._canonical_path(path)
+            refresh_dirs.add(os.path.dirname(cpath))
+            self._note_editor_saved(widget, source="autosave")
+            if isinstance(widget, EditorWidget):
+                self._attach_editor_lint_hooks(widget)
+                self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+            elif self._is_tdoc_related_path(cpath):
+                self._schedule_tdoc_validation(cpath, delay_ms=0)
 
         for folder in refresh_dirs:
             self.refresh_subtree(folder)
@@ -99,24 +118,28 @@ class WorkspaceController(QObject):
             self.ide.statusBar().showMessage(f"Auto-saved {saved_count} file(s).", 1400)
             self.schedule_git_status_refresh(delay_ms=120)
 
-    def _note_editor_saved(self, ed: EditorWidget, *, source: str) -> None:
-        if not isinstance(ed, EditorWidget) or not isinstance(ed.file_path, str) or not ed.file_path.strip():
+    def _note_editor_saved(self, ed: object, *, source: str) -> None:
+        path = self._document_widget_path(ed)
+        if not path:
             return
-        saved_path = self._canonical_path(ed.file_path)
-        cpp_pack = getattr(self.ide, "cpp_language_pack", None)
-        on_saved = getattr(cpp_pack, "on_document_saved", None)
-        if callable(on_saved):
-            try:
-                on_saved(file_path=saved_path, source_text=ed.toPlainText())
-            except Exception:
-                pass
-        rust_pack = getattr(self.ide, "rust_language_pack", None)
-        rust_on_saved = getattr(rust_pack, "on_document_saved", None)
-        if callable(rust_on_saved):
-            try:
-                rust_on_saved(file_path=saved_path, source_text=ed.toPlainText())
-            except Exception:
-                pass
+        saved_path = self._canonical_path(path)
+        if isinstance(ed, EditorWidget):
+            cpp_pack = getattr(self.ide, "cpp_language_pack", None)
+            on_saved = getattr(cpp_pack, "on_document_saved", None)
+            if callable(on_saved):
+                try:
+                    on_saved(file_path=saved_path, source_text=ed.toPlainText())
+                except Exception:
+                    pass
+            rust_pack = getattr(self.ide, "rust_language_pack", None)
+            rust_on_saved = getattr(rust_pack, "on_document_saved", None)
+            if callable(rust_on_saved):
+                try:
+                    rust_on_saved(file_path=saved_path, source_text=ed.toPlainText())
+                except Exception:
+                    pass
+        elif self._is_tdoc_related_path(saved_path):
+            self._schedule_tdoc_validation(saved_path, delay_ms=0)
         self._external_conflict_signatures.pop(saved_path, None)
         sig = self._external_file_signature(saved_path)
         if sig is not None:
@@ -182,13 +205,22 @@ class WorkspaceController(QObject):
                 self._queue_project_config_reload(source="project.json removed on disk", honor_open_editors=True)
             return
 
-        ed = self._find_open_editor_for_path(path)
-        if not isinstance(ed, EditorWidget):
+        widget = self._find_open_document_for_path(path)
+        if widget is None:
             if is_project_config:
                 self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
             return
 
-        if ed.document().isModified():
+        doc_getter = getattr(widget, "document", None)
+        if not callable(doc_getter):
+            return
+        try:
+            doc = doc_getter()
+            modified = bool(doc.isModified())
+        except Exception:
+            return
+
+        if modified:
             previous_conflict = self._external_conflict_signatures.get(path)
             if previous_conflict != sig:
                 self.ide.statusBar().showMessage(
@@ -204,24 +236,64 @@ class WorkspaceController(QObject):
         except Exception:
             return
 
-        if ed.toPlainText() == disk_text:
-            ed.document().setModified(False)
-            self._refresh_editor_title(ed)
+        serialize = getattr(widget, "serialized_text", None)
+        if callable(serialize):
+            try:
+                current_text = str(serialize())
+            except Exception:
+                current_text = ""
+        else:
+            to_plain = getattr(widget, "toPlainText", None)
+            try:
+                current_text = str(to_plain()) if callable(to_plain) else ""
+            except Exception:
+                current_text = ""
+
+        if current_text == disk_text:
+            try:
+                doc.setModified(False)
+            except Exception:
+                pass
+            if isinstance(widget, EditorWidget):
+                self._refresh_editor_title(widget)
             if is_project_config:
                 self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
             return
 
-        cursor = ed.textCursor()
-        v_scroll = ed.verticalScrollBar().value()
-        h_scroll = ed.horizontalScrollBar().value()
-        ed.setPlainText(disk_text)
-        ed.document().setModified(False)
-        ed.setTextCursor(cursor)
-        ed.verticalScrollBar().setValue(v_scroll)
-        ed.horizontalScrollBar().setValue(h_scroll)
-        self._refresh_editor_title(ed)
-        self._attach_editor_lint_hooks(ed)
-        self._request_lint_for_editor(ed, reason="open", include_source_if_modified=False)
+        if isinstance(widget, EditorWidget):
+            cursor = widget.textCursor()
+            v_scroll = widget.verticalScrollBar().value()
+            h_scroll = widget.horizontalScrollBar().value()
+            widget.setPlainText(disk_text)
+            widget.document().setModified(False)
+            widget.setTextCursor(cursor)
+            widget.verticalScrollBar().setValue(v_scroll)
+            widget.horizontalScrollBar().setValue(h_scroll)
+            self._refresh_editor_title(widget)
+            self._attach_editor_lint_hooks(widget)
+            self._request_lint_for_editor(widget, reason="open", include_source_if_modified=False)
+        else:
+            loader = getattr(widget, "load_file", None)
+            if callable(loader):
+                try:
+                    loaded = bool(loader(path))
+                except Exception:
+                    return
+                if not loaded:
+                    return
+            elif callable(getattr(widget, "setPlainText", None)):
+                try:
+                    widget.setPlainText(disk_text)
+                    doc.setModified(False)
+                except Exception:
+                    return
+            for tabs in self.editor_workspace.all_tabs():
+                idx = tabs.indexOf(widget)
+                if idx >= 0:
+                    tabs._refresh_tab_title(widget)
+                    break
+            if self._is_tdoc_related_path(path):
+                self._schedule_tdoc_validation(path, delay_ms=0)
         self.ide.statusBar().showMessage(f"Reloaded from disk: {os.path.basename(path)}", 1800)
         if is_project_config:
             self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)

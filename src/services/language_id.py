@@ -51,6 +51,7 @@ _EXTENSION_LANGUAGE_IDS: dict[str, str] = {
     ".zsh": "shell",
     ".ksh": "shell",
     ".md": "markdown",
+    ".tdoc": "tdoc",
     ".todo": "todo",
     ".task": "todo",
 }
@@ -59,6 +60,7 @@ _FILENAME_LANGUAGE_IDS: dict[str, str] = {
     "makefile": "make",
     ".bashrc": "shell",
     ".zshrc": "shell",
+    ".tdocproject": "tdocproject",
 }
 
 

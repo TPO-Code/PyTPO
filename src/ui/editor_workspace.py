@@ -5,6 +5,7 @@ import weakref
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer
 from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor
@@ -43,6 +44,71 @@ class DocumentRecord:
     document: QTextDocument
     file_path: str | None = None
     views: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+
+
+def _is_workspace_document_widget(widget: object) -> bool:
+    if not isinstance(widget, QWidget):
+        return False
+    return callable(getattr(widget, "display_name", None))
+
+
+def _widget_file_path(widget: object) -> str:
+    return str(getattr(widget, "file_path", "") or "").strip()
+
+
+def _widget_document(widget: object) -> QTextDocument | None:
+    getter = getattr(widget, "document", None)
+    if not callable(getter):
+        return None
+    try:
+        doc = getter()
+    except Exception:
+        return None
+    return doc if isinstance(doc, QTextDocument) else None
+
+
+def _widget_modified(widget: object) -> bool:
+    doc = _widget_document(widget)
+    if doc is None:
+        return False
+    try:
+        return bool(doc.isModified())
+    except Exception:
+        return False
+
+
+def _widget_display_name(widget: object) -> str:
+    displayer = getattr(widget, "display_name", None)
+    if callable(displayer):
+        try:
+            return str(displayer())
+        except Exception:
+            pass
+    path = _widget_file_path(widget)
+    if path:
+        return os.path.basename(path)
+    return "File"
+
+
+def _widget_save_file(widget: object) -> bool:
+    saver = getattr(widget, "save_file", None)
+    if not callable(saver):
+        return False
+    try:
+        return bool(saver())
+    except Exception:
+        return False
+
+
+def _widget_text_cursor(widget: object) -> QTextCursor | None:
+    getter = getattr(widget, "textCursor", None)
+    if not callable(getter):
+        return None
+    try:
+        cursor = getter()
+    except Exception:
+        return None
+    return cursor if isinstance(cursor, QTextCursor) else None
 
 
 def _encode_editor_drag_payload(editor_id: str, file_path: str | None = None) -> bytes:
@@ -286,14 +352,18 @@ class DraggableTabBar(QTabBar):
             return
 
         ed = self.tabs_widget.widget(idx)
-        if not isinstance(ed, EditorWidget):
+        if not _is_workspace_document_widget(ed):
+            super().mouseMoveEvent(event)
+            return
+        editor_id = str(getattr(ed, "editor_id", "") or "").strip()
+        if not editor_id:
             super().mouseMoveEvent(event)
             return
 
         transferable_path = self.tabs_widget.workspace.prepare_editor_for_cross_instance_transfer(ed)
         drag = QDrag(self)
         mime = QMimeData()
-        mime.setData(MIME_EDITOR_TAB, _encode_editor_drag_payload(ed.editor_id, transferable_path))
+        mime.setData(MIME_EDITOR_TAB, _encode_editor_drag_payload(editor_id, transferable_path))
         drag.setMimeData(mime)
         drag.exec(Qt.MoveAction)
 
@@ -424,42 +494,45 @@ class EditorTabs(QTabWidget):
             src_tabs.owner_window.close()
 
 
-    def add_editor(self, ed: EditorWidget):
-        idx = self.addTab(ed, ed.display_name())
+    def add_editor(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
+        idx = self.addTab(ed, _widget_display_name(ed))
         self.setCurrentIndex(idx)
         ed.setFocus()
-        # Use a QObject-bound slot to avoid stale lambda/editor references after tab/view teardown.
-        ed.document().modificationChanged.connect(self._on_document_modification_changed)
+        doc = _widget_document(ed)
+        if doc is not None:
+            # Use a QObject-bound slot to avoid stale lambda/editor references after tab/view teardown.
+            doc.modificationChanged.connect(self._on_document_modification_changed)
         self._refresh_tab_title(ed)
 
-    def _refresh_tab_title(self, ed: EditorWidget):
+    def _refresh_tab_title(self, ed: QWidget):
         idx = self.indexOf(ed)
         if idx < 0:
             return
-        try:
-            dirty = "*" if ed.document().isModified() else ""
-        except RuntimeError:
-            return
+        dirty = "*" if _widget_modified(ed) else ""
         pin_prefix = "[pin] " if self._is_tab_pinned(ed) else ""
-        self.setTabText(idx, f"{pin_prefix}{ed.display_name()}{dirty}")
+        self.setTabText(idx, f"{pin_prefix}{_widget_display_name(ed)}{dirty}")
 
     def _on_document_modification_changed(self, _modified: bool):
-        # Refresh only editors currently hosted by this tab widget.
+        # Refresh only document widgets currently hosted by this tab widget.
         for i in range(self.count()):
             ed = self.widget(i)
-            if isinstance(ed, EditorWidget):
+            if _is_workspace_document_widget(ed):
                 self._refresh_tab_title(ed)
 
     def _on_current_changed(self, _index: int):
         ed = self.currentWidget()
-        if isinstance(ed, EditorWidget):
+        if _is_workspace_document_widget(ed):
             ed.setFocus()
 
     @staticmethod
-    def _is_tab_pinned(ed: EditorWidget) -> bool:
+    def _is_tab_pinned(ed: QWidget | None) -> bool:
         return bool(getattr(ed, "_tab_pinned", False))
 
-    def _set_tab_pinned(self, ed: EditorWidget, pinned: bool) -> None:
+    def _set_tab_pinned(self, ed: QWidget | None, pinned: bool) -> None:
+        if not _is_workspace_document_widget(ed):
+            return
         try:
             setattr(ed, "_tab_pinned", bool(pinned))
         except Exception:
@@ -469,45 +542,47 @@ class EditorTabs(QTabWidget):
     def _unpin_all_tabs(self) -> None:
         for i in range(self.count()):
             ed = self.widget(i)
-            if not isinstance(ed, EditorWidget):
+            if not _is_workspace_document_widget(ed):
                 continue
             if not self._is_tab_pinned(ed):
                 continue
             self._set_tab_pinned(ed, False)
 
-    def _confirm_close_editor(self, ed: EditorWidget) -> bool:
-        if not ed.document().isModified():
+    def _confirm_close_editor(self, ed: QWidget) -> bool:
+        if not _is_workspace_document_widget(ed):
+            return False
+        if not _widget_modified(ed):
             return True
-        if not self.workspace.is_last_view_for_document(ed):
+        if isinstance(ed, EditorWidget) and not self.workspace.is_last_view_for_document(ed):
             return True
 
         ans = QMessageBox.question(
             self,
             "Unsaved Changes",
-            f"Save changes to '{ed.display_name()}'?",
+            f"Save changes to '{_widget_display_name(ed)}'?",
             QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
             QMessageBox.Yes,
             )
         if ans == QMessageBox.Cancel:
             return False
         if ans == QMessageBox.Yes:
-            if not ed.save_file():
+            if not _widget_save_file(ed):
                 return False
         return True
 
     def _on_tab_close_requested(self, index: int):
         ed = self.widget(index)
-        if not isinstance(ed, EditorWidget):
+        if not _is_workspace_document_widget(ed):
             return
         if self._is_tab_pinned(ed):
             return
         if not self._confirm_close_editor(ed):
             return
 
-        doc_key = ed.doc_key
         self.removeTab(index)
         ed.hide()
-        self.workspace.release_document_view(ed, doc_key)
+        if isinstance(ed, EditorWidget):
+            self.workspace.release_document_view(ed, ed.doc_key)
         ed.deleteLater()
         self.workspace.request_cleanup_empty_panes()
 
@@ -521,7 +596,7 @@ class EditorTabs(QTabWidget):
             if idx < 0 or idx >= self.count():
                 continue
             ed = self.widget(idx)
-            if not isinstance(ed, EditorWidget):
+            if not _is_workspace_document_widget(ed):
                 continue
             if self._is_tab_pinned(ed):
                 continue
@@ -535,9 +610,9 @@ class EditorTabs(QTabWidget):
         if index < 0 or index >= self.count():
             return
         ed = self.widget(index)
-        if not isinstance(ed, EditorWidget):
+        if not _is_workspace_document_widget(ed):
             return
-        path = str(getattr(ed, "file_path", "") or "").strip()
+        path = _widget_file_path(ed)
         if not path:
             return
         QApplication.clipboard().setText(path)
@@ -546,12 +621,15 @@ class EditorTabs(QTabWidget):
         if index < 0 or index >= self.count():
             return
         ed = self.widget(index)
-        if not isinstance(ed, EditorWidget):
+        if not _is_workspace_document_widget(ed):
             return
-        path = str(getattr(ed, "file_path", "") or "").strip()
+        path = _widget_file_path(ed)
         if not path:
             return
-        cur = ed.textCursor()
+        cur = _widget_text_cursor(ed)
+        if cur is None:
+            QApplication.clipboard().setText(path)
+            return
         line = int(cur.blockNumber()) + 1
         col = int(cur.positionInBlock()) + 1
         QApplication.clipboard().setText(f"{path}:{line}:{col}")
@@ -585,15 +663,16 @@ class EditorTabs(QTabWidget):
 
         has_tab = 0 <= int(index) < self.count()
         ed = self.widget(index) if has_tab else None
-        is_editor = isinstance(ed, EditorWidget)
-        is_pinned = self._is_tab_pinned(ed) if is_editor else False
+        is_doc = _is_workspace_document_widget(ed)
+        is_code_editor = isinstance(ed, EditorWidget)
+        is_pinned = self._is_tab_pinned(ed) if is_doc else False
 
         act_close = menu.addAction("Close")
-        act_close.setEnabled(is_editor and not is_pinned)
+        act_close.setEnabled(is_doc and not is_pinned)
         act_close.triggered.connect(lambda _checked=False, idx=int(index): self._on_tab_close_requested(idx))
 
         act_close_others = menu.addAction("Close Others")
-        act_close_others.setEnabled(is_editor and self.count() > 1)
+        act_close_others.setEnabled(is_doc and self.count() > 1)
         act_close_others.triggered.connect(
             lambda _checked=False, keep=int(index): self._close_tab_indices(
                 [i for i in range(self.count()) if i != keep]
@@ -609,13 +688,13 @@ class EditorTabs(QTabWidget):
         menu.addSeparator()
 
         act_split_h = menu.addAction("Split Horizontal")
-        act_split_h.setEnabled(is_editor)
+        act_split_h.setEnabled(is_code_editor)
         act_split_h.triggered.connect(
             lambda _checked=False, idx=int(index): self._split_from_tab_index(idx, horizontal=True)
         )
 
         act_split_v = menu.addAction("Split Vertical")
-        act_split_v.setEnabled(is_editor)
+        act_split_v.setEnabled(is_code_editor)
         act_split_v.triggered.connect(
             lambda _checked=False, idx=int(index): self._split_from_tab_index(idx, horizontal=False)
         )
@@ -625,16 +704,16 @@ class EditorTabs(QTabWidget):
         act_pin = menu.addAction("Pin Tab")
         act_pin.setCheckable(True)
         act_pin.setChecked(is_pinned)
-        act_pin.setEnabled(is_editor)
+        act_pin.setEnabled(is_doc)
         act_pin.triggered.connect(
             lambda checked, editor=ed: self._set_tab_pinned(editor, bool(checked))
-            if isinstance(editor, EditorWidget)
+            if _is_workspace_document_widget(editor)
             else None
         )
 
         act_unpin_all = menu.addAction("Unpin All Tabs")
         has_any_pinned = any(
-            isinstance(self.widget(i), EditorWidget) and self._is_tab_pinned(self.widget(i))
+            _is_workspace_document_widget(self.widget(i)) and self._is_tab_pinned(self.widget(i))
             for i in range(self.count())
         )
         act_unpin_all.setEnabled(has_any_pinned)
@@ -642,7 +721,7 @@ class EditorTabs(QTabWidget):
 
         menu.addSeparator()
 
-        has_path = is_editor and bool(str(getattr(ed, "file_path", "") or "").strip())
+        has_path = is_doc and bool(_widget_file_path(ed))
         act_copy_path = menu.addAction("Copy Path")
         act_copy_path.setEnabled(has_path)
         act_copy_path.triggered.connect(
@@ -659,7 +738,7 @@ class EditorTabs(QTabWidget):
 
     def tear_out_index(self, index: int):
         ed = self.widget(index)
-        if not isinstance(ed, EditorWidget):
+        if not _is_workspace_document_widget(ed):
             return
         self.removeTab(index)
         self.workspace.create_tearout_window_with_editor(ed)
@@ -674,7 +753,11 @@ class EditorTabs(QTabWidget):
         ed, src_tabs, src_idx = self.workspace.find_editor_by_id(editor_id)
         if ed is None or src_tabs is None or src_idx < 0:
             if file_path:
-                self.workspace.open_editor(os.path.basename(file_path), file_path)
+                opener = getattr(self.workspace, "open_path", None)
+                if callable(opener):
+                    opener(file_path)
+                else:
+                    self.workspace.open_editor(os.path.basename(file_path), file_path)
                 self.workspace.request_cleanup_empty_panes()
             return
 
@@ -760,7 +843,7 @@ class EditorTearOutWindow(QMainWindow):
         remaining = []
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
-            if isinstance(w, EditorWidget):
+            if _is_workspace_document_widget(w):
                 remaining.append(w)
 
         for ed in remaining:
@@ -1143,6 +1226,15 @@ class EditorWorkspace(QWidget):
                     result.append(w)
         return result
 
+    def all_document_widgets(self) -> list[QWidget]:
+        result: list[QWidget] = []
+        for tabs in self.all_tabs():
+            for i in range(tabs.count()):
+                w = tabs.widget(i)
+                if _is_workspace_document_widget(w):
+                    result.append(w)
+        return result
+
     def _main_tabs(self) -> list[EditorTabs]:
         self._ensure_valid_root_splitter()
         return self._all_tabs_in_widget(self.root_splitter)
@@ -1184,14 +1276,32 @@ class EditorWorkspace(QWidget):
                 return cw
         return None
 
+    def active_document_widget(self) -> QWidget | None:
+        fw = QApplication.focusWidget()
+        w = fw
+        while w is not None:
+            if _is_workspace_document_widget(w):
+                return w
+            w = w.parentWidget()
+
+        tabs = self._current_tabs()
+        if tabs is not None:
+            current = tabs.currentWidget()
+            if _is_workspace_document_widget(current):
+                return current
+        return None
+
     # -------- find/open --------
 
     def find_editor_by_id(self, editor_id: str):
         for tabs in self.all_tabs():
             for i in range(tabs.count()):
                 w = tabs.widget(i)
-                if isinstance(w, EditorWidget) and w.editor_id == editor_id:
-                    return w, tabs, i
+                if not _is_workspace_document_widget(w):
+                    continue
+                if str(getattr(w, "editor_id", "") or "") != str(editor_id or ""):
+                    continue
+                return w, tabs, i
         return None, None, -1
 
     def _find_editor_for_path(self, path: str):
@@ -1207,7 +1317,26 @@ class EditorWorkspace(QWidget):
                 return ed
         return None
 
-    def _focus_editor_widget(self, ed: EditorWidget):
+    def find_document_by_path(self, path: str) -> QWidget | None:
+        target = self._canonical_path(path)
+        preferred = self._current_tabs()
+        if preferred is not None:
+            for i in range(preferred.count()):
+                w = preferred.widget(i)
+                if not _is_workspace_document_widget(w):
+                    continue
+                file_path = _widget_file_path(w)
+                if file_path and self._canonical_path(file_path) == target:
+                    return w
+        for widget in self.all_document_widgets():
+            file_path = _widget_file_path(widget)
+            if file_path and self._canonical_path(file_path) == target:
+                return widget
+        return None
+
+    def _focus_editor_widget(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
         for tabs in self.all_tabs():
             idx = tabs.indexOf(ed)
             if idx >= 0:
@@ -1215,19 +1344,31 @@ class EditorWorkspace(QWidget):
                 ed.setFocus()
                 return
 
-    def prepare_editor_for_cross_instance_transfer(self, ed: EditorWidget) -> str | None:
-        if not isinstance(ed, EditorWidget):
+    def prepare_editor_for_cross_instance_transfer(self, ed: QWidget) -> str | None:
+        if not _is_workspace_document_widget(ed):
             return None
-        file_path = getattr(ed, "file_path", None)
-        if not isinstance(file_path, str) or not file_path.strip():
+        file_path = _widget_file_path(ed)
+        if not file_path:
             return None
-        if ed.document().isModified():
-            if not ed.save_file():
+        if _widget_modified(ed):
+            if not _widget_save_file(ed):
                 return None
         try:
             return self._canonical_path(file_path)
         except Exception:
             return file_path
+
+    def open_path(self, path: str, *, opener: Callable[[str], Any] | None = None) -> QWidget | None:
+        target = str(path or "").strip()
+        if not target:
+            return None
+        if callable(opener):
+            try:
+                result = opener(target)
+            except Exception:
+                return None
+            return result if isinstance(result, QWidget) else None
+        return self.open_editor(os.path.basename(target), target)
 
     def open_editor(
             self,
@@ -1352,11 +1493,13 @@ class EditorWorkspace(QWidget):
 
     # -------- tearout --------
 
-    def create_tearout_window_with_editor(self, ed: EditorWidget):
+    def create_tearout_window_with_editor(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
         tw = EditorTearOutWindow(self)
         self._tearouts.append(tw)
         tw.tabs.add_editor(ed)
-        tw.setWindowTitle(ed.display_name())
+        tw.setWindowTitle(_widget_display_name(ed))
         tw.show()
         ed.setFocus()
 
@@ -1366,7 +1509,9 @@ class EditorWorkspace(QWidget):
 
         tw.destroyed.connect(_cleanup)
 
-    def move_editor_to_primary_tabs(self, ed: EditorWidget):
+    def move_editor_to_primary_tabs(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
         tabs = self._ensure_one_main_tabs()
         tabs.add_editor(ed)
 

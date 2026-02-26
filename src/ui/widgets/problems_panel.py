@@ -20,6 +20,8 @@ class ProblemsPanel(QWidget):
     problemActivated = Signal(str, int, int)  # file, line, col
     importSymbolRequested = Signal(object)  # diagnostic dict
     removeUnusedImportRequested = Signal(object)  # diagnostic dict
+    addTdocSymbolRequested = Signal(object)  # diagnostic dict
+    capitalizeTdocSectionRequested = Signal(object)  # diagnostic dict
     clearFileRequested = Signal(str)
     clearAllRequested = Signal()
     countChanged = Signal(int)
@@ -123,6 +125,8 @@ class ProblemsPanel(QWidget):
         diag = self._diag_for_row(row)
         missing_symbol = self._missing_symbol_from_diag(diag)
         is_unused_import = self._is_unused_import_diag(diag)
+        unresolved_tdoc_symbol = self._tdoc_unresolved_symbol_from_diag(diag)
+        tdoc_section_to_capitalize = self._tdoc_section_cap_warning_from_diag(diag)
         menu = QMenu(self)
 
         act_copy_message = QAction("Copy Message", self)
@@ -146,6 +150,19 @@ class ProblemsPanel(QWidget):
             act_remove_unused = QAction(label, self)
             act_remove_unused.triggered.connect(lambda: self._emit_remove_unused_import(diag))
             menu.addAction(act_remove_unused)
+
+        if diag is not None and unresolved_tdoc_symbol:
+            act_add_tdoc_symbol = QAction(f"Add '{unresolved_tdoc_symbol}' to .tdocproject", self)
+            act_add_tdoc_symbol.triggered.connect(lambda: self._emit_add_tdoc_symbol(diag))
+            menu.addAction(act_add_tdoc_symbol)
+
+        if diag is not None and tdoc_section_to_capitalize:
+            act_cap_section = QAction(
+                f"Capitalize section '{tdoc_section_to_capitalize}'",
+                self,
+            )
+            act_cap_section.triggered.connect(lambda: self._emit_capitalize_tdoc_section(diag))
+            menu.addAction(act_cap_section)
 
         menu.addSeparator()
 
@@ -199,6 +216,20 @@ class ProblemsPanel(QWidget):
             return
         self.removeUnusedImportRequested.emit(diag)
 
+    def _emit_add_tdoc_symbol(self, diag: Optional[dict]):
+        if not isinstance(diag, dict):
+            return
+        if not self._tdoc_unresolved_symbol_from_diag(diag):
+            return
+        self.addTdocSymbolRequested.emit(diag)
+
+    def _emit_capitalize_tdoc_section(self, diag: Optional[dict]):
+        if not isinstance(diag, dict):
+            return
+        if not self._tdoc_section_cap_warning_from_diag(diag):
+            return
+        self.capitalizeTdocSectionRequested.emit(diag)
+
     def _missing_symbol_from_diag(self, diag: Optional[dict]) -> str:
         if not isinstance(diag, dict):
             return ""
@@ -240,6 +271,38 @@ class ProblemsPanel(QWidget):
             if match:
                 return str(match.group(1) or "").strip()
         return ""
+
+    def _tdoc_unresolved_symbol_from_diag(self, diag: Optional[dict]) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(r"^Unresolved symbol\s+['\"](.+?)['\"]\s+used at\b", message, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
+
+    def _tdoc_section_cap_warning_from_diag(self, diag: Optional[dict]) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(
+            r"^Section header\s+['\"](.+?)['\"]\s+should begin with a capital letter\.$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
 
     def _severity_rank(self, severity: str) -> int:
         s = severity.lower()

@@ -28,6 +28,12 @@ from src.services.refactor_engine import (
 )
 from src.services.symbol_index_service import SymbolIndexService
 from src.ui.editor_workspace import EditorWidget
+from TPOPyside.widgets.tdoc_support import (
+    PROJECT_MARKER_FILENAME,
+    TDocProjectIndex,
+    parse_file_link,
+    resolve_tdoc_root_for_path,
+)
 
 try:
     from shiboken6 import isValid as _is_qobject_valid
@@ -172,26 +178,38 @@ class DiagnosticsController:
         )
 
     def _apply_lint_to_editor(self, ed: EditorWidget):
-        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+        self._apply_lint_to_document_widget(ed)
+
+    def _apply_lint_to_document_widget(self, widget: object) -> None:
+        if widget is None or not _is_qobject_valid(widget):
             return
-        if not ed.file_path:
-            ed.clear_lint_diagnostics()
+        file_path = str(getattr(widget, "file_path", "") or "").strip()
+        setter = getattr(widget, "set_lint_diagnostics", None)
+        clearer = getattr(widget, "clear_lint_diagnostics", None)
+        if not callable(setter) and not callable(clearer):
             return
-        key = self._canonical_path(ed.file_path)
+
+        if not file_path:
+            if callable(clearer):
+                clearer()
+            return
+
+        key = self._canonical_path(file_path)
         diagnostics = self.ide._diagnostics_by_file.get(key, [])
-        if diagnostics:
-            ed.set_lint_diagnostics(diagnostics)
-        else:
-            ed.clear_lint_diagnostics()
+        if diagnostics and callable(setter):
+            setter(diagnostics)
+        elif callable(clearer):
+            clearer()
 
     def _apply_lint_to_open_editors_for_file(self, file_path: str):
         key = self._canonical_path(file_path)
-        for ed in self.editor_workspace.all_editors():
-            if not ed.file_path:
+        for widget in self.editor_workspace.all_document_widgets():
+            path = str(getattr(widget, "file_path", "") or "").strip()
+            if not path:
                 continue
-            if self._canonical_path(ed.file_path) != key:
+            if self._canonical_path(path) != key:
                 continue
-            self._apply_lint_to_editor(ed)
+            self._apply_lint_to_document_widget(widget)
 
     def _set_problems_panel_data(self):
         if self.problems_panel is None:
@@ -234,8 +252,8 @@ class DiagnosticsController:
         self.ide._diagnostics_by_file = preserved
         if self.problems_panel is not None:
             self.problems_panel.set_diagnostics(self.ide._diagnostics_by_file)
-        for ed in self.editor_workspace.all_editors():
-            self._apply_lint_to_editor(ed)
+        for widget in self.editor_workspace.all_document_widgets():
+            self._apply_lint_to_document_widget(widget)
         self._on_problem_count_changed(sum(len(rows) for rows in self.ide._diagnostics_by_file.values()))
 
     def _on_problem_count_changed(self, count: int):
@@ -246,6 +264,13 @@ class DiagnosticsController:
         if not file_path:
             return
         cpath = self._canonical_path(file_path)
+        navigator = getattr(self.ide, "_navigate_to_problem_location", None)
+        if callable(navigator):
+            if navigator(cpath, line, col):
+                return
+            self.ide.statusBar().showMessage(f"File not available: {cpath}", 2500)
+            return
+
         if os.path.exists(cpath):
             self.open_file(cpath)
 
@@ -482,6 +507,137 @@ class DiagnosticsController:
 
         self._remove_unused_import_from_editor(ed, diag or {})
 
+    def _on_problem_add_tdoc_symbol_requested(self, diag_obj: object):
+        diag = diag_obj if isinstance(diag_obj, dict) else None
+        symbol = self._tdoc_unresolved_symbol_from_diagnostic(diag)
+        if not symbol:
+            self.ide.statusBar().showMessage("Selected problem is not an unresolved TDOC symbol.", 2200)
+            return
+
+        file_path = str((diag or {}).get("file_path") or "").strip()
+        root_seed = file_path or self.project_context.project_root
+        root = self._canonical_path(
+            resolve_tdoc_root_for_path(root_seed, project_root=self.project_context.project_root)
+        )
+        marker_path = self._canonical_path(os.path.join(root, PROJECT_MARKER_FILENAME))
+        if not os.path.isfile(marker_path):
+            self.ide.statusBar().showMessage("No .tdocproject found for this TDOC diagnostic.", 2400)
+            return
+
+        file_link, _line = parse_file_link(symbol)
+        if file_link:
+            self.ide.statusBar().showMessage("Cannot add file links as TDOC symbols.", 2400)
+            return
+
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+
+        aliases, _sym, _sec, _inc, _ign, _meta = TDocProjectIndex.load_aliases(root)
+        if isinstance(aliases, dict) and symbol.casefold() in aliases:
+            self.ide.statusBar().showMessage(f"'{symbol}' already exists in .tdocproject.", 2200)
+            return
+
+        try:
+            current = open(marker_path, "r", encoding="utf-8").read()
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not read .tdocproject: {exc}", 2600)
+            return
+
+        updated = f"{current.rstrip()}\n{symbol}\n" if current.strip() else f"{symbol}\n"
+        try:
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not update .tdocproject: {exc}", 2600)
+            return
+
+        self._reload_open_tdoc_documents_for_root(root)
+        self._refresh_tdoc_diagnostics_for_path(marker_path)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+        self.ide.statusBar().showMessage(f"Added '{symbol}' to .tdocproject.", 2600)
+
+    def _on_problem_capitalize_tdoc_section_requested(self, diag_obj: object):
+        diag = diag_obj if isinstance(diag_obj, dict) else None
+        section = self._tdoc_section_cap_warning_from_diagnostic(diag)
+        if not section:
+            self.ide.statusBar().showMessage("Selected problem is not a TDOC section-capitalization warning.", 2200)
+            return
+
+        file_path = str((diag or {}).get("file_path") or "").strip()
+        if not file_path:
+            self.ide.statusBar().showMessage("Diagnostic is missing file path.", 2200)
+            return
+        marker_path = self._canonical_path(file_path)
+        if not os.path.isfile(marker_path):
+            self.ide.statusBar().showMessage(f"File not available: {marker_path}", 2200)
+            return
+
+        try:
+            line_num = int((diag or {}).get("line") or 0)
+        except Exception:
+            line_num = 0
+        if line_num <= 0:
+            self.ide.statusBar().showMessage("Diagnostic is missing line information.", 2200)
+            return
+
+        root = self._canonical_path(
+            resolve_tdoc_root_for_path(marker_path, project_root=self.project_context.project_root)
+        )
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+
+        try:
+            lines = open(marker_path, "r", encoding="utf-8").read().splitlines()
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not read .tdocproject: {exc}", 2600)
+            return
+
+        idx = line_num - 1
+        if idx < 0 or idx >= len(lines):
+            self.ide.statusBar().showMessage("Section warning points to an invalid .tdocproject line.", 2400)
+            return
+
+        raw_line = lines[idx]
+        stripped = raw_line.strip()
+        match = re.match(r"^(?P<section>[^=#].*?)\s*:\s*$", stripped)
+        if not match:
+            self.ide.statusBar().showMessage("Target line is no longer a TDOC section header.", 2400)
+            return
+        current_section = str(match.group("section") or "").strip()
+        if not current_section:
+            self.ide.statusBar().showMessage("Section header is empty.", 2400)
+            return
+        lead = current_section[0]
+        updated_section = (
+            lead.upper() + current_section[1:]
+            if lead.isalpha() and lead != lead.upper()
+            else current_section
+        )
+        if updated_section == current_section:
+            self.ide.statusBar().showMessage(f"Section '{current_section}' is already capitalized.", 2200)
+            return
+
+        prefix_len = len(raw_line) - len(raw_line.lstrip(" \t"))
+        prefix = raw_line[:prefix_len]
+        lines[idx] = f"{prefix}{updated_section}:"
+
+        try:
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines).rstrip() + "\n")
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not update .tdocproject: {exc}", 2600)
+            return
+
+        self._reload_open_tdoc_documents_for_root(root)
+        self._refresh_tdoc_diagnostics_for_path(marker_path)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+        self.ide.statusBar().showMessage(
+            f"Capitalized TDOC section '{current_section}' to '{updated_section}'.",
+            2600,
+        )
+
     def _apply_import_candidate_to_editor(self, ed: EditorWidget, candidate: dict, symbol: str) -> str:
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             self.ide.statusBar().showMessage(f"Could not apply import fix for '{symbol}'.", 2600)
@@ -574,6 +730,38 @@ class DiagnosticsController:
 
     def _unused_import_name_from_diagnostic(self, diag: dict | None) -> str:
         return unused_import_name_from_diagnostic(diag)
+
+    def _tdoc_unresolved_symbol_from_diagnostic(self, diag: dict | None) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(r"^Unresolved symbol\s+['\"](.+?)['\"]\s+used at\b", message, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
+
+    def _tdoc_section_cap_warning_from_diagnostic(self, diag: dict | None) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(
+            r"^Section header\s+['\"](.+?)['\"]\s+should begin with a capital letter\.$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
 
     def _symbol_used_as_module(self, source_text: str, diag: dict | None, symbol: str) -> bool:
         return symbol_used_as_module(source_text, diag, symbol)

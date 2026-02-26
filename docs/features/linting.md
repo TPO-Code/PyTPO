@@ -29,6 +29,15 @@ Language-server diagnostics are provided by:
 
 These diagnostics are routed into the same Problems surface.
 
+## TDOC diagnostics
+
+TDOC project/document diagnostics are also routed to the same Problems Dock (`source: tdoc`), including unresolved symbols, `.tdocproject` issues, and frontmatter warnings.
+
+Problems context menu quick fixes include:
+
+- add unresolved symbol to `.tdocproject`
+- capitalize TDOC section headers that start lowercase
+
 ## Common fixes for missing diagnostics
 
 - save the file first

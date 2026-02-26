@@ -1,0 +1,133 @@
+# TDOC Support (`.tdoc` + `.tdocproject`)
+
+PyTPO includes built-in TDOC document support with symbol-aware links, project indexing, and Problems panel diagnostics.
+
+## File types and tabs
+
+- `.tdoc` files open in the custom TDOC document widget (`TDocDocumentWidget`), not the standard code editor.
+- `.tdocproject` opens in the standard editor as plain text.
+- `index.tdoc` is treated as a TDOC file and opens in the TDOC widget.
+- TDOC tabs use the same editor background configuration as code-editor tabs.
+
+## TDOC project root resolution
+
+TDOC root is resolved in this order:
+
+1. nearest ancestor folder named `.tdocprojects`
+2. nearest ancestor containing a `.tdocprojects/` folder
+3. nearest ancestor containing `.tdocproject`
+4. project root `.tdocprojects/`
+5. project root `.tdocproject`
+6. file directory fallback
+
+Relative TDOC file links resolve from that TDOC root. This means `.tdocprojects` is treated as the TDOC root when present.
+
+## `.tdocproject` format
+
+Supported lines:
+
+- comments: lines starting with `#`
+- include/ignore rules: `include: pattern1 | pattern2`, `ignore: pattern1 | pattern2`
+- section headers: `Section Name:`
+- symbol definitions:
+  - `Canonical Symbol`
+  - `Canonical Symbol = Alias 1 | Alias 2`
+  - `Canonical Symbol ; key=value`
+  - `Canonical Symbol = Alias 1 | Alias 2 ; key=value ; key2=value2`
+
+Validation includes duplicate symbols, alias collisions, malformed metadata, empty rules, empty sections, unresolved symbols, and more.
+
+Section headers should start with a capital letter (for example `Locations:`). Non-capitalized headers produce a warning.
+
+## Link syntax in `.tdoc`
+
+- symbol links: `[Alias Or Canonical]`
+- file links: `[path/to/file.tdoc]`
+- file+line links: `[path/to/file.tdoc#L42]`
+
+Optional frontmatter is supported at file top:
+
+```txt
+---
+title: Chapter 1
+status: draft
+index: on
+---
+```
+
+`index: off` excludes a document from symbol-reference indexing.
+
+## Navigation
+
+- `Ctrl+Click` a file link to open that TDOC file (and line for `#Lnn` links).
+- `Ctrl+Click` a symbol link to open `index.tdoc` and jump to that symbol.
+
+If needed, symbol navigation creates/refreshes `index.tdoc` first.
+
+## Building the TDOC index
+
+- Use the titlebar toolbar `Index` button (`Build TDOC Index`).
+- The button is shown when a project is loaded and at least one TDOC-related file is open.
+- Index build is manual by design. Saving TDOC files runs validation, but does not automatically rebuild `index.tdoc`.
+
+Index rebuild also runs after TDOC symbol actions that rewrite aliases/links (rename alias, normalize symbol).
+
+## Generated `index.tdoc` format
+
+Generated content is placed below a dashed separator:
+
+```txt
+--------------------
+Index
+    ...
+```
+
+- Manual notes above the separator are preserved.
+- If no separator exists, one is created.
+- Legacy HTML auto markers are removed if present and are not used anymore.
+- Indentation is 4 spaces per level.
+- Generated sections include:
+  - symbol groups by section
+  - `Unresolved`
+  - `Documents`
+  - `Project Warnings` (including section-capitalization warnings)
+  - `Frontmatter Warnings`
+
+Example structure (with clickable link markup preserved):
+
+```txt
+    Characters:
+        [Ari Vale]
+            Aliases: [Ari Vale], [Ari], [A. Vale]
+            References:
+                [demo/chapter_01.tdoc#L6]
+```
+
+## Problems panel integration and quick fixes
+
+TDOC diagnostics are reported in the same Problems panel used by other languages (`source: tdoc`), including:
+
+- missing `.tdocproject`
+- malformed/invalid `.tdocproject` entries
+- unresolved symbols
+- frontmatter warnings
+- section capitalization warnings
+
+TDOC quick fixes from Problems context menu:
+
+- `Add '<symbol>' to .tdocproject`
+  - appends the unresolved symbol at end of `.tdocproject`
+- `Capitalize section '<section>'`
+  - rewrites the warned section header in `.tdocproject`
+
+## TDOC in-editor symbol actions
+
+In a `.tdoc` tab, right-click a symbol link for:
+
+- `Rename Alias...`
+  - updates alias in `.tdocproject`
+  - rewrites link usages across TDOC documents
+  - rebuilds index and refreshes open TDOC tabs
+- `Normalize This Symbol`
+  - rewrites all aliases for that symbol to canonical form in TDOC docs
+  - rebuilds index and refreshes diagnostics
