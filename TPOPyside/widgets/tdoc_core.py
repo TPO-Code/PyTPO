@@ -2169,6 +2169,9 @@ class TDocEditorWidget(QTextEdit):
         tc.setPosition(p + 1, QTextCursor.KeepAnchor)
         if not tc.hasSelection():
             return None
+        selected_text = str(tc.selectedText() or "")
+        if selected_text in {"\n", "\r", "\u2029"}:
+            return None
         fmt = tc.charFormat()
         if not fmt.hasProperty(self.LINK_PROPERTY):
             return None
@@ -2185,6 +2188,9 @@ class TDocEditorWidget(QTextEdit):
         tc.setPosition(p)
         tc.setPosition(p + 1, QTextCursor.KeepAnchor)
         if not tc.hasSelection():
+            return None
+        selected_text = str(tc.selectedText() or "")
+        if selected_text in {"\n", "\r", "\u2029"}:
             return None
         fmt = tc.charFormat()
         if not fmt.hasProperty(self.LINK_LABEL_PROPERTY):
@@ -2214,13 +2220,20 @@ class TDocEditorWidget(QTextEdit):
             probe = pos
         if probe < 0:
             return None
+        probe_block = self.document().findBlock(probe)
+        if not probe_block.isValid():
+            return None
+        block_start = int(probe_block.position())
+        block_end = block_start + len(str(probe_block.text() or ""))
+        if probe < block_start or probe >= block_end:
+            return None
 
         label = self._link_label_at_doc_pos(probe)
         if not label:
             return None
 
         start = probe
-        while start > 0:
+        while start > block_start:
             prev_target = self._link_target_at_doc_pos(start - 1)
             if prev_target != target:
                 break
@@ -2230,7 +2243,7 @@ class TDocEditorWidget(QTextEdit):
             start -= 1
 
         end = probe + 1
-        while True:
+        while end < block_end:
             next_target = self._link_target_at_doc_pos(end)
             if next_target != target:
                 break
@@ -2335,8 +2348,6 @@ class TDocEditorWidget(QTextEdit):
     def _expand_link_for_editing(
         self,
         cursor: QTextCursor | None = None,
-        *,
-        previous_pos: int | None = None,
     ) -> bool:
         cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
         span = self._link_span_at_cursor(cur)
@@ -2345,18 +2356,10 @@ class TDocEditorWidget(QTextEdit):
         start, end, label = span
         pos = int(cur.position())
 
-        # Expand when caret is inside rendered link text.
-        # Also allow boundary entry if cursor direction indicates moving into the link.
+        # Expand only when caret is strictly inside rendered link text.
+        # Boundaries (before first char / after last char) stay collapsed.
         if pos <= start or pos >= end:
-            allow_boundary_entry = False
-            if previous_pos is not None:
-                prev = int(previous_pos)
-                if pos == start and prev < pos:
-                    allow_boundary_entry = True
-                elif pos == end and prev > pos:
-                    allow_boundary_entry = True
-            if not allow_boundary_entry:
-                return False
+            return False
 
         replacement = f"[{label}]"
         relative = pos - start
@@ -2388,7 +2391,7 @@ class TDocEditorWidget(QTextEdit):
         new_pos = int(self.textCursor().position())
         if old_pos != new_pos:
             self._collapse_bracket_link_on_cursor_move(old_pos, new_pos)
-        self._expand_link_for_editing(self.textCursor(), previous_pos=old_pos)
+        self._expand_link_for_editing(self.textCursor())
         self._last_cursor_pos = int(self.textCursor().position())
 
     def _cursor_is_appending_to_link(self, cursor: QTextCursor | None = None) -> bool:
@@ -2487,7 +2490,6 @@ class TDocEditorWidget(QTextEdit):
         super().mousePressEvent(e)
 
     def keyPressEvent(self, event):
-        cursor_pos_before = int(self.textCursor().position())
         text = str(event.text() or "")
         should_break_link_append = bool(
             text
@@ -2501,17 +2503,6 @@ class TDocEditorWidget(QTextEdit):
         super().keyPressEvent(event)
         if was_internal:
             return
-
-        if not bool(event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
-            if event.key() in (
-                Qt.Key_Left,
-                Qt.Key_Right,
-                Qt.Key_Up,
-                Qt.Key_Down,
-                Qt.Key_Home,
-                Qt.Key_End,
-            ):
-                self._expand_link_for_editing(self.textCursor(), previous_pos=cursor_pos_before)
 
         if text == "]":
             if self._try_convert_recent_bracket_link():
