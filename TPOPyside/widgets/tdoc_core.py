@@ -562,6 +562,76 @@ class TDocProjectIndex:
         return str(marker), None, ""
 
     @staticmethod
+    def symbol_or_alias_at_marker_position(line_text, column_1based):
+        raw_line = str(line_text or "")
+        if not raw_line:
+            return ""
+
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            return ""
+
+        rule, _ = TDocProjectIndex._parse_rule_line(stripped)
+        if rule:
+            return ""
+        if TDocProjectIndex._is_section_header(stripped):
+            return ""
+
+        try:
+            col = max(1, int(column_1based or 1))
+        except Exception:
+            col = 1
+        idx = max(0, min(col - 1, len(raw_line)))
+
+        metadata_sep = raw_line.find(";")
+        base_end = metadata_sep if metadata_sep >= 0 else len(raw_line)
+        base = raw_line[:base_end]
+        if not base.strip():
+            return ""
+
+        spans: list[tuple[int, int, str]] = []
+        eq_idx = base.find("=")
+        if eq_idx < 0:
+            part = base
+            token = part.strip()
+            if token:
+                left = len(part) - len(part.lstrip())
+                right = len(part.rstrip())
+                spans.append((left, right, token))
+        else:
+            symbol_part = base[:eq_idx]
+            symbol = symbol_part.strip()
+            if symbol:
+                left = len(symbol_part) - len(symbol_part.lstrip())
+                right = len(symbol_part.rstrip())
+                spans.append((left, right, symbol))
+
+            pos = eq_idx + 1
+            while pos <= len(base):
+                pipe_idx = base.find("|", pos)
+                seg_end = pipe_idx if pipe_idx >= 0 else len(base)
+                segment = base[pos:seg_end]
+                token = segment.strip()
+                if token:
+                    left = pos + (len(segment) - len(segment.lstrip()))
+                    right = seg_end - (len(segment) - len(segment.rstrip()))
+                    spans.append((left, right, token))
+                if pipe_idx < 0:
+                    break
+                pos = pipe_idx + 1
+
+        if not spans:
+            return ""
+
+        for start, end, token in spans:
+            if start <= idx < end:
+                return token
+
+        if idx >= base_end:
+            return spans[-1][2]
+        return spans[0][2]
+
+    @staticmethod
     def rename_alias_in_marker(root_path, old_alias, new_alias):
         marker = TDocProjectIndex.marker_path(root_path)
         if not marker.exists():

@@ -3896,18 +3896,54 @@ class PythonIDE(Window):
         widget = widget_ref() if callable(widget_ref) else widget_ref
         if not isinstance(widget, TDocDocumentWidget):
             return
-        index_path = widget.ensure_index_file()
-        if not index_path:
+        root = self._tdoc_root_for_widget(widget)
+        self._open_tdoc_index_entry_for_symbol(root, symbol)
+
+    def _open_tdoc_index_entry_for_symbol(self, root: str, symbol_or_alias: str) -> None:
+        root_c = self._canonical_path(root) if str(root or "").strip() else ""
+        query = str(symbol_or_alias or "").strip()
+        if not root_c or not query:
+            return
+        if not TDocProjectIndex.has_project_marker(root_c):
             QMessageBox.information(
                 self,
                 "TDOC Index",
                 "No TDOC project marker found. Create a .tdocproject file first.",
             )
             return
-        self.open_file(index_path)
-        opened = self._find_open_document_for_path(index_path)
+
+        linked_file, _line = parse_file_link(query)
+        if linked_file:
+            return
+
+        alias_to_symbol, _sym, _sec, _inc, _ign, _meta = TDocProjectIndex.load_aliases(root_c)
+        symbol = query
+        if isinstance(alias_to_symbol, dict):
+            symbol = str(alias_to_symbol.get(query.casefold(), query) or query).strip()
+
+        index_path = TDocProjectIndex.build_index(root_c)
+        if not index_path:
+            QMessageBox.information(
+                self,
+                "TDOC Index",
+                "Could not build/open index for this TDOC project.",
+            )
+            return
+        index_c = self._canonical_path(str(index_path))
+        self.open_file(index_c)
+        opened = self._find_open_document_for_path(index_c)
         if isinstance(opened, TDocDocumentWidget):
             opened.jump_to_symbol(symbol)
+
+    def _on_tdoc_marker_index_entry_requested(self, widget_ref, symbol_or_alias: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, EditorWidget):
+            return
+        file_path = str(self._document_widget_path(widget) or "").strip()
+        if not file_path or os.path.basename(file_path) != PROJECT_MARKER_FILENAME:
+            return
+        root = self._canonical_path(resolve_tdoc_root_for_path(file_path, project_root=self.project_root))
+        self._open_tdoc_index_entry_for_symbol(root, symbol_or_alias)
 
     def _on_tdoc_symbol_definition_requested(self, widget_ref, symbol_or_alias: str) -> None:
         widget = widget_ref() if callable(widget_ref) else widget_ref
@@ -4126,7 +4162,7 @@ class PythonIDE(Window):
 
     def _on_tdoc_rename_alias_requested(self, widget_ref, old_alias: str) -> None:
         widget = widget_ref() if callable(widget_ref) else widget_ref
-        if not isinstance(widget, TDocDocumentWidget):
+        if not isinstance(widget, (TDocDocumentWidget, EditorWidget)):
             return
 
         old = str(old_alias or "").strip()
@@ -4136,29 +4172,36 @@ class PythonIDE(Window):
         if linked_file:
             return
 
-        root = self._tdoc_root_for_widget(widget)
+        root = ""
+        if isinstance(widget, TDocDocumentWidget):
+            root = self._tdoc_root_for_widget(widget)
+        else:
+            file_path = str(self._document_widget_path(widget) or "").strip()
+            if not file_path or os.path.basename(file_path) != PROJECT_MARKER_FILENAME:
+                return
+            root = self._canonical_path(resolve_tdoc_root_for_path(file_path, project_root=self.project_root))
         if not root or not TDocProjectIndex.has_project_marker(root):
             QMessageBox.information(
                 self,
-                "Rename TDOC Alias",
+                "Rename TDOC Symbol/Alias",
                 "No TDOC project marker found. Create a .tdocproject file first.",
             )
             return
 
         new_alias, ok = QInputDialog.getText(
             self,
-            "Rename TDOC Alias",
-            f"Rename alias '{old}' to:",
+            "Rename TDOC Symbol/Alias",
+            f"Rename '{old}' to:",
             text=old,
         )
         if not ok:
             return
         new_alias = str(new_alias or "").strip()
         if not new_alias:
-            QMessageBox.warning(self, "Rename TDOC Alias", "Alias cannot be empty.")
+            QMessageBox.warning(self, "Rename TDOC Symbol/Alias", "Name cannot be empty.")
             return
         if parse_file_link(new_alias)[0]:
-            QMessageBox.warning(self, "Rename TDOC Alias", "Alias cannot be a file-link value.")
+            QMessageBox.warning(self, "Rename TDOC Symbol/Alias", "Name cannot be a file-link value.")
             return
         if new_alias.casefold() == old.casefold():
             return
@@ -4170,7 +4213,7 @@ class PythonIDE(Window):
         docs_changed = TDocProjectIndex.rename_alias_in_documents(root, old, new_alias)
 
         if not marker_changed and docs_changed == 0:
-            QMessageBox.information(self, "Rename TDOC Alias", f"No matches found for '{old}'.")
+            QMessageBox.information(self, "Rename TDOC Symbol/Alias", f"No matches found for '{old}'.")
             return
 
         TDocProjectIndex.build_index(root)
@@ -4185,7 +4228,7 @@ class PythonIDE(Window):
 
         QMessageBox.information(
             self,
-            "Rename TDOC Alias",
+            "Rename TDOC Symbol/Alias",
             f"Renamed '{old}' to '{new_alias}'. Updated {docs_changed} document file(s).",
         )
 

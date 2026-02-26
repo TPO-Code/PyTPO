@@ -315,6 +315,7 @@ class DiagnosticsController:
             return
         if not isinstance(menu_obj, QMenu):
             return
+        self._append_tdoc_marker_rename_action_to_menu(ed_ref, menu_obj, payload_obj)
         if not ed.file_path or not self._is_python_file_path(ed.file_path):
             return
 
@@ -381,6 +382,47 @@ class DiagnosticsController:
             act.triggered.connect(
                 lambda _checked=False, e=ed_ref, d=dict(diag): self._apply_remove_unused_import_from_context_menu(e, d)
             )
+
+    def _append_tdoc_marker_rename_action_to_menu(self, ed_ref, menu_obj: QMenu, payload_obj: object) -> None:
+        ed = ed_ref() if callable(ed_ref) else ed_ref
+        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+            return
+        marker_path = str(getattr(ed, "file_path", "") or "").strip()
+        if not marker_path or os.path.basename(marker_path) != PROJECT_MARKER_FILENAME:
+            return
+
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+        try:
+            line_num = int(payload.get("line") or 0)
+        except Exception:
+            line_num = 0
+        if line_num <= 0:
+            line_num = int(ed.textCursor().blockNumber() + 1)
+
+        try:
+            col_num = int(payload.get("column") or 0)
+        except Exception:
+            col_num = 0
+        if col_num <= 0:
+            col_num = int(ed.textCursor().positionInBlock() + 1)
+
+        block = ed.document().findBlockByNumber(max(0, line_num - 1))
+        if not block.isValid():
+            return
+        token = TDocProjectIndex.symbol_or_alias_at_marker_position(block.text(), col_num)
+        token = str(token or "").strip()
+        if not token:
+            return
+
+        menu_obj.addSeparator()
+        action_index = menu_obj.addAction(f"Go to TDOC Index Entry for '{token}'")
+        action_index.triggered.connect(
+            lambda _checked=False, e=ed_ref, t=token: self.ide._on_tdoc_marker_index_entry_requested(e, t)
+        )
+        action = menu_obj.addAction(f"Rename TDOC '{token}'...")
+        action.triggered.connect(
+            lambda _checked=False, e=ed_ref, t=token: self.ide._on_tdoc_rename_alias_requested(e, t)
+        )
 
     def _append_import_fix_actions_to_menu(self, parent_menu: QMenu, ed_ref, symbol: str, candidates: list[dict]) -> None:
         if not candidates:
