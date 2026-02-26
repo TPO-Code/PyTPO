@@ -1,0 +1,10 @@
+---
+title: Demo Quickstart
+status: active
+tags: demo, overview
+---
+Welcome to the TDOC demo workspace.
+Meet [Ari] and [Mira Stone] in [Glass Harbor].
+The [Dawnwheel] appears in [demo/chapter_01.tdoc#L10].
+Check [demo/reference/characters.tdoc] for cast notes.
+This line references [Unbound Prophecy] to demonstrate unresolved-symbol linting.

@@ -115,6 +115,7 @@ class TDocDocumentWidget(TDocEditorWidget):
         self._alias_to_symbol: dict[str, str] = {}
 
         self.resolve_symbol = self._resolve_symbol_link
+        self.resolve_image_path = self._resolve_image_link_target
 
         if file_path:
             self.load_file(file_path)
@@ -185,6 +186,15 @@ class TDocDocumentWidget(TDocEditorWidget):
         abs_path = self._canonicalize(os.path.join(base, rel))
         return abs_path, line_no
 
+    def _resolve_image_link_target(self, target: str) -> str:
+        rel = str(target or "").strip()
+        if not rel:
+            return ""
+        if rel.startswith("~") or os.path.isabs(rel):
+            return ""
+        base = self.tdoc_root or os.path.dirname(self.file_path or self._project_root or os.getcwd())
+        return self._canonicalize(os.path.join(base, rel))
+
     def ensure_index_file(self) -> str | None:
         self.refresh_project_context()
         if not self.tdoc_root:
@@ -238,13 +248,14 @@ def collect_tdoc_diagnostics(
     project_root: str,
     canonicalize: Callable[[str], str],
     source: str = "tdoc",
+    content_overrides: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, list[dict]]]:
     """Return `(resolved_root, diagnostics_by_file)` for TDOC validation."""
 
     cpath = canonicalize(file_path)
     root = canonicalize(resolve_tdoc_root_for_path(cpath, project_root=project_root))
 
-    findings = TDocProjectIndex.validate_project(root)
+    findings = TDocProjectIndex.validate_project(root, content_overrides=content_overrides)
     marker_path = canonicalize(str(Path(root) / PROJECT_MARKER_FILENAME))
 
     by_file: dict[str, list[dict]] = {}
@@ -280,11 +291,15 @@ def collect_tdoc_diagnostics(
 
         line_value = finding.get("line")
         marker_line = int(line_value) if isinstance(line_value, int) else None
+        finding_file = str(finding.get("file") or "").strip()
 
         diag_path = ""
         diag_line = 1
 
-        if marker_line is not None:
+        if finding_file and marker_line is not None:
+            diag_path = canonicalize(str(Path(root) / finding_file))
+            diag_line = marker_line
+        elif marker_line is not None:
             diag_path = marker_path
             diag_line = marker_line
         else:

@@ -3653,6 +3653,34 @@ class PythonIDE(Window):
     def _is_tdoc_related_path(self, file_path: str | None) -> bool:
         return is_tdoc_related_path(file_path)
 
+    def _tdoc_content_overrides_for_root(self, root: str) -> dict[str, str]:
+        root_path = self._canonical_path(root)
+        overrides: dict[str, str] = {}
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not self._is_tdoc_related_path(path):
+                continue
+            cpath = self._canonical_path(path)
+            if not self._path_has_prefix(cpath, root_path):
+                continue
+
+            text = ""
+            if isinstance(widget, TDocDocumentWidget):
+                try:
+                    text = widget.serialized_text()
+                except Exception:
+                    text = ""
+            else:
+                getter = getattr(widget, "toPlainText", None)
+                if callable(getter):
+                    try:
+                        text = str(getter())
+                    except Exception:
+                        text = ""
+            if isinstance(text, str):
+                overrides[cpath] = text
+        return overrides
+
     def _current_document_widget(self) -> QWidget | None:
         return self.editor_workspace.active_document_widget()
 
@@ -3760,11 +3788,14 @@ class PythonIDE(Window):
         cpath = self._canonical_path(file_path)
         if not self._is_tdoc_related_path(cpath):
             return
+        root_guess = self._canonical_path(resolve_tdoc_root_for_path(cpath, project_root=self.project_root))
+        content_overrides = self._tdoc_content_overrides_for_root(root_guess)
         root, by_file = collect_tdoc_diagnostics(
             file_path=cpath,
             project_root=self.project_root,
             canonicalize=self._canonical_path,
             source="tdoc",
+            content_overrides=content_overrides,
         )
         self._set_tdoc_diagnostics_for_root(root, by_file)
 
@@ -3774,11 +3805,14 @@ class PythonIDE(Window):
             path = self._document_widget_path(widget)
             if not self._is_tdoc_related_path(path):
                 continue
+            root_guess = self._canonical_path(resolve_tdoc_root_for_path(path, project_root=self.project_root))
+            content_overrides = self._tdoc_content_overrides_for_root(root_guess)
             root, by_file = collect_tdoc_diagnostics(
                 file_path=path,
                 project_root=self.project_root,
                 canonicalize=self._canonical_path,
                 source="tdoc",
+                content_overrides=content_overrides,
             )
             roots.add(root)
             self._set_tdoc_diagnostics_for_root(root, by_file)

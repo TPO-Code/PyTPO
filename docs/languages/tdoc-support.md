@@ -21,6 +21,7 @@ TDOC root is resolved in this order:
 6. file directory fallback
 
 Relative TDOC file links resolve from that TDOC root. This means `.tdocprojects` is treated as the TDOC root when present.
+Relative file links in general resolve from that same TDOC root.
 
 ## `.tdocproject` format
 
@@ -42,12 +43,24 @@ Section headers should start with a capital letter (for example `Locations:`). N
 ## Link syntax in `.tdoc`
 
 - symbol links: `[Alias Or Canonical]`
-- file links: `[path/to/file.tdoc]`
-- file+line links: `[path/to/file.tdoc#L42]`
+- file links: `[path/to/file.ext]`
+- file+line links: `[path/to/file.ext#L42]`
 - titled links (custom display text): `[Shown Text|target]`
-  - example: `[2|Characters/Main/Molly.tdoc#L2]`
+  - example: `[2|Characters/Main/Molly.tdoc#L2]`, `[Build Script|../../scripts/build.sh]`
   - `target` can be a symbol label/alias or a file/file+line target
   - existing non-titled links remain supported
+  - file targets are path-like values (for example `docs/guide.md`, `src/main.cpp`, `../notes.txt`)
+- inline images:
+  - `![images/map.png]`
+  - `![Map Overview|images/map.png]`
+  - images render inline in TDOC editor when the target resolves and loads
+
+Path scope:
+
+- File targets are resolved relative to TDOC root.
+- Paths can still escape via `..` segments (for example `../../outside.txt`) if intentionally authored.
+- Absolute-style targets (`/abs/path`, `C:\abs\path`, `~`) are not treated as file links.
+- Image targets follow the same root/relative rules.
 
 Optional frontmatter is supported at file top:
 
@@ -63,8 +76,9 @@ index: on
 
 ## Navigation
 
-- `Ctrl+Click` a file link to open that TDOC file (and line for `#Lnn` links).
+- `Ctrl+Click` a file link to open that file in the IDE (and line for `#Lnn` links where applicable).
 - `Ctrl+Click` a symbol link to open `index.tdoc` and jump to that symbol.
+- Images are inline visual content, not click-navigation links.
 
 If needed, symbol navigation creates/refreshes `index.tdoc` first.
 
@@ -117,6 +131,7 @@ TDOC diagnostics are reported in the same Problems panel used by other languages
 - unresolved symbols
 - frontmatter warnings
 - section capitalization warnings
+- missing inline image files (`![...]` / `![caption|...]`)
 
 TDOC quick fixes from Problems context menu:
 

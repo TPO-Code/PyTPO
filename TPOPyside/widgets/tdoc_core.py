@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QPixmap,
     QTextCharFormat,
     QTextCursor,
+    QTextImageFormat,
     QTextFormat,
 )
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -41,12 +42,15 @@ INDEX_SEPARATOR_LINE = "--------------------"
 LEGACY_INDEX_AUTO_START = "<!-- TDOC:AUTO START -->"
 LEGACY_INDEX_AUTO_END = "<!-- TDOC:AUTO END -->"
 
-LINK_PATTERN = re.compile(r"\[(?P<label>[^\[\]\n]+?)\]")
+LINK_PATTERN = re.compile(r"(?<!\!)\[(?P<label>[^\[\]\n]+?)\]")
+IMAGE_PATTERN = re.compile(r"!\[(?P<body>[^\[\]\n]+?)\]")
+INLINE_TOKEN_PATTERN = re.compile(r"!\[(?P<image>[^\[\]\n]+?)\]|(?<!\!)\[(?P<link>[^\[\]\n]+?)\]")
 ALIAS_LINE_PATTERN = re.compile(r"^(?P<symbol>[^=#]+?)\s*=\s*(?P<aliases>.*)$")
 SECTION_HEADER_PATTERN = re.compile(r"^(?P<section>[^=#].*?)\s*:\s*$")
 FILE_LINK_PATTERN = re.compile(r"^(?P<path>.+?\.tdoc)(?:#L(?P<line>\d+))?$", re.IGNORECASE)
 RULE_LINE_PATTERN = re.compile(r"^(?P<rule>include|ignore)\s*:\s*(?P<patterns>.*)$", re.IGNORECASE)
 FRONTMATTER_KV_PATTERN = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$")
+_WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 
 _TDOC_LINT_VISUAL_DEFAULTS = {
     "error_color": "#E35D6A",
@@ -66,14 +70,53 @@ _TDOC_OVERVIEW_MARKER_DEFAULTS = {
 
 
 def parse_file_link(label):
-    """Parses 'path.tdoc' or 'path.tdoc#L42' from plain or titled link text."""
-    cleaned = link_effective_target(label)
-    m = FILE_LINK_PATTERN.match(cleaned)
-    if not m:
+    """Parses path-like links from plain or titled link text.
+
+    Supports:
+    - relative paths: docs/spec.md, ./src/main.cpp, ../notes.txt
+    - absolute paths: /var/log/app.log, C:\\repo\\file.py
+    - optional line anchors: #L42
+    """
+    cleaned = str(link_effective_target(label) or "").strip()
+    if not cleaned:
         return None, None
-    path = m.group("path").strip()
-    line = int(m.group("line")) if m.group("line") else None
+
+    line = None
+    path = cleaned
+    m = re.match(r"^(?P<path>.+?)#L(?P<line>\d+)$", cleaned, re.IGNORECASE)
+    if not m:
+        m = FILE_LINK_PATTERN.match(cleaned)
+    if m:
+        path = m.group("path").strip()
+        line = int(m.group("line")) if m.group("line") else None
+    if not _looks_like_file_link_path(path):
+        return None, None
     return path, line
+
+
+def _looks_like_file_link_path(path):
+    text = str(path or "").strip()
+    if not text:
+        return False
+    if text in {".", ".."}:
+        return False
+    if text.startswith("~"):
+        return False
+    if os.path.isabs(text):
+        return False
+    if _WINDOWS_DRIVE_PATH_PATTERN.match(text):
+        return False
+    if "/" in text or "\\" in text:
+        return True
+    name = os.path.basename(text)
+    if not name:
+        return False
+    if name.startswith(".") and len(name) > 1:
+        return True
+    dot = name.rfind(".")
+    if dot > 0 and dot < len(name) - 1:
+        return True
+    return False
 
 
 def parse_link_components(label):
@@ -114,6 +157,30 @@ def link_display_text(label):
     if shown:
         return shown
     return str(label or "").strip()
+
+
+def parse_image_components(body):
+    cleaned = str(body or "").strip()
+    if not cleaned:
+        return "", ""
+    if "|" not in cleaned:
+        return "", cleaned
+    caption, path = cleaned.split("|", 1)
+    caption = caption.strip()
+    path = path.strip()
+    if not path:
+        return "", cleaned
+    return caption, path
+
+
+def compose_image_components(caption, path):
+    caption_text = str(caption or "").strip()
+    path_text = str(path or "").strip()
+    if not path_text:
+        return caption_text
+    if caption_text:
+        return f"{caption_text}|{path_text}"
+    return path_text
 
 
 def parse_doc_frontmatter(content):
@@ -311,6 +378,38 @@ class TDocProjectIndex:
             yield path, rel_path
 
     @staticmethod
+    def _canonical_text_path(path_value):
+        text = str(path_value or "").strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).expanduser().resolve())
+        except Exception:
+            return os.path.abspath(os.path.expanduser(text))
+
+    @staticmethod
+    def _normalize_content_overrides(content_overrides):
+        normalized = {}
+        if not isinstance(content_overrides, dict):
+            return normalized
+        for raw_path, raw_text in content_overrides.items():
+            key = TDocProjectIndex._canonical_text_path(raw_path)
+            if not key:
+                continue
+            normalized[key] = str(raw_text if raw_text is not None else "")
+        return normalized
+
+    @staticmethod
+    def _read_text_with_overrides(path, content_overrides):
+        key = TDocProjectIndex._canonical_text_path(path)
+        if key and isinstance(content_overrides, dict) and key in content_overrides:
+            return content_overrides.get(key), None
+        try:
+            return Path(path).read_text(encoding="utf-8"), None
+        except Exception as e:
+            return None, e
+
+    @staticmethod
     def load_aliases(root_path):
         alias_to_symbol = {}
         symbol_to_aliases = {}
@@ -505,17 +604,25 @@ class TDocProjectIndex:
         return touched
 
     @staticmethod
-    def collect_symbol_references(root_path, alias_to_symbol, include_patterns=None, ignore_patterns=None):
+    def collect_symbol_references(
+        root_path,
+        alias_to_symbol,
+        include_patterns=None,
+        ignore_patterns=None,
+        content_overrides=None,
+    ):
         symbol_refs = defaultdict(set)
         unresolved_refs = defaultdict(set)
         doc_metadata = {}
         frontmatter_issues = []
+        normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
 
         for path, rel_path in TDocProjectIndex.iter_doc_paths(root_path, include_patterns, ignore_patterns):
-            try:
-                content = path.read_text(encoding="utf-8")
-            except Exception as e:
-                print(f"Error reading {path}: {e}")
+            content, err = TDocProjectIndex._read_text_with_overrides(path, normalized_overrides)
+            if err is not None:
+                print(f"Error reading {path}: {err}")
+                continue
+            if content is None:
                 continue
 
             metadata, body_lines, body_start_line, fm_issues = parse_doc_frontmatter(content)
@@ -608,9 +715,10 @@ class TDocProjectIndex:
         return touched_files, replacements
 
     @staticmethod
-    def validate_project(root_path):
+    def validate_project(root_path, content_overrides=None):
         findings = []
         marker = TDocProjectIndex.marker_path(root_path)
+        normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
 
         if not marker.exists():
             findings.append(
@@ -622,17 +730,17 @@ class TDocProjectIndex:
             )
             return findings
 
-        try:
-            lines = marker.read_text(encoding="utf-8").splitlines()
-        except Exception as e:
+        marker_content, marker_err = TDocProjectIndex._read_text_with_overrides(marker, normalized_overrides)
+        if marker_err is not None:
             findings.append(
                 {
                     "severity": "error",
-                    "message": f"Cannot read {PROJECT_MARKER_FILENAME}: {e}",
+                    "message": f"Cannot read {PROJECT_MARKER_FILENAME}: {marker_err}",
                     "line": None,
                 }
             )
             return findings
+        lines = str(marker_content or "").splitlines()
 
         section_line = {}
         section_count = defaultdict(int)
@@ -782,7 +890,11 @@ class TDocProjectIndex:
         effective_includes = include_patterns_loaded or include_patterns
         effective_ignores = ignore_patterns_loaded or ignore_patterns
         _, unresolved_refs, _, frontmatter_issues = TDocProjectIndex.collect_symbol_references(
-            root_path, alias_to_symbol, effective_includes, effective_ignores
+            root_path,
+            alias_to_symbol,
+            effective_includes,
+            effective_ignores,
+            content_overrides=normalized_overrides,
         )
         for issue in frontmatter_issues:
             findings.append(
@@ -803,6 +915,40 @@ class TDocProjectIndex:
                     "line": None,
                 }
             )
+
+        seen_missing_images = set()
+        for path, rel_path in TDocProjectIndex.iter_doc_paths(root_path, effective_includes, effective_ignores):
+            content, _err = TDocProjectIndex._read_text_with_overrides(path, normalized_overrides)
+            if content is None:
+                continue
+            _, body_lines, body_start_line, _ = parse_doc_frontmatter(content)
+            for offset, line in enumerate(body_lines):
+                line_no = body_start_line + offset
+                for match in IMAGE_PATTERN.finditer(line):
+                    raw = str(match.group("body") or "").strip()
+                    if not raw:
+                        continue
+                    _caption, raw_path = parse_image_components(raw)
+                    rel_image = str(raw_path or "").strip()
+                    if not rel_image:
+                        continue
+                    if rel_image.startswith("~") or os.path.isabs(rel_image) or _WINDOWS_DRIVE_PATH_PATTERN.match(rel_image):
+                        continue
+                    abs_image = os.path.normpath(os.path.join(str(root_path), rel_image))
+                    if os.path.exists(abs_image):
+                        continue
+                    key = (str(rel_path), int(line_no), rel_image.casefold())
+                    if key in seen_missing_images:
+                        continue
+                    seen_missing_images.add(key)
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": f"Missing image file '{rel_image}' used at {rel_path}#L{line_no}.",
+                            "line": int(line_no),
+                            "file": str(rel_path),
+                        }
+                    )
 
         return findings
 
@@ -1110,6 +1256,8 @@ class TDocEditorWidget(QTextEdit):
     LINK_PROPERTY = QTextCharFormat.UserProperty + 1
     LINK_LABEL_PROPERTY = QTextCharFormat.UserProperty + 2
     LINK_RAW_PROPERTY = QTextCharFormat.UserProperty + 3
+    IMAGE_RAW_PROPERTY = QTextCharFormat.UserProperty + 4
+    IMAGE_PATH_PROPERTY = QTextCharFormat.UserProperty + 5
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1173,6 +1321,7 @@ class TDocEditorWidget(QTextEdit):
         self._last_cursor_pos = int(self.textCursor().position())
         self.open_file_by_name = None
         self.open_symbol = None
+        self.resolve_image_path = None
         self.resolve_symbol = None
         self.rename_alias = None
         self.normalize_symbol = None
@@ -2134,6 +2283,62 @@ class TDocEditorWidget(QTextEdit):
             symbol = self.resolve_symbol(cleaned)
         return f"symbol:{symbol}"
 
+    def _resolve_image_target_path(self, target: str) -> str:
+        text = str(target or "").strip()
+        if not text:
+            return ""
+        if text.startswith("~") or os.path.isabs(text) or _WINDOWS_DRIVE_PATH_PATTERN.match(text):
+            return ""
+        resolver = self.resolve_image_path
+        if callable(resolver):
+            try:
+                resolved = str(resolver(text) or "").strip()
+            except Exception:
+                resolved = ""
+            return resolved
+        return os.path.abspath(text)
+
+    def _inline_image_max_width(self) -> int:
+        vp = self.viewport()
+        if vp is None:
+            return 720
+        width = int(vp.width())
+        if width <= 0:
+            return 720
+        return max(96, width - 32)
+
+    def _insert_inline_image_from_tag(self, cursor: QTextCursor, raw_body: str) -> bool:
+        caption, rel_path = parse_image_components(raw_body)
+        if not rel_path:
+            return False
+        abs_path = self._resolve_image_target_path(rel_path)
+        if not abs_path:
+            return False
+
+        pixmap = QPixmap(abs_path)
+        if pixmap.isNull():
+            return False
+
+        width = int(pixmap.width())
+        height = int(pixmap.height())
+        if width <= 0 or height <= 0:
+            return False
+        max_w = self._inline_image_max_width()
+        if max_w > 0 and width > max_w:
+            scale = float(max_w) / float(width)
+            width = max_w
+            height = max(1, int(round(float(height) * scale)))
+
+        image_fmt = QTextImageFormat()
+        image_fmt.setName(abs_path)
+        image_fmt.setWidth(width)
+        image_fmt.setHeight(height)
+        normalized_raw = compose_image_components(caption, rel_path)
+        image_fmt.setProperty(self.IMAGE_RAW_PROPERTY, normalized_raw)
+        image_fmt.setProperty(self.IMAGE_PATH_PROPERTY, rel_path)
+        cursor.insertImage(image_fmt)
+        return True
+
     def load_tdoc(self, text):
         """Parses [Label] links and renders only label text as clickable."""
         self._is_internal_change = True
@@ -2144,7 +2349,7 @@ class TDocEditorWidget(QTextEdit):
         cursor.beginEditBlock()
 
         last_pos = 0
-        for match in LINK_PATTERN.finditer(text):
+        for match in INLINE_TOKEN_PATTERN.finditer(text):
             if match.start() < last_pos:
                 continue
 
@@ -2152,7 +2357,13 @@ class TDocEditorWidget(QTextEdit):
             if pre_text:
                 cursor.insertText(pre_text, QTextCharFormat())
 
-            raw_label = match.group("label")
+            raw_image = match.group("image")
+            if raw_image is not None:
+                if "\n" in raw_image or not self._insert_inline_image_from_tag(cursor, raw_image):
+                    cursor.insertText(match.group(0), QTextCharFormat())
+                last_pos = match.end()
+                continue
+            raw_label = match.group("link") or ""
             if "\n" in raw_label:
                 cursor.insertText(match.group(0), QTextCharFormat())
                 last_pos = match.end()
@@ -2192,7 +2403,19 @@ class TDocEditorWidget(QTextEdit):
                 text = fragment.text()
                 fmt = fragment.charFormat()
 
-                if fmt.hasProperty(self.LINK_PROPERTY):
+                if fmt.isImageFormat():
+                    raw = fmt.property(self.IMAGE_RAW_PROPERTY) if fmt.hasProperty(self.IMAGE_RAW_PROPERTY) else ""
+                    raw_text = str(raw or "").strip()
+                    if not raw_text:
+                        try:
+                            raw_text = str(fmt.toImageFormat().name() or "").strip()
+                        except Exception:
+                            raw_text = ""
+                    if raw_text:
+                        output.append(f"![{raw_text}]")
+                    else:
+                        output.append(text)
+                elif fmt.hasProperty(self.LINK_PROPERTY):
                     raw = fmt.property(self.LINK_RAW_PROPERTY) if fmt.hasProperty(self.LINK_RAW_PROPERTY) else text
                     raw_text = str(raw) if isinstance(raw, str) else str(text)
                     output.append(f"[{raw_text}]")
@@ -2295,6 +2518,62 @@ class TDocEditorWidget(QTextEdit):
             return None
         value = fmt.property(self.LINK_RAW_PROPERTY)
         return str(value) if isinstance(value, str) else None
+
+    def _image_raw_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        fmt = tc.charFormat()
+        if not fmt.isImageFormat():
+            return None
+        if fmt.hasProperty(self.IMAGE_RAW_PROPERTY):
+            value = fmt.property(self.IMAGE_RAW_PROPERTY)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            image_fmt = fmt.toImageFormat()
+            name = str(image_fmt.name() or "").strip()
+        except Exception:
+            name = ""
+        return name or None
+
+    def _expand_inline_image_for_editing(self, cursor: QTextCursor | None = None) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if cur.hasSelection():
+            return False
+        pos = int(cur.position())
+        candidates = [pos, pos - 1]
+        for candidate in candidates:
+            raw = self._image_raw_at_doc_pos(candidate)
+            if not raw:
+                continue
+            tag_text = f"![{raw}]"
+            was_internal = bool(self._is_internal_change)
+            self._is_internal_change = True
+            try:
+                edit = QTextCursor(self.document())
+                edit.beginEditBlock()
+                edit.setPosition(candidate)
+                edit.setPosition(candidate + 1, QTextCursor.KeepAnchor)
+                edit.removeSelectedText()
+                edit.insertText(tag_text, QTextCharFormat())
+                edit.endEditBlock()
+
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(candidate + max(2, len(tag_text) - 1))
+                self.setTextCursor(new_cursor)
+            finally:
+                self._is_internal_change = was_internal
+            self._last_cursor_pos = int(self.textCursor().position())
+            return True
+        return False
 
     def _link_span_at_cursor(
         self, cursor: QTextCursor | None = None
@@ -2546,6 +2825,8 @@ class TDocEditorWidget(QTextEdit):
         start_idx = block_text.rfind("[", 0, end_idx)
         if start_idx < 0:
             return False
+        if start_idx > 0 and block_text[start_idx - 1] == "!":
+            return False
         if "]" in block_text[start_idx + 1:end_idx]:
             return False
 
@@ -2564,6 +2845,61 @@ class TDocEditorWidget(QTextEdit):
             new_cursor_pos=abs_start + len(link_display_text(label)),
         )
         return True
+
+    def _try_convert_recent_image_tag(self) -> bool:
+        cur = self.textCursor()
+        block = cur.block()
+        if not block.isValid():
+            return False
+
+        block_text = block.text()
+        col = int(cur.positionInBlock())
+        end_idx = col - 1
+        if end_idx < 2 or end_idx >= len(block_text):
+            return False
+        if block_text[end_idx] != "]":
+            return False
+
+        bracket_idx = block_text.rfind("[", 0, end_idx)
+        if bracket_idx <= 0:
+            return False
+        if block_text[bracket_idx - 1] != "!":
+            return False
+        if "]" in block_text[bracket_idx + 1:end_idx]:
+            return False
+
+        body = block_text[bracket_idx + 1:end_idx]
+        if not body:
+            return False
+        if "\n" in body or "\r" in body or "[" in body or "]" in body:
+            return False
+
+        abs_start = int(block.position()) + bracket_idx - 1
+        abs_end = int(block.position()) + end_idx + 1
+        raw_tag = f"![{body}]"
+
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(abs_start)
+            edit.setPosition(abs_end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            ok = self._insert_inline_image_from_tag(edit, body)
+            if not ok:
+                edit.insertText(raw_tag, QTextCharFormat())
+            edit.endEditBlock()
+
+            if ok:
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(int(edit.position()))
+                self.setTextCursor(new_cursor)
+                self._last_cursor_pos = int(self.textCursor().position())
+                return True
+            return False
+        finally:
+            self._is_internal_change = was_internal
 
     def _show_context_menu(self, pos):
         menu = self.createStandardContextMenu()
@@ -2610,14 +2946,25 @@ class TDocEditorWidget(QTextEdit):
                 if target.startswith("symbol:") and self.open_symbol:
                     self.open_symbol(target[len("symbol:"):])
                     return
+        elif e.button() == Qt.LeftButton and not bool(e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            cursor = self.cursorForPosition(e.position().toPoint())
+            if self._expand_inline_image_for_editing(cursor):
+                self._rebuild_extra_selections()
+                self._schedule_occurrence_marker_refresh()
+                if self._search_bar.isVisible():
+                    self._schedule_search_refresh(immediate=True)
+                self._refresh_overview_marker_area()
+                e.accept()
+                return
 
         super().mousePressEvent(e)
 
     def keyPressEvent(self, event):
         text = str(event.text() or "")
+        mods = event.modifiers()
         should_break_link_boundary = bool(
             text
-            and not bool(event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+            and not bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
             and (
                 self._cursor_is_appending_to_link(self.textCursor())
                 or self._cursor_is_prepending_to_link(self.textCursor())
@@ -2631,8 +2978,15 @@ class TDocEditorWidget(QTextEdit):
         if was_internal:
             return
 
-        if text == "]":
-            if self._try_convert_recent_bracket_link():
+        close_bracket_intent = bool(
+            (text == "]" or event.key() == Qt.Key_BracketRight)
+            and not bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+        )
+        if close_bracket_intent:
+            converted = self._try_convert_recent_image_tag()
+            if not converted:
+                converted = self._try_convert_recent_bracket_link()
+            if converted:
                 self._rebuild_extra_selections()
                 self._schedule_occurrence_marker_refresh()
                 if self._search_bar.isVisible():
