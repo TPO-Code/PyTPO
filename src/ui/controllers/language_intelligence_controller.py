@@ -35,7 +35,7 @@ class LanguageIntelligenceController:
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
 
-    def _editor_lookup_id(self, ed: EditorWidget) -> str:
+    def _editor_lookup_id(self, ed: object) -> str:
         return str(getattr(ed, "editor_id", "") or id(ed))
 
     def _next_completion_token(self) -> int:
@@ -161,35 +161,65 @@ class LanguageIntelligenceController:
         if len(self.ide._ai_recent_files) > 48:
             self.ide._ai_recent_files = self.ide._ai_recent_files[:48]
 
-    def _request_ai_inline_for_editor(self, ed: EditorWidget, reason: str = "manual") -> None:
-        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+    def _is_ai_capable_widget(self, widget: object) -> bool:
+        if widget is None:
+            return False
+        required = ("toPlainText", "completion_context", "set_inline_suggestion", "clear_inline_suggestion")
+        return all(callable(getattr(widget, name, None)) for name in required)
+
+    def _current_text_document_widget(self) -> object | None:
+        getter = getattr(self.ide, "_current_document_widget", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                return None
+        return self.current_editor()
+
+    def _request_ai_inline_for_editor(self, ed: object, reason: str = "manual") -> None:
+        if not self._is_ai_capable_widget(ed) or not _is_qobject_valid(ed):
             return
 
-        if not ed.file_path:
-            ed.clear_inline_suggestion()
+        file_path = str(getattr(ed, "file_path", "") or "").strip()
+        clear_inline = getattr(ed, "clear_inline_suggestion", None)
+        if not file_path:
+            if callable(clear_inline):
+                clear_inline()
             if reason != "passive":
                 self.statusBar().showMessage("AI Assist requires a saved file.", 1800)
             return
 
         ai_cfg = self._ai_assist_config()
         if not bool(ai_cfg.get("enabled", False)):
-            ed.clear_inline_suggestion()
+            if callable(clear_inline):
+                clear_inline()
             self.inline_suggestion_controller.cancel_for_editor(self._editor_lookup_id(ed), clear=True)
             if reason != "passive":
                 self.statusBar().showMessage("AI Assist is disabled.", 1800)
             return
 
-        if ed is not self.current_editor():
+        current_widget = self._current_text_document_widget()
+        if ed is not current_widget:
             if reason == "passive":
                 return
-            self._focus_editor(ed)
+            focus_widget = getattr(self.ide, "_focus_document_widget", None)
+            if callable(focus_widget):
+                focus_widget(ed)
+            elif isinstance(ed, EditorWidget):
+                self._focus_editor(ed)
 
-        ctx = ed.completion_context()
-        cpath = self._canonical_path(ed.file_path)
+        context_getter = getattr(ed, "completion_context", None)
+        if not callable(context_getter):
+            return
+        ctx = context_getter()
+        source_text_getter = getattr(ed, "toPlainText", None)
+        if not callable(source_text_getter):
+            return
+        cpath = self._canonical_path(file_path)
         payload = {
             "editor_id": self._editor_lookup_id(ed),
             "file_path": cpath,
-            "source_text": ed.toPlainText(),
+            "source_text": source_text_getter(),
             "line": int(ctx.get("line") or 1),
             "column": int(ctx.get("column") or 0),
             "prefix": str(ctx.get("prefix") or ""),
@@ -201,28 +231,46 @@ class LanguageIntelligenceController:
             return
         self.inline_suggestion_controller.request_manual(**payload)
 
+    def _document_widget_by_id(self, editor_id: str) -> object | None:
+        for widget in self.editor_workspace.all_document_widgets():
+            if self._editor_lookup_id(widget) == editor_id:
+                return widget
+        return None
+
     def _on_ai_inline_suggestion_ready(self, payload_obj: object) -> None:
         payload = payload_obj if isinstance(payload_obj, dict) else {}
         editor_id = str(payload.get("editor_id") or "")
         if not editor_id:
             return
-        ed = self._editor_by_id(editor_id)
-        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+        ed = self._document_widget_by_id(editor_id)
+        if not self._is_ai_capable_widget(ed) or not _is_qobject_valid(ed):
             return
-        if ed is not self.current_editor():
+        if ed is not self._current_text_document_widget():
             return
         text = str(payload.get("text") or "")
-        if ed.is_completion_popup_visible():
+        completion_visible_fn = getattr(ed, "is_completion_popup_visible", None)
+        is_completion_visible = bool(callable(completion_visible_fn) and completion_visible_fn())
+        if is_completion_visible:
+            set_completion = getattr(ed, "set_completion_ai_suggestion", None)
+            clear_completion = getattr(ed, "clear_completion_ai_suggestion", None)
             if text.strip():
-                ed.set_completion_ai_suggestion(text)
+                if callable(set_completion):
+                    set_completion(text)
             else:
-                ed.clear_completion_ai_suggestion()
+                if callable(clear_completion):
+                    clear_completion()
             return
-        ed.clear_completion_ai_suggestion()
+        clear_completion = getattr(ed, "clear_completion_ai_suggestion", None)
+        if callable(clear_completion):
+            clear_completion()
+        set_inline = getattr(ed, "set_inline_suggestion", None)
+        clear_inline = getattr(ed, "clear_inline_suggestion", None)
         if text.strip():
-            ed.set_inline_suggestion(text)
+            if callable(set_inline):
+                set_inline(text)
         else:
-            ed.clear_inline_suggestion()
+            if callable(clear_inline):
+                clear_inline()
 
     def _on_editor_signature_requested(self, ed_ref, payload: object):
         ed = ed_ref() if callable(ed_ref) else ed_ref

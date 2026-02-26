@@ -2243,7 +2243,7 @@ class PythonIDE(Window):
 
     def _on_editor_ai_assist_requested(self, ed_ref, reason: str):
         ed = ed_ref() if callable(ed_ref) else ed_ref
-        if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
+        if ed is None or not _is_qobject_valid(ed):
             return
         self._request_ai_inline_for_editor(ed, reason=reason or "manual")
 
@@ -2304,7 +2304,7 @@ class PythonIDE(Window):
     def _record_ai_recent_file(self, file_path: str | None) -> None:
         self.language_intelligence_controller._record_ai_recent_file(file_path)
 
-    def _request_ai_inline_for_editor(self, ed: EditorWidget, reason: str = "manual") -> None:
+    def _request_ai_inline_for_editor(self, ed: object, reason: str = "manual") -> None:
         self.language_intelligence_controller._request_ai_inline_for_editor(ed, reason=reason)
 
     def _on_ai_inline_suggestion_ready(self, payload_obj: object) -> None:
@@ -2581,18 +2581,26 @@ class PythonIDE(Window):
             ed.paste()
 
     def trigger_completion(self):
-        ed = self.current_editor()
-        if not isinstance(ed, EditorWidget):
+        widget = self._current_document_widget()
+        if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
             return
-        self._request_completion_for_editor(ed, reason="manual")
+        manual_completion = getattr(widget, "request_manual_completion", None)
+        if callable(manual_completion):
+            self._focus_document_widget(widget)
+            manual_completion()
+            return
+        if isinstance(widget, EditorWidget):
+            self._request_completion_for_editor(widget, reason="manual")
+            return
+        self.statusBar().showMessage("Completion is not available for this tab.", 1800)
 
     def trigger_ai_inline_assist(self):
-        ed = self.current_editor()
-        if not isinstance(ed, EditorWidget):
+        widget = self._current_document_widget()
+        if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
             return
-        self._request_ai_inline_for_editor(ed, reason="manual")
+        self._request_ai_inline_for_editor(widget, reason="manual")
 
     def show_find_in_editor(self):
         widget = self._current_document_widget()
@@ -3901,6 +3909,42 @@ class PythonIDE(Window):
         if isinstance(opened, TDocDocumentWidget):
             opened.jump_to_symbol(symbol)
 
+    def _on_tdoc_symbol_definition_requested(self, widget_ref, symbol_or_alias: str) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+
+        query = str(symbol_or_alias or "").strip()
+        if not query:
+            return
+
+        linked_file, _line = parse_file_link(query)
+        if linked_file:
+            return
+
+        root = self._tdoc_root_for_widget(widget)
+        if not root or not TDocProjectIndex.has_project_marker(root):
+            QMessageBox.information(
+                self,
+                "TDOC Definition",
+                "No TDOC project marker found. Create a .tdocproject file first.",
+            )
+            return
+
+        marker_path, line_no, canonical_symbol = TDocProjectIndex.find_symbol_definition_in_marker(root, query)
+        if not marker_path or not line_no:
+            QMessageBox.information(
+                self,
+                "TDOC Definition",
+                f"'{query}' is not defined in .tdocproject.",
+            )
+            return
+
+        if not self._navigate_to_problem_location(marker_path, int(line_no), 1):
+            self.open_file(marker_path)
+        shown = str(canonical_symbol or query).strip()
+        self.statusBar().showMessage(f"Opened .tdocproject definition for '{shown}'.", 2200)
+
     def _tdoc_root_for_widget(self, widget: TDocDocumentWidget | None) -> str:
         if not isinstance(widget, TDocDocumentWidget):
             return ""
@@ -4227,22 +4271,34 @@ class PythonIDE(Window):
             )
         except Exception:
             pass
+        completion_setter = getattr(widget, "update_completion_ui_settings", None)
+        if callable(completion_setter):
+            try:
+                completion_setter(self._completion_config())
+            except Exception:
+                pass
 
         ref = weakref.ref(widget)
         widget.open_file_by_name = lambda target, w=ref: self._on_tdoc_file_link_requested(w, target)
         widget.open_symbol = lambda symbol, w=ref: self._on_tdoc_symbol_link_requested(w, symbol)
+        widget.go_to_symbol_definition = lambda symbol, w=ref: self._on_tdoc_symbol_definition_requested(w, symbol)
         widget.rename_alias = lambda label, w=ref: self._on_tdoc_rename_alias_requested(w, label)
         widget.normalize_symbol = lambda label, w=ref: self._on_tdoc_normalize_symbol_requested(w, label)
         font_step_signal = getattr(widget, "editorFontSizeStepRequested", None)
         if font_step_signal is not None and hasattr(font_step_signal, "connect"):
             font_step_signal.connect(lambda step, w=ref: self._on_editor_font_size_step_requested(w, step))
+        ai_assist_signal = getattr(widget, "aiAssistRequested", None)
+        if ai_assist_signal is not None and hasattr(ai_assist_signal, "connect"):
+            ai_assist_signal.connect(lambda reason, w=ref: self._on_editor_ai_assist_requested(w, reason))
         def _on_tdoc_changed(wref=ref):
             obj = wref()
             if not isinstance(obj, TDocDocumentWidget):
                 return
             path = self._document_widget_path(obj)
             if path:
+                self._record_ai_recent_file(path)
                 self._schedule_tdoc_validation(path)
+                self._request_ai_inline_for_editor(obj, reason="passive")
         widget.textChanged.connect(_on_tdoc_changed)
         widget.textChanged.connect(self._schedule_autosave)
 
@@ -4915,6 +4971,16 @@ class PythonIDE(Window):
         for widget in self._iter_open_document_widgets():
             if isinstance(widget, TDocDocumentWidget):
                 self._apply_editor_background_to_editor(widget)
+                completion_setter = getattr(widget, "update_completion_ui_settings", None)
+                if callable(completion_setter):
+                    try:
+                        completion_setter(completion_cfg)
+                    except Exception:
+                        pass
+                if not bool(ai_cfg.get("enabled", False)):
+                    clear_inline = getattr(widget, "clear_inline_suggestion", None)
+                    if callable(clear_inline):
+                        clear_inline()
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()

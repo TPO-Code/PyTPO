@@ -24,14 +24,21 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QPushButton,
+    QStyle,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QTextEdit,
+    QToolTip,
     QWidget,
 )
 
@@ -67,6 +74,18 @@ _TDOC_OVERVIEW_MARKER_DEFAULTS = {
     "occurrence_color": "#66A86A",
     "max_occurrence_matches": 12000,
 }
+_TDOC_IMAGE_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".svg",
+}
+_TDOC_COMPLETION_INDEX_ROLE = int(Qt.UserRole)
+_TDOC_COMPLETION_META_ROLE = int(Qt.UserRole) + 1
+_FILE_LINK_EXTENSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
 def parse_file_link(label):
@@ -115,6 +134,11 @@ def _looks_like_file_link_path(path):
         return True
     dot = name.rfind(".")
     if dot > 0 and dot < len(name) - 1:
+        ext_raw = name[dot + 1:]
+        if any(ch.isspace() for ch in ext_raw):
+            return False
+        if not _FILE_LINK_EXTENSION_PATTERN.match(ext_raw):
+            return False
         return True
     return False
 
@@ -497,6 +521,45 @@ class TDocProjectIndex:
         if not cleaned:
             return cleaned
         return alias_to_symbol.get(cleaned.casefold(), cleaned)
+
+    @staticmethod
+    def find_symbol_definition_in_marker(root_path, symbol_or_alias):
+        marker = TDocProjectIndex.marker_path(root_path)
+        query = str(symbol_or_alias or "").strip()
+        if not marker.exists() or not query:
+            return "", None, ""
+
+        try:
+            lines = marker.read_text(encoding="utf-8").splitlines()
+        except Exception as e:
+            print(f"Error reading {marker}: {e}")
+            return str(marker), None, ""
+
+        query_cf = query.casefold()
+        for idx, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            rule, _ = TDocProjectIndex._parse_rule_line(stripped)
+            if rule:
+                continue
+
+            if TDocProjectIndex._is_section_header(stripped):
+                continue
+
+            symbol, alias_items, _metadata, _issues = TDocProjectIndex._parse_symbol_definition(stripped)
+            if not symbol:
+                continue
+
+            if symbol.casefold() == query_cf:
+                return str(marker), idx, symbol
+
+            for alias in alias_items:
+                if str(alias or "").casefold() == query_cf:
+                    return str(marker), idx, symbol
+
+        return str(marker), None, ""
 
     @staticmethod
     def rename_alias_in_marker(root_path, old_alias, new_alias):
@@ -1251,8 +1314,83 @@ class _TDocOverviewMarkerArea(QWidget):
         self._editor.overviewMarkerAreaMousePressEvent(event)
 
 
+class _TDocCompletionItemDelegate(QStyledItemDelegate):
+    def __init__(self, editor: "TDocEditorWidget"):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        row_h = max(base.height(), self._editor.fontMetrics().height() + 8)
+        return QSize(base.width(), row_h)
+
+    @staticmethod
+    def _kind_color(kind: str, palette: QPalette, selected: bool) -> QColor:
+        if selected:
+            return palette.color(QPalette.HighlightedText)
+        k = str(kind or "").strip().lower()
+        if k == "symbol":
+            return QColor("#DCDCAA")
+        if k == "folder":
+            return QColor("#4EC9B0")
+        if k == "file":
+            return QColor("#9CDCFE")
+        return palette.color(QPalette.Text)
+
+    def paint(self, painter, option, index):
+        meta = index.data(_TDOC_COMPLETION_META_ROLE)
+        if not isinstance(meta, dict):
+            super().paint(painter, option, index)
+            return
+
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style_opt = QStyleOptionViewItem(option)
+        style_opt.text = ""
+        style.drawControl(QStyle.CE_ItemViewItem, style_opt, painter, option.widget)
+
+        rect = option.rect.adjusted(8, 0, -8, 0)
+        if rect.width() <= 0:
+            return
+
+        primary = str(meta.get("primary") or "")
+        right = str(meta.get("right") or "")
+        kind = str(meta.get("kind") or "item")
+        fm = option.fontMetrics
+        selected = bool(option.state & QStyle.State_Selected)
+
+        right_width = 0
+        if right:
+            right_width = min(max(36, fm.horizontalAdvance(right) + 8), int(rect.width() * 0.42))
+
+        right_rect = QRect(rect.right() - right_width + 1, rect.top(), right_width, rect.height())
+        main_rect = QRect(rect.left(), rect.top(), max(0, rect.width() - right_width - 10), rect.height())
+
+        painter.save()
+        if right and right_rect.width() > 0:
+            right_pen = (
+                option.palette.color(QPalette.HighlightedText)
+                if selected
+                else option.palette.color(QPalette.PlaceholderText)
+            )
+            painter.setPen(right_pen)
+            painter.drawText(
+                right_rect.adjusted(0, 0, -2, 0),
+                Qt.AlignRight | Qt.AlignVCenter,
+                fm.elidedText(right, Qt.ElideRight, right_rect.width()),
+            )
+
+        painter.setPen(self._kind_color(kind, option.palette, selected))
+        painter.drawText(
+            main_rect,
+            Qt.AlignLeft | Qt.AlignVCenter,
+            fm.elidedText(primary, Qt.ElideRight, main_rect.width()),
+        )
+        painter.restore()
+
+
 class TDocEditorWidget(QTextEdit):
     editorFontSizeStepRequested = Signal(int)  # +1 / -1
+    aiAssistRequested = Signal(str)  # reason: manual | passive
     LINK_PROPERTY = QTextCharFormat.UserProperty + 1
     LINK_LABEL_PROPERTY = QTextCharFormat.UserProperty + 2
     LINK_RAW_PROPERTY = QTextCharFormat.UserProperty + 3
@@ -1305,8 +1443,46 @@ class TDocEditorWidget(QTextEdit):
         self._occurrence_refresh_timer.setSingleShot(True)
         self._occurrence_refresh_timer.setInterval(90)
         self._occurrence_refresh_timer.timeout.connect(self._refresh_occurrence_markers)
+
+        self._completion_popup = QListWidget(self)
+        self._completion_popup.setFocusPolicy(Qt.NoFocus)
+        self._completion_popup.setMouseTracking(True)
+        self._completion_popup.viewport().setMouseTracking(True)
+        self._completion_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._completion_popup.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self._completion_popup.setUniformItemSizes(True)
+        self._completion_popup.setSelectionMode(QListWidget.SingleSelection)
+        self._completion_popup.setItemDelegate(_TDocCompletionItemDelegate(self))
+        self._completion_popup.setStyleSheet(
+            """
+            QListWidget {
+                background: #1f1f1f;
+                border: 1px solid #3a3a3a;
+                padding: 2px;
+            }
+            QListWidget::item {
+                padding: 3px 4px;
+            }
+            QListWidget::item:selected {
+                background: #264f78;
+            }
+            """
+        )
+        self._completion_popup.hide()
+        self._completion_candidates: list[dict] = []
+        self._completion_refresh_timer = QTimer(self)
+        self._completion_refresh_timer.setSingleShot(True)
+        self._completion_refresh_timer.setInterval(60)
+        self._completion_refresh_timer.timeout.connect(self._refresh_tdoc_completion_popup)
+        self._completion_manual_request = False
+        self._completion_refresh_from_text_change = False
+        self._completion_auto_trigger = True
+        self._completion_auto_min_chars = 2
+
         self.textChanged.connect(self._on_text_changed_search_refresh)
         self.textChanged.connect(self._schedule_occurrence_marker_refresh)
+        self.textChanged.connect(self._on_text_changed_tdoc_completion_refresh)
+        self._completion_popup.itemClicked.connect(lambda _item: self._accept_tdoc_completion())
 
         self.overviewMarkerArea = _TDocOverviewMarkerArea(self)
         self.verticalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
@@ -1315,20 +1491,38 @@ class TDocEditorWidget(QTextEdit):
         self.cursorPositionChanged.connect(self.highlightCurrentLine)
         self.cursorPositionChanged.connect(self._on_cursor_position_changed_for_link_editing)
         self.cursorPositionChanged.connect(self._schedule_occurrence_marker_refresh)
+        self.cursorPositionChanged.connect(self._on_cursor_position_changed_tdoc_completion_refresh)
         self.selectionChanged.connect(self._schedule_occurrence_marker_refresh)
 
         self._is_internal_change = False
         self._last_cursor_pos = int(self.textCursor().position())
+        self._inline_suggestion_text = ""
+        self._inline_suggestion_anchor_pos = -1
+        self._inline_suggestion_anchor_revision = -1
         self.open_file_by_name = None
         self.open_symbol = None
+        self.list_symbol_completion_candidates = None
+        self.list_path_completion_candidates = None
         self.resolve_image_path = None
         self.resolve_symbol = None
+        self.resolve_link_tooltip = None
         self.rename_alias = None
         self.normalize_symbol = None
+        self.go_to_symbol_definition = None
+        self._hover_tooltip_target = ""
+        self._hover_tooltip_text = ""
         self._apply_viewport_margins()
         self._position_search_bar()
         self.highlightCurrentLine()
         self._schedule_occurrence_marker_refresh()
+
+    def update_completion_ui_settings(self, cfg: dict | None) -> None:
+        payload = cfg if isinstance(cfg, dict) else {}
+        self._completion_auto_trigger = bool(payload.get("auto_trigger", True))
+        try:
+            self._completion_auto_min_chars = max(1, int(payload.get("auto_trigger_min_chars", 2)))
+        except Exception:
+            self._completion_auto_min_chars = 2
 
     def set_editor_font_preferences(self, *, family: str | None = None, point_size: int | None = None) -> None:
         font = self.font()
@@ -1350,6 +1544,9 @@ class TDocEditorWidget(QTextEdit):
         if event.matches(QKeySequence.Replace):
             self.show_replace_bar()
             return True
+        if event.key() == Qt.Key_Space and bool(event.modifiers() & Qt.ControlModifier):
+            self.request_manual_completion()
+            return True
         if event.key() == Qt.Key_F3:
             if event.modifiers() & Qt.ShiftModifier:
                 self.search_previous()
@@ -1367,6 +1564,327 @@ class TDocEditorWidget(QTextEdit):
                 event.accept()
                 return True
         return super().event(event)
+
+    def request_manual_completion(self) -> None:
+        self._completion_manual_request = True
+        if not self.hasFocus():
+            self.setFocus(Qt.ShortcutFocusReason)
+        QTimer.singleShot(0, self._refresh_tdoc_completion_popup)
+
+    def _is_tdoc_completion_popup_visible(self) -> bool:
+        return bool(self._completion_popup.isVisible())
+
+    def _hide_tdoc_completion_popup(self) -> None:
+        self._completion_popup.hide()
+        self._completion_popup.clear()
+        self._completion_candidates = []
+
+    def _schedule_tdoc_completion_refresh(self, immediate: bool = False) -> None:
+        if immediate:
+            self._completion_refresh_timer.stop()
+            self._refresh_tdoc_completion_popup()
+            return
+        self._completion_refresh_timer.start()
+
+    def _on_text_changed_tdoc_completion_refresh(self) -> None:
+        self._completion_refresh_from_text_change = True
+        self._schedule_tdoc_completion_refresh()
+
+    def _on_cursor_position_changed_tdoc_completion_refresh(self) -> None:
+        if self._is_tdoc_completion_popup_visible():
+            self._schedule_tdoc_completion_refresh(immediate=True)
+
+    def _position_tdoc_completion_popup(self) -> None:
+        if not self._is_tdoc_completion_popup_visible():
+            return
+        row_h = max(20, self._completion_popup.sizeHintForRow(0), self.fontMetrics().height() + 6)
+        max_rows = min(self._completion_popup.count(), 10)
+        w = max(320, min(760, int(self.width() * 0.78)))
+
+        cursor_rect = self.cursorRect()
+        anchor_bottom = self.viewport().mapTo(self, cursor_rect.bottomLeft())
+        anchor_top = self.viewport().mapTo(self, cursor_rect.topLeft())
+        below_top = int(anchor_bottom.y() + 2)
+        available_below = max(0, self.height() - below_top)
+        available_above = max(0, int(anchor_top.y()) - 2)
+
+        desired_h = max_rows * row_h + 6
+        min_h = row_h * min(3, max_rows) + 6
+        place_above = available_above > available_below
+        available_primary = available_above if place_above else available_below
+        h = min(desired_h, max(min_h, available_primary))
+
+        if place_above:
+            y = max(0, int(anchor_top.y()) - h - 2)
+        else:
+            y = below_top
+        x = int(anchor_bottom.x())
+        if x + w > self.width():
+            x = max(0, self.width() - w - 2)
+
+        self._completion_popup.setGeometry(x, y, w, h)
+
+    def _move_tdoc_completion_selection(self, delta: int) -> None:
+        if not self._is_tdoc_completion_popup_visible():
+            return
+        count = self._completion_popup.count()
+        if count <= 0:
+            return
+        row = self._completion_popup.currentRow()
+        if row < 0:
+            row = 0
+        row = (row + int(delta)) % count
+        self._completion_popup.setCurrentRow(row)
+
+    def _tdoc_completion_context(self) -> dict | None:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return None
+
+        block = cursor.block()
+        if not block.isValid():
+            return None
+        block_text = str(block.text() or "")
+        col = int(cursor.positionInBlock())
+        if col < 0 or col > len(block_text):
+            return None
+
+        open_idx = block_text.rfind("[", 0, col)
+        if open_idx < 0:
+            return None
+        if "]" in block_text[open_idx:col]:
+            return None
+
+        is_image = bool(open_idx > 0 and block_text[open_idx - 1] == "!")
+        raw_body = block_text[open_idx + 1:col]
+        if not raw_body:
+            target = ""
+            target_start_local = open_idx + 1
+        else:
+            if "\n" in raw_body or "\r" in raw_body or "[" in raw_body:
+                return None
+            pipe_idx = raw_body.find("|")
+            if pipe_idx >= 0:
+                target = raw_body[pipe_idx + 1:]
+                target_start_local = open_idx + 1 + pipe_idx + 1
+            else:
+                target = raw_body
+                target_start_local = open_idx + 1
+        target = str(target or "").replace("\\", "/")
+        target = target.replace('"', "").replace("'", "")
+        if "#" in target:
+            return None
+
+        return {
+            "is_image": is_image,
+            "path_only": bool(is_image or "/" in target),
+            "query": target,
+            "target_start_abs": int(block.position()) + int(target_start_local),
+        }
+
+    def _symbol_completion_candidates(self, prefix: str) -> list[str]:
+        provider = self.list_symbol_completion_candidates
+        if not callable(provider):
+            return []
+        try:
+            rows = provider()
+        except Exception:
+            rows = []
+        out = []
+        seen = set()
+        needle = str(prefix or "").casefold()
+        for raw in rows if isinstance(rows, list) else []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if needle and not text.casefold().startswith(needle):
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    def _path_completion_candidates(self, prefix: str, *, image_only: bool) -> list[str]:
+        provider = self.list_path_completion_candidates
+        if not callable(provider):
+            return []
+        rows = []
+        try:
+            rows = provider(prefix=prefix, image_only=bool(image_only))
+        except TypeError:
+            try:
+                rows = provider(prefix, bool(image_only))
+            except Exception:
+                rows = []
+        except Exception:
+            rows = []
+        out = []
+        seen = set()
+        for raw in rows if isinstance(rows, list) else []:
+            text = str(raw or "").strip().replace("\\", "/")
+            if not text:
+                continue
+            if image_only and not text.endswith("/") and Path(text).suffix.lower() not in _TDOC_IMAGE_SUFFIXES:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
+
+    def _collect_tdoc_completion_candidates(self, ctx: dict) -> list[dict]:
+        query = str(ctx.get("query") or "")
+        is_image = bool(ctx.get("is_image", False))
+        path_only = bool(ctx.get("path_only", False))
+
+        rows: list[dict] = []
+        if not is_image and not path_only:
+            for text in self._symbol_completion_candidates(query):
+                rows.append({"insert": text, "kind": "symbol"})
+
+        for text in self._path_completion_candidates(query, image_only=is_image):
+            rows.append({"insert": text, "kind": "path"})
+
+        deduped: list[dict] = []
+        seen = set()
+        for row in rows:
+            insert = str(row.get("insert") or "").strip()
+            if not insert:
+                continue
+            key = insert.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"insert": insert, "kind": str(row.get("kind") or "item")})
+        return deduped[:240]
+
+    def _refresh_tdoc_completion_popup(self) -> None:
+        ctx = self._tdoc_completion_context()
+        manual = bool(self._completion_manual_request)
+        from_text_change = bool(self._completion_refresh_from_text_change)
+        self._completion_manual_request = False
+        self._completion_refresh_from_text_change = False
+        if not isinstance(ctx, dict):
+            self._hide_tdoc_completion_popup()
+            return
+
+        if not manual:
+            if not bool(self._completion_auto_trigger):
+                self._hide_tdoc_completion_popup()
+                return
+            query = str(ctx.get("query") or "")
+            path_only = bool(ctx.get("path_only", False))
+            min_chars = max(1, int(self._completion_auto_min_chars))
+            auto_len = len(query)
+            if path_only and "/" in query:
+                auto_len = len(query.rsplit("/", 1)[-1])
+            should_auto_show = auto_len >= min_chars
+            if path_only and query.endswith("/") and from_text_change:
+                should_auto_show = True
+            if not should_auto_show:
+                self._hide_tdoc_completion_popup()
+                return
+
+        candidates = self._collect_tdoc_completion_candidates(ctx)
+        if not candidates:
+            self._hide_tdoc_completion_popup()
+            return
+
+        query = str(ctx.get("query") or "").strip().casefold()
+        if not manual and len(candidates) == 1:
+            only = str(candidates[0].get("insert") or "").strip().casefold()
+            if only == query:
+                self._hide_tdoc_completion_popup()
+                return
+
+        self._completion_popup.clear()
+        self._completion_candidates = candidates
+        for idx, candidate in enumerate(candidates):
+            insert = str(candidate.get("insert") or "").strip()
+            kind = str(candidate.get("kind") or "item")
+            if kind == "symbol":
+                kind_label = "symbol"
+            elif kind == "path" and insert.endswith("/"):
+                kind_label = "folder"
+            elif kind == "path":
+                kind_label = "file"
+            else:
+                kind_label = kind
+            row = QListWidgetItem(insert)
+            row.setData(
+                _TDOC_COMPLETION_META_ROLE,
+                {
+                    "primary": insert,
+                    "right": kind_label,
+                    "kind": kind_label,
+                },
+            )
+            row.setData(_TDOC_COMPLETION_INDEX_ROLE, idx)
+            self._completion_popup.addItem(row)
+
+        if self._completion_popup.count() <= 0:
+            self._hide_tdoc_completion_popup()
+            return
+        self._completion_popup.setCurrentRow(0)
+        self._position_tdoc_completion_popup()
+        self._completion_popup.show()
+        self._completion_popup.raise_()
+        QTimer.singleShot(0, self._position_tdoc_completion_popup)
+        QTimer.singleShot(16, self._position_tdoc_completion_popup)
+
+    def _accept_tdoc_completion(self) -> bool:
+        if not self._is_tdoc_completion_popup_visible():
+            return False
+        item = self._completion_popup.currentItem()
+        if item is None:
+            return False
+        raw_idx = item.data(_TDOC_COMPLETION_INDEX_ROLE)
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(self._completion_candidates):
+            return False
+        candidate = self._completion_candidates[idx]
+        insert_text = str(candidate.get("insert") or "")
+        if not insert_text:
+            return False
+
+        ctx = self._tdoc_completion_context()
+        if not isinstance(ctx, dict):
+            self._hide_tdoc_completion_popup()
+            return False
+        start = int(ctx.get("target_start_abs") or 0)
+        end = int(self.textCursor().position())
+        if end < start:
+            self._hide_tdoc_completion_popup()
+            return False
+
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            edit.insertText(insert_text, QTextCharFormat())
+            edit.endEditBlock()
+
+            cur = self.textCursor()
+            cur.setPosition(start + len(insert_text))
+            self.setTextCursor(cur)
+        finally:
+            self._is_internal_change = was_internal
+
+        reopen_for_path = insert_text.endswith("/")
+        self._hide_tdoc_completion_popup()
+        if reopen_for_path:
+            self._schedule_tdoc_completion_refresh(immediate=True)
+        return True
 
     def _search_query(self) -> str:
         return str(self._search_bar.find_edit.text() or "")
@@ -2258,17 +2776,202 @@ class TDocEditorWidget(QTextEdit):
         self._position_search_bar()
         self._position_overview_marker_area()
         self._refresh_overview_marker_area()
+        self._position_tdoc_completion_popup()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
         if dx != 0 or dy != 0:
             self._refresh_overview_marker_area()
+            self._position_tdoc_completion_popup()
 
     def paintEvent(self, event):
         background_painter = QPainter(self.viewport())
         self._paint_editor_background_layer(background_painter, event.rect())
         background_painter.end()
         super().paintEvent(event)
+        self._paint_inline_suggestion()
+
+    def focusOutEvent(self, event):
+        self._hide_tdoc_completion_popup()
+        if self._hover_tooltip_target:
+            QToolTip.hideText()
+            self._hover_tooltip_target = ""
+            self._hover_tooltip_text = ""
+        self.clear_inline_suggestion()
+        super().focusOutEvent(event)
+
+    @staticmethod
+    def _is_identifier_char(ch: str) -> bool:
+        return bool(ch) and (ch.isalnum() or ch == "_")
+
+    def completion_context(self) -> dict:
+        cursor = self.textCursor()
+        abs_pos = int(cursor.position())
+        col = int(cursor.positionInBlock())
+        line = int(cursor.blockNumber() + 1)
+        text = self.toPlainText()
+
+        start = abs_pos
+        while start > 0 and self._is_identifier_char(text[start - 1]):
+            start -= 1
+        prefix = text[start:abs_pos]
+        prev_char = text[abs_pos - 1] if abs_pos > 0 else ""
+        return {
+            "line": line,
+            "column": col,
+            "prefix": prefix,
+            "prefix_start": int(start),
+            "cursor_pos": abs_pos,
+            "previous_char": prev_char,
+        }
+
+    def is_completion_popup_visible(self) -> bool:
+        return False
+
+    def clear_completion_ai_suggestion(self) -> None:
+        self.clear_inline_suggestion()
+
+    def set_completion_ai_suggestion(self, text: str) -> None:
+        self.set_inline_suggestion(text)
+
+    def has_inline_suggestion(self) -> bool:
+        return bool(self._inline_suggestion_text)
+
+    def clear_inline_suggestion(self) -> None:
+        if not self._inline_suggestion_text:
+            return
+        self._inline_suggestion_text = ""
+        self._inline_suggestion_anchor_pos = -1
+        self._inline_suggestion_anchor_revision = -1
+        self.viewport().update()
+
+    def set_inline_suggestion(self, text: str) -> None:
+        value = str(text or "").replace("\r", "")
+        if "\n" not in value and "\\n" in value:
+            value = value.replace("\\n", "\n")
+        if not value.strip():
+            self.clear_inline_suggestion()
+            return
+        self._inline_suggestion_text = value
+        self._inline_suggestion_anchor_pos = int(self.textCursor().position())
+        self._inline_suggestion_anchor_revision = int(self.document().revision())
+        self.viewport().update()
+
+    def accept_inline_suggestion(self) -> bool:
+        if not self._inline_suggestion_text:
+            return False
+        text = self._dedupe_ai_suggestion_for_cursor(self._inline_suggestion_text)
+        self.clear_inline_suggestion()
+        if not text:
+            return True
+        cursor = self.textCursor()
+        cursor.insertText(text)
+        self.setTextCursor(cursor)
+        return True
+
+    def _dedupe_ai_suggestion_for_cursor(self, suggestion: str) -> str:
+        text = str(suggestion or "").replace("\r", "")
+        if not text:
+            return ""
+        cursor = self.textCursor()
+        source = self.toPlainText()
+        pos = int(cursor.position())
+        if pos <= 0:
+            return text
+
+        left = source[max(0, pos - 400):pos]
+        if not left:
+            return text
+
+        overlap = 0
+        max_overlap = min(len(text), len(left), 160)
+        for k in range(max_overlap, 0, -1):
+            if left.endswith(text[:k]):
+                overlap = k
+                break
+        if overlap > 0:
+            text = text[overlap:]
+        return text
+
+    def _on_cursor_moved_inline_suggestion(self) -> None:
+        if not self._inline_suggestion_text:
+            return
+        if int(self.textCursor().position()) != int(self._inline_suggestion_anchor_pos):
+            self.clear_inline_suggestion()
+
+    def _paint_inline_suggestion(self) -> None:
+        if not self._inline_suggestion_text:
+            return
+        if self.is_completion_popup_visible():
+            return
+        if int(self.document().revision()) != int(self._inline_suggestion_anchor_revision):
+            self.clear_inline_suggestion()
+            return
+        if int(self.textCursor().position()) != int(self._inline_suggestion_anchor_pos):
+            return
+
+        rect = self.cursorRect()
+        fm = self.fontMetrics()
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        color = QColor(self.palette().color(QPalette.PlaceholderText))
+        color.setAlpha(180)
+        lines = self._inline_suggestion_text.split("\n")
+        if not lines:
+            return
+
+        if len(lines) == 1:
+            preview = lines[0]
+            if not preview.strip():
+                return
+            y = int(rect.top() + max(0, (rect.height() - fm.height()) // 2) + fm.ascent())
+            x = int(rect.left())
+            max_w = max(8, self.viewport().width() - x - 8)
+            text = fm.elidedText(preview, Qt.TextElideMode.ElideRight, max_w)
+            painter.setPen(color)
+            painter.drawText(x, y, text)
+            return
+
+        preview_lines = list(lines[:10])
+        if len(lines) > 10:
+            preview_lines[-1] = f"{preview_lines[-1]} ..."
+
+        line_h = max(int(fm.lineSpacing()), int(rect.height()))
+        pad_x = 6
+        pad_y = 4
+        x = max(0, int(rect.left()))
+        max_panel_w = max(100, self.viewport().width() - x - 8)
+
+        widest = 0
+        for line in preview_lines:
+            widest = max(widest, int(fm.horizontalAdvance(line)))
+        panel_w = min(max_panel_w, widest + (pad_x * 2))
+        text_w = max(20, panel_w - (pad_x * 2))
+        draw_lines = [
+            fm.elidedText(str(line or ""), Qt.TextElideMode.ElideRight, text_w)
+            for line in preview_lines
+        ]
+
+        panel_h = (line_h * len(draw_lines)) + (pad_y * 2)
+        y = int(rect.bottom() + 2)
+        if y + panel_h > self.viewport().height():
+            y = max(0, int(rect.top() - panel_h - 2))
+
+        panel_rect = QRect(x, y, panel_w, panel_h)
+        bg = QColor(self.palette().color(QPalette.Base))
+        bg.setAlpha(224)
+        border = QColor(self.palette().color(QPalette.Mid))
+        border.setAlpha(200)
+
+        painter.setPen(border)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(panel_rect, 4, 4)
+
+        painter.setPen(color)
+        base_x = panel_rect.left() + pad_x
+        base_y = panel_rect.top() + pad_y + fm.ascent()
+        for idx, line in enumerate(draw_lines):
+            painter.drawText(base_x, base_y + (idx * line_h), line)
 
     def _make_link_target(self, label):
         cleaned = link_effective_target(label)
@@ -2341,6 +3044,9 @@ class TDocEditorWidget(QTextEdit):
 
     def load_tdoc(self, text):
         """Parses [Label] links and renders only label text as clickable."""
+        was_undo_enabled = bool(self.isUndoRedoEnabled())
+        if was_undo_enabled:
+            self.setUndoRedoEnabled(False)
         self._is_internal_change = True
         self.blockSignals(True)
         self.clear()
@@ -2384,6 +3090,8 @@ class TDocEditorWidget(QTextEdit):
         self.document().setModified(False)
         self.blockSignals(False)
         self._is_internal_change = False
+        if was_undo_enabled:
+            self.setUndoRedoEnabled(True)
         self._last_cursor_pos = int(self.textCursor().position())
         self._rebuild_extra_selections()
         if self._search_bar.isVisible():
@@ -2784,6 +3492,7 @@ class TDocEditorWidget(QTextEdit):
         if old_pos != new_pos:
             self._collapse_bracket_link_on_cursor_move(old_pos, new_pos)
         self._expand_link_for_editing(self.textCursor())
+        self._on_cursor_moved_inline_suggestion()
         self._last_cursor_pos = int(self.textCursor().position())
 
     def _cursor_is_appending_to_link(self, cursor: QTextCursor | None = None) -> bool:
@@ -2908,11 +3617,18 @@ class TDocEditorWidget(QTextEdit):
         menu.addSeparator()
         action_find = menu.addAction("Find")
         action_replace = menu.addAction("Replace")
+        action_ai = menu.addAction("AI Inline Assist")
 
         if isinstance(target, str) and target.startswith("symbol:"):
             label = self._get_link_label_at(cursor)
+            symbol = target[len("symbol:"):].strip()
+            menu.addSeparator()
+            if callable(self.go_to_symbol_definition):
+                go_to_definition_action = menu.addAction("Go to Definition")
+                go_to_definition_action.triggered.connect(
+                    lambda s=symbol, l=label: self.go_to_symbol_definition(s or l)
+                )
             if label:
-                menu.addSeparator()
                 if callable(self.rename_alias):
                     rename_action = menu.addAction("Rename Alias...")
                     rename_action.triggered.connect(lambda: self.rename_alias(label))
@@ -2927,12 +3643,45 @@ class TDocEditorWidget(QTextEdit):
         if chosen is action_replace:
             self.show_replace_bar()
             return
+        if chosen is action_ai:
+            self.aiAssistRequested.emit("manual")
+            return
 
     def mouseMoveEvent(self, e):
         cursor = self.cursorForPosition(e.position().toPoint())
         target = self._get_link_target_at(cursor)
-        self.viewport().setCursor(Qt.PointingHandCursor if target else Qt.IBeamCursor)
+        has_target = bool(target)
+        self.viewport().setCursor(Qt.PointingHandCursor if has_target else Qt.IBeamCursor)
+        if has_target and callable(self.resolve_link_tooltip):
+            target_text = str(target)
+            tip_text = ""
+            try:
+                tip_text = str(self.resolve_link_tooltip(target_text) or "").strip()
+            except Exception:
+                tip_text = ""
+            if tip_text:
+                if tip_text != self._hover_tooltip_text or target_text != self._hover_tooltip_target:
+                    offset = QPoint(16, 18)
+                    global_pos = self.viewport().mapToGlobal(e.position().toPoint() + offset)
+                    QToolTip.showText(global_pos, tip_text, self.viewport())
+                    self._hover_tooltip_target = target_text
+                    self._hover_tooltip_text = tip_text
+            elif self._hover_tooltip_target:
+                QToolTip.hideText()
+                self._hover_tooltip_target = ""
+                self._hover_tooltip_text = ""
+        elif self._hover_tooltip_target:
+            QToolTip.hideText()
+            self._hover_tooltip_target = ""
+            self._hover_tooltip_text = ""
         super().mouseMoveEvent(e)
+
+    def leaveEvent(self, event):
+        if self._hover_tooltip_target:
+            QToolTip.hideText()
+            self._hover_tooltip_target = ""
+            self._hover_tooltip_text = ""
+        super().leaveEvent(event)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and (e.modifiers() & Qt.ControlModifier):
@@ -2962,6 +3711,51 @@ class TDocEditorWidget(QTextEdit):
     def keyPressEvent(self, event):
         text = str(event.text() or "")
         mods = event.modifiers()
+        key = int(event.key())
+
+        if self._is_tdoc_completion_popup_visible():
+            if key == Qt.Key_Escape:
+                self._hide_tdoc_completion_popup()
+                return
+            if key == Qt.Key_Up:
+                self._move_tdoc_completion_selection(-1)
+                return
+            if key == Qt.Key_Down:
+                self._move_tdoc_completion_selection(1)
+                return
+            if key == Qt.Key_Tab:
+                if self._accept_tdoc_completion():
+                    return
+                # Never insert a literal tab while completion UI is active.
+                self._hide_tdoc_completion_popup()
+                return
+            if key in {Qt.Key_Return, Qt.Key_Enter}:
+                if self._accept_tdoc_completion():
+                    return
+
+        if self.has_inline_suggestion():
+            if key == Qt.Key_Escape:
+                self.clear_inline_suggestion()
+                return
+            if key == Qt.Key_Tab:
+                if self.accept_inline_suggestion():
+                    return
+            if key in {
+                Qt.Key_Left,
+                Qt.Key_Right,
+                Qt.Key_Up,
+                Qt.Key_Down,
+                Qt.Key_Home,
+                Qt.Key_End,
+                Qt.Key_PageUp,
+                Qt.Key_PageDown,
+                Qt.Key_Backspace,
+                Qt.Key_Delete,
+                Qt.Key_Return,
+                Qt.Key_Enter,
+            } or (text and not (mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))):
+                self.clear_inline_suggestion()
+
         should_break_link_boundary = bool(
             text
             and not bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
@@ -2992,6 +3786,20 @@ class TDocEditorWidget(QTextEdit):
                 if self._search_bar.isVisible():
                     self._schedule_search_refresh(immediate=True)
                 self._refresh_overview_marker_area()
+
+        if key in {
+            Qt.Key_Backspace,
+            Qt.Key_Delete,
+            Qt.Key_Left,
+            Qt.Key_Right,
+            Qt.Key_Up,
+            Qt.Key_Down,
+            Qt.Key_Home,
+            Qt.Key_End,
+            Qt.Key_PageUp,
+            Qt.Key_PageDown,
+        } or (text and not bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))):
+            self._schedule_tdoc_completion_refresh(immediate=True)
 
     def wheelEvent(self, event):
         mods = event.modifiers()
