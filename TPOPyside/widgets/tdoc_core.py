@@ -66,14 +66,54 @@ _TDOC_OVERVIEW_MARKER_DEFAULTS = {
 
 
 def parse_file_link(label):
-    """Parses 'path.tdoc' or 'path.tdoc#L42'."""
-    cleaned = label.strip()
+    """Parses 'path.tdoc' or 'path.tdoc#L42' from plain or titled link text."""
+    cleaned = link_effective_target(label)
     m = FILE_LINK_PATTERN.match(cleaned)
     if not m:
         return None, None
     path = m.group("path").strip()
     line = int(m.group("line")) if m.group("line") else None
     return path, line
+
+
+def parse_link_components(label):
+    """Parses TDOC link body to (display_text, target_text|None)."""
+    cleaned = str(label or "").strip()
+    if not cleaned:
+        return "", None
+    if "|" not in cleaned:
+        return cleaned, None
+    display, target = cleaned.split("|", 1)
+    display = display.strip()
+    target = target.strip()
+    if not target:
+        return cleaned, None
+    if not display:
+        display = target
+    return display, target
+
+
+def compose_link_components(display, target):
+    display_text = str(display or "").strip()
+    target_text = str(target or "").strip()
+    if target_text:
+        if not display_text:
+            display_text = target_text
+        return f"{display_text}|{target_text}"
+    return display_text
+
+
+def link_effective_target(label):
+    display, target = parse_link_components(label)
+    return str(target or display or "").strip()
+
+
+def link_display_text(label):
+    display, target = parse_link_components(label)
+    shown = str(display or target or "").strip()
+    if shown:
+        return shown
+    return str(label or "").strip()
 
 
 def parse_doc_frontmatter(content):
@@ -430,13 +470,19 @@ class TDocProjectIndex:
         touched = 0
 
         def replace_link(match):
-            label = match.group("label")
-            cleaned = label.strip()
-            if cleaned.casefold() != old_cf:
+            raw = match.group("label")
+            display, target = parse_link_components(raw)
+            resolved = link_effective_target(raw)
+            if resolved.casefold() != old_cf:
                 return match.group(0)
-            file_path, _ = parse_file_link(cleaned)
+            file_path, _ = parse_file_link(resolved)
             if file_path:
                 return match.group(0)
+            if target is not None:
+                new_display = display
+                if display.casefold() == old_cf:
+                    new_display = new_alias
+                return f"[{compose_link_components(new_display, new_alias)}]"
             return f"[{new_alias}]"
 
         for path, _ in TDocProjectIndex.iter_doc_paths(root_path):
@@ -485,7 +531,8 @@ class TDocProjectIndex:
             for offset, line in enumerate(body_lines):
                 line_no = body_start_line + offset
                 for match in LINK_PATTERN.finditer(line):
-                    label = match.group("label").strip()
+                    raw = match.group("label")
+                    label = link_effective_target(raw)
                     if not label:
                         continue
 
@@ -521,7 +568,9 @@ class TDocProjectIndex:
 
             def replace_link(match):
                 nonlocal changed, replacements
-                label = match.group("label").strip()
+                raw = match.group("label")
+                display, target = parse_link_components(raw)
+                label = link_effective_target(raw)
                 if not label:
                     return match.group(0)
 
@@ -539,6 +588,11 @@ class TDocProjectIndex:
 
                 changed = True
                 replacements += 1
+                if target is not None:
+                    new_display = display
+                    if display.casefold() == label.casefold():
+                        new_display = canonical_symbol
+                    return f"[{compose_link_components(new_display, canonical_symbol)}]"
                 return f"[{canonical_symbol}]"
 
             updated = LINK_PATTERN.sub(replace_link, content)
@@ -753,6 +807,20 @@ class TDocProjectIndex:
         return findings
 
     @staticmethod
+    def _group_refs_by_file(refs):
+        grouped = defaultdict(set)
+        for rel_path, line_no in refs:
+            try:
+                ln = max(1, int(line_no))
+            except Exception:
+                continue
+            grouped[str(rel_path)].add(ln)
+        rows = []
+        for rel_path in sorted(grouped.keys(), key=str.casefold):
+            rows.append((rel_path, sorted(grouped[rel_path])))
+        return rows
+
+    @staticmethod
     def build_index(root_path):
         """Generates index.tdoc at project root if .tdocproject marker exists.
 
@@ -806,8 +874,9 @@ class TDocProjectIndex:
                             f"{indent * 3}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items())
                         )
                     lines.append(f"{indent * 3}References:")
-                    for p, ln in refs:
-                        lines.append(f"{indent * 4}[{p}#L{ln}]")
+                    for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
+                        line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                        lines.append(f"{indent * 4}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
@@ -818,8 +887,9 @@ class TDocProjectIndex:
                     refs = sorted(unresolved_refs[unresolved], key=lambda x: (x[0].casefold(), x[1]))
                     lines.append(f"{indent * 2}[{unresolved}]")
                     lines.append(f"{indent * 3}References:")
-                    for p, ln in refs:
-                        lines.append(f"{indent * 4}[{p}#L{ln}]")
+                    for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
+                        line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                        lines.append(f"{indent * 4}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
@@ -1039,6 +1109,7 @@ class TDocEditorWidget(QTextEdit):
     editorFontSizeStepRequested = Signal(int)  # +1 / -1
     LINK_PROPERTY = QTextCharFormat.UserProperty + 1
     LINK_LABEL_PROPERTY = QTextCharFormat.UserProperty + 2
+    LINK_RAW_PROPERTY = QTextCharFormat.UserProperty + 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2051,7 +2122,7 @@ class TDocEditorWidget(QTextEdit):
         super().paintEvent(event)
 
     def _make_link_target(self, label):
-        cleaned = label.strip()
+        cleaned = link_effective_target(label)
         file_path, line_no = parse_file_link(cleaned)
         if file_path:
             if line_no:
@@ -2081,13 +2152,18 @@ class TDocEditorWidget(QTextEdit):
             if pre_text:
                 cursor.insertText(pre_text, QTextCharFormat())
 
-            label = match.group("label")
-            if "\n" in label:
+            raw_label = match.group("label")
+            if "\n" in raw_label:
+                cursor.insertText(match.group(0), QTextCharFormat())
+                last_pos = match.end()
+                continue
+            shown = link_display_text(raw_label)
+            if not shown:
                 cursor.insertText(match.group(0), QTextCharFormat())
                 last_pos = match.end()
                 continue
 
-            cursor.insertText(label, self._make_link_char_format(label))
+            cursor.insertText(shown, self._make_link_char_format(raw_label))
             last_pos = match.end()
 
         if last_pos < len(text):
@@ -2117,7 +2193,9 @@ class TDocEditorWidget(QTextEdit):
                 fmt = fragment.charFormat()
 
                 if fmt.hasProperty(self.LINK_PROPERTY):
-                    output.append(f"[{text}]")
+                    raw = fmt.property(self.LINK_RAW_PROPERTY) if fmt.hasProperty(self.LINK_RAW_PROPERTY) else text
+                    raw_text = str(raw) if isinstance(raw, str) else str(text)
+                    output.append(f"[{raw_text}]")
                 else:
                     output.append(text)
                 iter_ += 1
@@ -2198,6 +2276,26 @@ class TDocEditorWidget(QTextEdit):
         value = fmt.property(self.LINK_LABEL_PROPERTY)
         return str(value) if isinstance(value, str) else None
 
+    def _link_raw_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        selected_text = str(tc.selectedText() or "")
+        if selected_text in {"\n", "\r", "\u2029"}:
+            return None
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.LINK_RAW_PROPERTY):
+            return None
+        value = fmt.property(self.LINK_RAW_PROPERTY)
+        return str(value) if isinstance(value, str) else None
+
     def _link_span_at_cursor(
         self, cursor: QTextCursor | None = None
     ) -> tuple[int, int, str] | None:
@@ -2228,8 +2326,11 @@ class TDocEditorWidget(QTextEdit):
         if probe < block_start or probe >= block_end:
             return None
 
-        label = self._link_label_at_doc_pos(probe)
-        if not label:
+        raw = self._link_raw_at_doc_pos(probe)
+        if not raw:
+            fallback = self._link_label_at_doc_pos(probe)
+            raw = str(fallback or "").strip()
+        if not raw:
             return None
 
         start = probe
@@ -2237,8 +2338,10 @@ class TDocEditorWidget(QTextEdit):
             prev_target = self._link_target_at_doc_pos(start - 1)
             if prev_target != target:
                 break
-            prev_label = self._link_label_at_doc_pos(start - 1)
-            if prev_label != label:
+            prev_raw = self._link_raw_at_doc_pos(start - 1)
+            if not prev_raw:
+                prev_raw = self._link_label_at_doc_pos(start - 1)
+            if str(prev_raw or "") != raw:
                 break
             start -= 1
 
@@ -2247,21 +2350,26 @@ class TDocEditorWidget(QTextEdit):
             next_target = self._link_target_at_doc_pos(end)
             if next_target != target:
                 break
-            next_label = self._link_label_at_doc_pos(end)
-            if next_label != label:
+            next_raw = self._link_raw_at_doc_pos(end)
+            if not next_raw:
+                next_raw = self._link_label_at_doc_pos(end)
+            if str(next_raw or "") != raw:
                 break
             end += 1
 
         if end <= start:
             return None
-        return start, end, label
+        return start, end, raw
 
-    def _make_link_char_format(self, label: str) -> QTextCharFormat:
+    def _make_link_char_format(self, raw_link_text: str) -> QTextCharFormat:
+        normalized_raw = compose_link_components(*parse_link_components(raw_link_text))
+        effective = link_effective_target(normalized_raw)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor("grey"))
         fmt.setFontUnderline(True)
-        fmt.setProperty(self.LINK_PROPERTY, self._make_link_target(label))
-        fmt.setProperty(self.LINK_LABEL_PROPERTY, label.strip())
+        fmt.setProperty(self.LINK_PROPERTY, self._make_link_target(effective))
+        fmt.setProperty(self.LINK_LABEL_PROPERTY, effective)
+        fmt.setProperty(self.LINK_RAW_PROPERTY, normalized_raw)
         return fmt
 
     def _replace_range_with_link_label(
@@ -2269,9 +2377,13 @@ class TDocEditorWidget(QTextEdit):
         *,
         start: int,
         end: int,
-        label: str,
+        raw_link: str,
         new_cursor_pos: int | None = None,
     ) -> None:
+        normalized_raw = compose_link_components(*parse_link_components(raw_link))
+        shown = link_display_text(normalized_raw)
+        if not shown:
+            shown = normalized_raw
         was_internal = bool(self._is_internal_change)
         self._is_internal_change = True
         try:
@@ -2280,7 +2392,7 @@ class TDocEditorWidget(QTextEdit):
             edit.setPosition(start)
             edit.setPosition(end, QTextCursor.KeepAnchor)
             edit.removeSelectedText()
-            edit.insertText(label, self._make_link_char_format(label))
+            edit.insertText(shown, self._make_link_char_format(normalized_raw))
             edit.endEditBlock()
 
             if new_cursor_pos is not None:
@@ -2335,14 +2447,15 @@ class TDocEditorWidget(QTextEdit):
                 break
         if not span:
             return False
-        start, end, label = span
+        start, end, raw = span
         if start < new_i < end:
             return False
 
         adjusted_pos = new_i
         if adjusted_pos >= end:
-            adjusted_pos = max(0, adjusted_pos - 2)
-        self._replace_range_with_link_label(start=start, end=end, label=label, new_cursor_pos=adjusted_pos)
+            shown = link_display_text(raw)
+            adjusted_pos = start + len(shown) + max(0, adjusted_pos - end)
+        self._replace_range_with_link_label(start=start, end=end, raw_link=raw, new_cursor_pos=adjusted_pos)
         return True
 
     def _expand_link_for_editing(
@@ -2353,7 +2466,7 @@ class TDocEditorWidget(QTextEdit):
         span = self._link_span_at_cursor(cur)
         if not span:
             return False
-        start, end, label = span
+        start, end, raw = span
         pos = int(cur.position())
 
         # Expand only when caret is strictly inside rendered link text.
@@ -2361,7 +2474,7 @@ class TDocEditorWidget(QTextEdit):
         if pos <= start or pos >= end:
             return False
 
-        replacement = f"[{label}]"
+        replacement = f"[{raw}]"
         relative = pos - start
 
         was_internal = bool(self._is_internal_change)
@@ -2436,8 +2549,8 @@ class TDocEditorWidget(QTextEdit):
         self._replace_range_with_link_label(
             start=abs_start,
             end=abs_end,
-            label=label,
-            new_cursor_pos=abs_start + len(label),
+            raw_link=label,
+            new_cursor_pos=abs_start + len(link_display_text(label)),
         )
         return True
 

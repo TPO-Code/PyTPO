@@ -44,6 +44,10 @@ Section headers should start with a capital letter (for example `Locations:`). N
 - symbol links: `[Alias Or Canonical]`
 - file links: `[path/to/file.tdoc]`
 - file+line links: `[path/to/file.tdoc#L42]`
+- titled links (custom display text): `[Shown Text|target]`
+  - example: `[2|Characters/Main/Molly.tdoc#L2]`
+  - `target` can be a symbol label/alias or a file/file+line target
+  - existing non-titled links remain supported
 
 Optional frontmatter is supported at file top:
 
@@ -92,6 +96,7 @@ Index
   - `Documents`
   - `Project Warnings` (including section-capitalization warnings)
   - `Frontmatter Warnings`
+- References are grouped by file path. Each file row links to the file, and line numbers are emitted as titled links.
 
 Example structure (with clickable link markup preserved):
 
@@ -100,7 +105,7 @@ Example structure (with clickable link markup preserved):
         [Ari Vale]
             Aliases: [Ari Vale], [Ari], [A. Vale]
             References:
-                [demo/chapter_01.tdoc#L6]
+                [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6], [9|demo/chapter_01.tdoc#L9]
 ```
 
 ## Problems panel integration and quick fixes
