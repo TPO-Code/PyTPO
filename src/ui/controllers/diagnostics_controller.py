@@ -63,6 +63,7 @@ class DiagnosticsController:
             return
 
         self._apply_editor_background_to_editor(ed)
+        self._apply_editor_indent_settings_to_editor(ed)
         self._apply_completion_ui_settings_to_editor(ed)
         self._apply_lint_visual_settings_to_editor(ed)
 
@@ -409,6 +410,8 @@ class DiagnosticsController:
         block = ed.document().findBlockByNumber(max(0, line_num - 1))
         if not block.isValid():
             return
+        if self._is_tdoc_marker_metadata_continuation_line(ed, line_num):
+            return
         token = TDocProjectIndex.symbol_or_alias_at_marker_position(block.text(), col_num)
         token = str(token or "").strip()
         if not token:
@@ -423,6 +426,48 @@ class DiagnosticsController:
         action.triggered.connect(
             lambda _checked=False, e=ed_ref, t=token: self.ide._on_tdoc_rename_alias_requested(e, t)
         )
+
+    def _is_tdoc_marker_metadata_continuation_line(self, ed: EditorWidget, line_num: int) -> bool:
+        if not isinstance(ed, EditorWidget):
+            return False
+        try:
+            line_idx = max(0, int(line_num) - 1)
+        except Exception:
+            return False
+        doc = ed.document()
+        block = doc.findBlockByNumber(line_idx)
+        if not block.isValid():
+            return False
+        raw = str(block.text() or "")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            return False
+        current_indent = TDocProjectIndex._line_indent_columns(raw)
+        if current_indent <= 0:
+            return False
+
+        probe = line_idx - 1
+        while probe >= 0:
+            prev_block = doc.findBlockByNumber(probe)
+            if not prev_block.isValid():
+                break
+            prev_raw = str(prev_block.text() or "")
+            prev_stripped = prev_raw.strip()
+            if not prev_stripped:
+                probe -= 1
+                continue
+            prev_indent = TDocProjectIndex._line_indent_columns(prev_raw)
+            if prev_indent < current_indent:
+                if prev_stripped.startswith("#"):
+                    return False
+                rule, _patterns = TDocProjectIndex._parse_rule_line(prev_stripped)
+                if rule:
+                    return False
+                if TDocProjectIndex._is_section_header(prev_stripped):
+                    return False
+                return True
+            probe -= 1
+        return False
 
     def _append_import_fix_actions_to_menu(self, parent_menu: QMenu, ed_ref, symbol: str, candidates: list[dict]) -> None:
         if not candidates:

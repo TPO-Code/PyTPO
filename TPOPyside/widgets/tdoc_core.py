@@ -88,6 +88,19 @@ _TDOC_COMPLETION_META_ROLE = int(Qt.UserRole) + 1
 _FILE_LINK_EXTENSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
+def _coerce_bool(value: object, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n", ""}:
+        return False
+    return bool(default)
+
+
 def parse_file_link(label):
     """Parses path-like links from plain or titled link text.
 
@@ -289,10 +302,76 @@ class TDocProjectIndex:
         return symbol, alias_items
 
     @staticmethod
-    def _parse_symbol_definition(line):
-        parts = [p.strip() for p in line.split(";")]
+    def _split_symbol_line_parts(line):
+        parts = [p.strip() for p in str(line or "").split(";")]
         primary = parts[0] if parts else ""
         metadata_parts = parts[1:] if len(parts) > 1 else []
+        return primary, metadata_parts
+
+    @staticmethod
+    def _line_indent_columns(raw_line):
+        text = str(raw_line or "")
+        cols = 0
+        for ch in text:
+            if ch == " ":
+                cols += 1
+            elif ch == "\t":
+                cols += 4
+            else:
+                break
+        return cols
+
+    @staticmethod
+    def _collect_symbol_continuation_lines(raw_lines, symbol_index):
+        lines = raw_lines if isinstance(raw_lines, list) else []
+        if not (0 <= int(symbol_index) < len(lines)):
+            return [], int(symbol_index) + 1
+
+        head_raw = str(lines[int(symbol_index)] or "")
+        head_indent = TDocProjectIndex._line_indent_columns(head_raw)
+        collected = []
+        idx = int(symbol_index) + 1
+        while idx < len(lines):
+            raw = str(lines[idx] or "")
+            stripped = raw.strip()
+            if not stripped:
+                break
+            if stripped.startswith("#"):
+                break
+            indent = TDocProjectIndex._line_indent_columns(raw)
+            if indent <= head_indent:
+                break
+            rule, _patterns = TDocProjectIndex._parse_rule_line(stripped)
+            if rule:
+                break
+            if TDocProjectIndex._is_section_header(stripped):
+                break
+            collected.append(raw)
+            idx += 1
+        return collected, idx
+
+    @staticmethod
+    def _parse_metadata_item(item, metadata, metadata_issues):
+        if "=" not in item:
+            metadata_issues.append(f"Malformed metadata entry '{item}'. Use 'key=value'.")
+            return
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if not key:
+            metadata_issues.append(f"Metadata key is empty in '{item}'.")
+            return
+        if not value:
+            metadata_issues.append(f"Metadata value is empty for key '{key}'.")
+            return
+        if key in metadata:
+            metadata_issues.append(f"Duplicate metadata key '{key}'.")
+            return
+        metadata[key] = value
+
+    @staticmethod
+    def _parse_symbol_definition(line, continuation_metadata_lines=None):
+        primary, metadata_parts = TDocProjectIndex._split_symbol_line_parts(line)
 
         m = ALIAS_LINE_PATTERN.match(primary)
         if m:
@@ -307,22 +386,21 @@ class TDocProjectIndex:
         for item in metadata_parts:
             if not item:
                 continue
-            if "=" not in item:
-                metadata_issues.append(f"Malformed metadata entry '{item}'. Use 'key=value'.")
+            TDocProjectIndex._parse_metadata_item(item, metadata, metadata_issues)
+
+        extra_lines = continuation_metadata_lines if isinstance(continuation_metadata_lines, list) else []
+        for raw_meta in extra_lines:
+            text = str(raw_meta or "").strip()
+            if not text:
                 continue
-            key, value = item.split("=", 1)
-            key = key.strip().lower()
-            value = value.strip()
-            if not key:
-                metadata_issues.append(f"Metadata key is empty in '{item}'.")
+            if text.startswith(";"):
+                text = text[1:].strip()
+            if text.endswith(";"):
+                text = text[:-1].strip()
+            if not text:
                 continue
-            if not value:
-                metadata_issues.append(f"Metadata value is empty for key '{key}'.")
-                continue
-            if key in metadata:
-                metadata_issues.append(f"Duplicate metadata key '{key}'.")
-                continue
-            metadata[key] = value
+            for item in [part.strip() for part in text.split(";") if part.strip()]:
+                TDocProjectIndex._parse_metadata_item(item, metadata, metadata_issues)
 
         return symbol, alias_items, metadata, metadata_issues
 
@@ -467,10 +545,12 @@ class TDocProjectIndex:
             )
 
         current_section = ""
-
-        for raw in raw_lines:
+        idx = 0
+        while idx < len(raw_lines):
+            raw = raw_lines[idx]
             line = raw.strip()
             if not line or line.startswith("#"):
+                idx += 1
                 continue
 
             rule, patterns = TDocProjectIndex._parse_rule_line(line)
@@ -479,16 +559,20 @@ class TDocProjectIndex:
                     include_patterns.extend(patterns)
                 elif rule == "ignore":
                     ignore_patterns.extend(patterns)
+                idx += 1
                 continue
 
             if TDocProjectIndex._is_section_header(line):
                 section_match = SECTION_HEADER_PATTERN.match(line)
                 current_section = section_match.group("section").strip() if section_match else ""
+                idx += 1
                 continue
 
-            symbol, alias_items, metadata, _ = TDocProjectIndex._parse_symbol_definition(line)
+            cont_lines, next_idx = TDocProjectIndex._collect_symbol_continuation_lines(raw_lines, idx)
+            symbol, alias_items, metadata, _ = TDocProjectIndex._parse_symbol_definition(line, cont_lines)
 
             if not symbol:
+                idx = next_idx
                 continue
 
             aliases = []
@@ -505,6 +589,7 @@ class TDocProjectIndex:
             symbol_to_metadata[symbol] = metadata
             for alias in aliases:
                 alias_to_symbol[alias.casefold()] = symbol
+            idx = next_idx
 
         return (
             alias_to_symbol,
@@ -536,28 +621,36 @@ class TDocProjectIndex:
             return str(marker), None, ""
 
         query_cf = query.casefold()
-        for idx, raw in enumerate(lines, start=1):
+        idx = 0
+        while idx < len(lines):
+            raw = lines[idx]
             stripped = raw.strip()
             if not stripped or stripped.startswith("#"):
+                idx += 1
                 continue
 
             rule, _ = TDocProjectIndex._parse_rule_line(stripped)
             if rule:
+                idx += 1
                 continue
 
             if TDocProjectIndex._is_section_header(stripped):
+                idx += 1
                 continue
 
-            symbol, alias_items, _metadata, _issues = TDocProjectIndex._parse_symbol_definition(stripped)
+            cont_lines, next_idx = TDocProjectIndex._collect_symbol_continuation_lines(lines, idx)
+            symbol, alias_items, _metadata, _issues = TDocProjectIndex._parse_symbol_definition(stripped, cont_lines)
             if not symbol:
+                idx = next_idx
                 continue
 
             if symbol.casefold() == query_cf:
-                return str(marker), idx, symbol
+                return str(marker), idx + 1, symbol
 
             for alias in alias_items:
                 if str(alias or "").casefold() == query_cf:
-                    return str(marker), idx, symbol
+                    return str(marker), idx + 1, symbol
+            idx = next_idx
 
         return str(marker), None, ""
 
@@ -647,22 +740,30 @@ class TDocProjectIndex:
             print(f"Error reading {marker}: {e}")
             return False
 
-        for raw in lines:
+        idx = 0
+        while idx < len(lines):
+            raw = lines[idx]
             stripped = raw.strip()
             if not stripped or stripped.startswith("#"):
                 new_lines.append(raw)
+                idx += 1
                 continue
 
             rule, _ = TDocProjectIndex._parse_rule_line(stripped)
             if rule:
                 new_lines.append(raw)
+                idx += 1
                 continue
 
             if TDocProjectIndex._is_section_header(stripped):
                 new_lines.append(raw)
+                idx += 1
                 continue
 
+            cont_lines, next_idx = TDocProjectIndex._collect_symbol_continuation_lines(lines, idx)
             symbol, alias_items, metadata, _ = TDocProjectIndex._parse_symbol_definition(stripped)
+            original_symbol = symbol
+            original_alias_items = list(alias_items)
 
             if symbol.casefold() == old_cf:
                 symbol = new_alias
@@ -683,7 +784,16 @@ class TDocProjectIndex:
                 seen.add(candidate.casefold())
                 rewritten_aliases.append(candidate)
 
-            new_lines.append(TDocProjectIndex._format_symbol_definition(symbol, rewritten_aliases, metadata))
+            if symbol != original_symbol or rewritten_aliases != original_alias_items:
+                leading = raw[: len(raw) - len(raw.lstrip(" \t"))]
+                new_lines.append(
+                    leading + TDocProjectIndex._format_symbol_definition(symbol, rewritten_aliases, metadata)
+                )
+            else:
+                new_lines.append(raw)
+            if cont_lines:
+                new_lines.extend(lines[idx + 1:next_idx])
+            idx = next_idx
 
         if not changed:
             return False
@@ -883,9 +993,12 @@ class TDocProjectIndex:
         include_patterns = []
         ignore_patterns = []
 
-        for idx, raw in enumerate(lines, start=1):
+        idx = 0
+        while idx < len(lines):
+            raw = lines[idx]
             line = raw.strip()
             if not line or line.startswith("#"):
+                idx += 1
                 continue
 
             rule, patterns = TDocProjectIndex._parse_rule_line(line)
@@ -895,13 +1008,14 @@ class TDocProjectIndex:
                         {
                             "severity": "warning",
                             "message": f"Rule '{rule}:' has no patterns.",
-                            "line": idx,
+                            "line": idx + 1,
                         }
                     )
                 elif rule == "include":
                     include_patterns.extend(patterns)
                 elif rule == "ignore":
                     ignore_patterns.extend(patterns)
+                idx += 1
                 continue
 
             if TDocProjectIndex._is_section_header(line):
@@ -909,48 +1023,54 @@ class TDocProjectIndex:
                 section = m.group("section").strip() if m else ""
                 if not section:
                     findings.append(
-                        {"severity": "error", "message": "Empty section header.", "line": idx}
+                        {"severity": "error", "message": "Empty section header.", "line": idx + 1}
                     )
+                    idx += 1
                     continue
                 if section.casefold() in section_line:
                     findings.append(
                         {
                             "severity": "warning",
                             "message": f"Duplicate section header '{section}'.",
-                            "line": idx,
+                            "line": idx + 1,
                         }
                     )
                 else:
-                    section_line[section.casefold()] = idx
+                    section_line[section.casefold()] = idx + 1
                 lead = section[0]
                 if lead.isalpha() and lead != lead.upper():
                     findings.append(
                         {
                             "severity": "warning",
                             "message": f"Section header '{section}' should begin with a capital letter.",
-                            "line": idx,
+                            "line": idx + 1,
                         }
                     )
                 section_count[section.casefold()] += 0
                 current_section = section
+                idx += 1
                 continue
 
-            if "=" in line and not ALIAS_LINE_PATTERN.match(line):
+            cont_lines, next_idx = TDocProjectIndex._collect_symbol_continuation_lines(lines, idx)
+            primary, _meta_parts = TDocProjectIndex._split_symbol_line_parts(line)
+            if "=" in primary and not ALIAS_LINE_PATTERN.match(primary):
                 findings.append(
                     {
                         "severity": "error",
                         "message": "Malformed alias definition. Use 'Canonical = Alias1 | Alias2'.",
-                        "line": idx,
+                        "line": idx + 1,
                     }
                 )
+                idx = next_idx
                 continue
 
-            symbol, alias_items, _, metadata_issues = TDocProjectIndex._parse_symbol_definition(line)
+            symbol, alias_items, _, metadata_issues = TDocProjectIndex._parse_symbol_definition(line, cont_lines)
             if not symbol:
-                findings.append({"severity": "error", "message": "Empty symbol definition.", "line": idx})
+                findings.append({"severity": "error", "message": "Empty symbol definition.", "line": idx + 1})
+                idx = next_idx
                 continue
             for issue in metadata_issues:
-                findings.append({"severity": "warning", "message": issue, "line": idx})
+                findings.append({"severity": "warning", "message": issue, "line": idx + 1})
 
             if current_section:
                 section_count[current_section.casefold()] += 1
@@ -961,11 +1081,11 @@ class TDocProjectIndex:
                     {
                         "severity": "error",
                         "message": f"Duplicate canonical symbol '{symbol}'.",
-                        "line": idx,
+                        "line": idx + 1,
                     }
                 )
             else:
-                symbol_line[symbol_key] = idx
+                symbol_line[symbol_key] = idx + 1
 
             local_seen = set()
             all_aliases = [symbol] + alias_items
@@ -980,7 +1100,7 @@ class TDocProjectIndex:
                         {
                             "severity": "warning",
                             "message": f"Duplicate alias '{candidate}' in one symbol definition.",
-                            "line": idx,
+                            "line": idx + 1,
                         }
                     )
                     continue
@@ -995,12 +1115,13 @@ class TDocProjectIndex:
                                 f"Alias collision '{candidate}' between '{owner['symbol']}' "
                                 f"(line {owner['line']}) and '{symbol}'."
                             ),
-                            "line": idx,
+                            "line": idx + 1,
                         }
                     )
                     continue
 
-                alias_owner[key] = {"symbol": symbol, "line": idx}
+                alias_owner[key] = {"symbol": symbol, "line": idx + 1}
+            idx = next_idx
 
         for section_key, line_no in section_line.items():
             if section_count.get(section_key, 0) == 0:
@@ -1473,6 +1594,8 @@ class TDocEditorWidget(QTextEdit):
         font = QFont("Consolas", 11)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
+        self.use_tabs = False
+        self.indent_width = 4
         self.setMouseTracking(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -1606,6 +1729,25 @@ class TDocEditorWidget(QTextEdit):
                 size = int(font.pointSize()) if int(font.pointSize()) > 0 else 10
             font.setPointSize(size)
         self.setFont(font)
+
+    def set_editor_indent_preferences(self, *, use_tabs: bool | None = None, indent_width: int | None = None) -> None:
+        if indent_width is not None:
+            try:
+                self.indent_width = max(1, min(8, int(indent_width)))
+            except Exception:
+                self.indent_width = 4
+        if use_tabs is not None:
+            self.use_tabs = _coerce_bool(use_tabs, default=False)
+
+    def _active_indent_width(self) -> int:
+        try:
+            return max(1, int(getattr(self, "indent_width", 4)))
+        except Exception:
+            return 4
+
+    def _indent_unit(self) -> str:
+        use_tabs = _coerce_bool(getattr(self, "use_tabs", False), default=False)
+        return "\t" if use_tabs else (" " * self._active_indent_width())
 
     def _handle_editor_shortcut_fallback(self, event: QKeyEvent) -> bool:
         if event.matches(QKeySequence.Find):
@@ -3778,6 +3920,80 @@ class TDocEditorWidget(QTextEdit):
 
         super().mousePressEvent(e)
 
+    def _indent_selection_or_insert(self) -> None:
+        cursor = self.textCursor()
+        unit = self._indent_unit()
+        if not cursor.hasSelection():
+            cursor.insertText(unit, QTextCharFormat())
+            return
+
+        start = int(cursor.selectionStart())
+        end = int(cursor.selectionEnd())
+        doc = self.document()
+        first_block = doc.findBlock(start)
+        last_block = doc.findBlock(max(start, end - 1))
+        if not first_block.isValid() or not last_block.isValid():
+            return
+
+        cursor.beginEditBlock()
+        try:
+            block = first_block
+            while block.isValid():
+                c = QTextCursor(block)
+                c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                c.insertText(unit, QTextCharFormat())
+                if block.blockNumber() >= last_block.blockNumber():
+                    break
+                block = block.next()
+        finally:
+            cursor.endEditBlock()
+
+    def _unindent_selection_or_line(self) -> None:
+        cursor = self.textCursor()
+        unit = self._indent_unit()
+        indent_width = self._active_indent_width()
+        doc = self.document()
+        has_selection = cursor.hasSelection()
+
+        if has_selection:
+            start = int(cursor.selectionStart())
+            end = int(cursor.selectionEnd())
+            first_block = doc.findBlock(start)
+            last_block = doc.findBlock(max(start, end - 1))
+        else:
+            first_block = cursor.block()
+            last_block = cursor.block()
+        if not first_block.isValid() or not last_block.isValid():
+            return
+
+        cursor.beginEditBlock()
+        try:
+            block = first_block
+            while block.isValid():
+                text = str(block.text() or "")
+                remove_n = 0
+                if text.startswith(unit):
+                    remove_n = len(unit)
+                elif text.startswith("\t"):
+                    remove_n = 1
+                else:
+                    while remove_n < min(indent_width, len(text)) and text[remove_n] == " ":
+                        remove_n += 1
+                if remove_n > 0:
+                    c = QTextCursor(block)
+                    c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                    c.movePosition(
+                        QTextCursor.MoveOperation.Right,
+                        QTextCursor.MoveMode.KeepAnchor,
+                        remove_n,
+                    )
+                    c.removeSelectedText()
+                if block.blockNumber() >= last_block.blockNumber():
+                    break
+                block = block.next()
+        finally:
+            cursor.endEditBlock()
+
     def keyPressEvent(self, event):
         text = str(event.text() or "")
         mods = event.modifiers()
@@ -3825,6 +4041,13 @@ class TDocEditorWidget(QTextEdit):
                 Qt.Key_Enter,
             } or (text and not (mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))):
                 self.clear_inline_suggestion()
+
+        if key in {Qt.Key_Tab, Qt.Key_Backtab} and not bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            if key == Qt.Key_Backtab or bool(mods & Qt.ShiftModifier):
+                self._unindent_selection_or_line()
+            else:
+                self._indent_selection_or_insert()
+            return
 
         should_break_link_boundary = bool(
             text

@@ -35,6 +35,24 @@ Supported lines:
   - `Canonical Symbol = Alias 1 | Alias 2`
   - `Canonical Symbol ; key=value`
   - `Canonical Symbol = Alias 1 | Alias 2 ; key=value ; key2=value2`
+  - continuation metadata lines (indented deeper than the symbol line), for example:
+    - `Canonical Symbol = Alias 1 | Alias 2`
+    - `    key=value`
+    - `    key2=value2`
+
+You can mix both metadata styles in one symbol entry. Continuation metadata lines also accept optional trailing `;` and optional `;`-separated multiple `key=value` pairs on the same line.
+
+Example:
+
+```txt
+Characters:
+    Ari Vale = Ari | A. Vale ; role=protagonist
+        faction=Wardens of Ash
+
+    Mira Stone = Mira
+        role=mentor
+        is_alive=yes
+```
 
 Validation includes duplicate symbols, alias collisions, malformed metadata, empty rules, empty sections, unresolved symbols, and more.
 

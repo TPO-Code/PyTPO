@@ -79,6 +79,19 @@ def _normalize_word_wrap_file_type_key(value: object) -> str:
         return f"lang:{lang}"
     return ""
 
+
+def _coerce_bool(value: object, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n", ""}:
+        return False
+    return bool(default)
+
 IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
@@ -139,6 +152,8 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "editor.background_image_brightness": "editor.background_image_brightness",
     "editor.background_tint_color": "editor.background_tint_color",
     "editor.background_tint_strength": "editor.background_tint_strength",
+    "editor.use_tabs": "editor.use_tabs",
+    "editor.indent_width": "editor.indent_width",
     "file_dialog": "file_dialog",
     "file_dialog.background_image_path": "file_dialog.background_image_path",
     "file_dialog.background_scale_mode": "file_dialog.background_scale_mode",
@@ -1073,6 +1088,11 @@ class SettingsManager:
             )
         except Exception:
             editor_cfg["background_tint_strength"] = 0
+        editor_cfg["use_tabs"] = _coerce_bool(editor_cfg.get("use_tabs", False), default=False)
+        try:
+            editor_cfg["indent_width"] = max(1, min(8, int(editor_cfg.get("indent_width", 4))))
+        except Exception:
+            editor_cfg["indent_width"] = 4
         raw_wrap_types = editor_cfg.get("word_wrap_enabled_file_types")
         clean_wrap_types: list[str] = []
         seen_wrap_types: set[str] = set()

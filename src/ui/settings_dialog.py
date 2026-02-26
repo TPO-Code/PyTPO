@@ -606,6 +606,19 @@ class SettingsDialog(DialogWindow):
                 return widget.isChecked()
 
             def set_value(value: Any) -> None:
+                if isinstance(value, bool):
+                    widget.setChecked(value)
+                    return
+                if isinstance(value, (int, float)):
+                    widget.setChecked(bool(value))
+                    return
+                text = str(value or "").strip().lower()
+                if text in {"1", "true", "yes", "on", "y"}:
+                    widget.setChecked(True)
+                    return
+                if text in {"0", "false", "no", "off", "n", ""}:
+                    widget.setChecked(False)
+                    return
                 widget.setChecked(bool(value))
 
             def connect_change(callback: Callable[..., None]) -> None:
@@ -2283,7 +2296,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                 title="Editor UX",
                 scope="ide",
                 description="Completion behavior and UI preferences for this IDE instance.",
-                keywords=["completion", "tooltip", "signature", "ide"],
+                keywords=["completion", "tooltip", "signature", "indent", "tabs", "spaces", "ide"],
                 sections=[
                     SchemaSection(
                         title="Completion Behavior",
@@ -2394,7 +2407,30 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 max=1200,
                             ),
                         ],
-                    )
+                    ),
+                    SchemaSection(
+                        title="Indentation",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-use-tabs",
+                                key="editor.use_tabs",
+                                label="Use Hard Tabs",
+                                type="checkbox",
+                                scope="ide",
+                                description="When enabled, Tab inserts \\t; otherwise spaces are used.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-indent-width",
+                                key="editor.indent_width",
+                                label="Indent Width",
+                                type="spin",
+                                scope="ide",
+                                min=1,
+                                max=8,
+                                description="Spaces per indent level and visual width for tab-aware indentation.",
+                            ),
+                        ],
+                    ),
                 ],
             ),
             SchemaPage(

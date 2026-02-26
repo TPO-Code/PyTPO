@@ -234,6 +234,8 @@ class IdeEditorSettings(TypedDict, total=False):
     background_image_brightness: int
     background_tint_color: str
     background_tint_strength: int
+    use_tabs: bool
+    indent_width: int
     word_wrap_enabled_file_types: list[str]
 
 
@@ -415,6 +417,8 @@ def default_ide_settings() -> IdeSettings:
             "background_image_brightness": 100,
             "background_tint_color": "#000000",
             "background_tint_strength": 0,
+            "use_tabs": False,
+            "indent_width": 4,
             "word_wrap_enabled_file_types": [],
         },
         "file_dialog": {

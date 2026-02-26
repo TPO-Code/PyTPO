@@ -2084,6 +2084,44 @@ class PythonIDE(Window):
         cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
         return cfg if isinstance(cfg, dict) else {}
 
+    def _editor_indent_config(self) -> dict:
+        cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
+        return cfg if isinstance(cfg, dict) else {}
+
+    @staticmethod
+    def _coerce_bool_setting(value: object, *, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on", "y"}:
+            return True
+        if text in {"0", "false", "no", "off", "n", ""}:
+            return False
+        return bool(default)
+
+    def _apply_editor_indent_settings_to_editor(self, ed: object) -> None:
+        if ed is None:
+            return
+        cfg = self._editor_indent_config()
+        try:
+            indent_width = max(1, min(8, int(cfg.get("indent_width", 4))))
+        except Exception:
+            indent_width = 4
+        use_tabs = self._coerce_bool_setting(cfg.get("use_tabs", False), default=False)
+        try:
+            custom_setter = getattr(ed, "set_editor_indent_preferences", None)
+            if callable(custom_setter):
+                custom_setter(indent_width=int(indent_width), use_tabs=bool(use_tabs))
+                return
+            if hasattr(ed, "indent_width"):
+                ed.indent_width = int(indent_width)
+            if hasattr(ed, "use_tabs"):
+                ed.use_tabs = bool(use_tabs)
+        except Exception:
+            pass
+
     @staticmethod
     def _normalize_word_wrap_file_type_key(value: object) -> str:
         text = str(value or "").strip().lower()
@@ -2206,6 +2244,7 @@ class PythonIDE(Window):
 
     def _attach_editor_lint_hooks(self, ed: EditorWidget):
         self.diagnostics_controller._attach_editor_lint_hooks(ed)
+        self._apply_editor_indent_settings_to_editor(ed)
         self._apply_word_wrap_to_editor(ed)
         self._attach_editor_cpp_hooks(ed)
         self._attach_editor_rust_hooks(ed)
@@ -4307,6 +4346,7 @@ class PythonIDE(Window):
         if not widget.file_path:
             return None
         self._apply_editor_background_to_editor(widget)
+        self._apply_editor_indent_settings_to_editor(widget)
         try:
             widget.set_editor_font_preferences(
                 family=str(self.font_family or "").strip(),
@@ -5005,6 +5045,7 @@ class PythonIDE(Window):
 
         for ed in self.editor_workspace.all_editors():
             self._apply_editor_background_to_editor(ed)
+            self._apply_editor_indent_settings_to_editor(ed)
             self._apply_completion_ui_settings_to_editor(ed)
             self._apply_lint_visual_settings_to_editor(ed)
             self._attach_editor_cpp_hooks(ed)
@@ -5014,6 +5055,7 @@ class PythonIDE(Window):
         for widget in self._iter_open_document_widgets():
             if isinstance(widget, TDocDocumentWidget):
                 self._apply_editor_background_to_editor(widget)
+                self._apply_editor_indent_settings_to_editor(widget)
                 completion_setter = getattr(widget, "update_completion_ui_settings", None)
                 if callable(completion_setter):
                     try:

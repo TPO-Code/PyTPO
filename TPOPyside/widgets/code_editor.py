@@ -130,6 +130,19 @@ def _first_nonempty_line(text: str) -> str:
     return ""
 
 
+def _coerce_bool(value: object, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n", ""}:
+        return False
+    return bool(default)
+
+
 def _is_signature_like(text: str, label: str) -> bool:
     line = str(text or "").strip()
     if not line:
@@ -733,6 +746,7 @@ class CodeEditor(QPlainTextEdit):
         self._folded_starts: set[int] = set()
         self._fold_selection_adjusting = False
         self._fold_gutter_width = 14
+        self.use_tabs = False
         self.indent_width = 4  # spaces per indent level
         self._lint_diagnostics: list[dict] = []
         self._lint_line_severity: dict[int, str] = {}
@@ -3846,14 +3860,21 @@ class CodeEditor(QPlainTextEdit):
         col = c.positionInBlock()
         return line[col:]
 
+    def _active_indent_width(self) -> int:
+        try:
+            return max(1, int(getattr(self, "indent_width", 4)))
+        except Exception:
+            return 4
+
     def _indent_columns(self, text: str) -> int:
         # tabs treated as indent_width columns
+        indent_width = self._active_indent_width()
         cols = 0
         for ch in text:
             if ch == " ":
                 cols += 1
             elif ch == "\t":
-                cols += self.indent_width
+                cols += indent_width
             else:
                 break
         return cols
@@ -3888,12 +3909,13 @@ class CodeEditor(QPlainTextEdit):
 
     def _leading_indent_string(self, text: str) -> str:
         """Return the leading indentation from a line, converting tabs to spaces."""
+        indent_width = self._active_indent_width()
         indent = []
         for ch in text:
             if ch == " ":
                 indent.append(" ")
             elif ch == "\t":
-                indent.append(" " * self.indent_width)
+                indent.append(" " * indent_width)
             else:
                 break
         return "".join(indent)
@@ -4135,7 +4157,7 @@ class CodeEditor(QPlainTextEdit):
             if self.textCursor().hasSelection():
                 self._indent_selection()
             else:
-                self.insertPlainText(" " * self.indent_width)  # or "\t"
+                self.insertPlainText(self._indent_unit())
             event.accept()
             return
 
@@ -4239,7 +4261,7 @@ class CodeEditor(QPlainTextEdit):
 
                 # smart backspace over indentation: remove up to indent_width spaces
                 if left and left.strip() == "":
-                    remove = min(self.indent_width, len(left))
+                    remove = min(self._active_indent_width(), len(left))
                     # remove only spaces
                     spaces = 0
                     for i in range(1, remove + 1):
@@ -4256,16 +4278,17 @@ class CodeEditor(QPlainTextEdit):
 
         # ---------- Tab / Shift+Tab ----------
         if key == Qt.Key_Tab:
-            self.textCursor().insertText(" " * self.indent_width)
+            self.textCursor().insertText(self._indent_unit())
             return
 
         if key == Qt.Key_Backtab:
             cursor = self.textCursor()
             block = cursor.block()
             line = block.text()
+            indent_width = self._active_indent_width()
 
             remove_count = 0
-            for ch in line[: self.indent_width]:
+            for ch in line[: indent_width]:
                 if ch == " ":
                     remove_count += 1
                 else:
@@ -4298,10 +4321,11 @@ class CodeEditor(QPlainTextEdit):
             extra_cols = 0
 
             if self.language_id() == "python":
+                indent_width = self._active_indent_width()
                 if self._python_should_dedent_next_line(stripped_before):
-                    dedent_cols = self.indent_width
+                    dedent_cols = indent_width
                 if self._python_starts_block(stripped_before):
-                    extra_cols = self.indent_width
+                    extra_cols = indent_width
 
             new_cols = max(0, base_cols - dedent_cols) + extra_cols
             indent_text = self._indent_string_from_columns(new_cols)
@@ -4343,9 +4367,9 @@ class CodeEditor(QPlainTextEdit):
         # Configure these attributes wherever you keep settings:
         # self.use_tabs: bool
         # self.indent_width: int
-        use_tabs = bool(getattr(self, "use_tabs", False))
-        indent_width = int(getattr(self, "indent_width", 4))
-        return "\t" if use_tabs else (" " * max(1, indent_width))
+        indent_width = self._active_indent_width()
+        use_tabs = _coerce_bool(getattr(self, "use_tabs", False), default=False)
+        return "\t" if use_tabs else (" " * indent_width)
 
 
     def _selected_block_range(self, cursor: QTextCursor) -> tuple[int, int]:
@@ -4413,7 +4437,7 @@ class CodeEditor(QPlainTextEdit):
         old_anchor = cursor.anchor()
         old_pos = cursor.position()
         unit = self._indent_unit()
-        indent_width = max(1, int(getattr(self, "indent_width", 4)))
+        indent_width = self._active_indent_width()
         doc = self.document()
 
         had_selection = cursor.hasSelection()
