@@ -1094,10 +1094,12 @@ class TDocEditorWidget(QTextEdit):
         self.verticalScrollBar().valueChanged.connect(self._refresh_overview_marker_area)
         self.horizontalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
         self.cursorPositionChanged.connect(self.highlightCurrentLine)
+        self.cursorPositionChanged.connect(self._on_cursor_position_changed_for_link_editing)
         self.cursorPositionChanged.connect(self._schedule_occurrence_marker_refresh)
         self.selectionChanged.connect(self._schedule_occurrence_marker_refresh)
 
         self._is_internal_change = False
+        self._last_cursor_pos = int(self.textCursor().position())
         self.open_file_by_name = None
         self.open_symbol = None
         self.resolve_symbol = None
@@ -2085,13 +2087,7 @@ class TDocEditorWidget(QTextEdit):
                 last_pos = match.end()
                 continue
 
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor("grey"))
-            fmt.setFontUnderline(True)
-            fmt.setProperty(self.LINK_PROPERTY, self._make_link_target(label))
-            fmt.setProperty(self.LINK_LABEL_PROPERTY, label.strip())
-
-            cursor.insertText(label, fmt)
+            cursor.insertText(label, self._make_link_char_format(label))
             last_pos = match.end()
 
         if last_pos < len(text):
@@ -2101,6 +2097,7 @@ class TDocEditorWidget(QTextEdit):
         self.document().setModified(False)
         self.blockSignals(False)
         self._is_internal_change = False
+        self._last_cursor_pos = int(self.textCursor().position())
         self._rebuild_extra_selections()
         if self._search_bar.isVisible():
             self._schedule_search_refresh(immediate=True)
@@ -2161,6 +2158,286 @@ class TDocEditorWidget(QTextEdit):
 
         return None
 
+    def _link_target_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.LINK_PROPERTY):
+            return None
+        value = fmt.property(self.LINK_PROPERTY)
+        return str(value) if isinstance(value, str) else None
+
+    def _link_label_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.LINK_LABEL_PROPERTY):
+            return None
+        value = fmt.property(self.LINK_LABEL_PROPERTY)
+        return str(value) if isinstance(value, str) else None
+
+    def _link_span_at_cursor(
+        self, cursor: QTextCursor | None = None
+    ) -> tuple[int, int, str] | None:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if cur.hasSelection():
+            return None
+        pos = int(cur.position())
+
+        left_target = self._link_target_at_doc_pos(pos - 1)
+        right_target = self._link_target_at_doc_pos(pos)
+        if not left_target and not right_target:
+            return None
+        target = left_target or right_target
+        if not isinstance(target, str):
+            return None
+
+        if left_target:
+            probe = pos - 1
+        else:
+            probe = pos
+        if probe < 0:
+            return None
+
+        label = self._link_label_at_doc_pos(probe)
+        if not label:
+            return None
+
+        start = probe
+        while start > 0:
+            prev_target = self._link_target_at_doc_pos(start - 1)
+            if prev_target != target:
+                break
+            prev_label = self._link_label_at_doc_pos(start - 1)
+            if prev_label != label:
+                break
+            start -= 1
+
+        end = probe + 1
+        while True:
+            next_target = self._link_target_at_doc_pos(end)
+            if next_target != target:
+                break
+            next_label = self._link_label_at_doc_pos(end)
+            if next_label != label:
+                break
+            end += 1
+
+        if end <= start:
+            return None
+        return start, end, label
+
+    def _make_link_char_format(self, label: str) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor("grey"))
+        fmt.setFontUnderline(True)
+        fmt.setProperty(self.LINK_PROPERTY, self._make_link_target(label))
+        fmt.setProperty(self.LINK_LABEL_PROPERTY, label.strip())
+        return fmt
+
+    def _replace_range_with_link_label(
+        self,
+        *,
+        start: int,
+        end: int,
+        label: str,
+        new_cursor_pos: int | None = None,
+    ) -> None:
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            edit.insertText(label, self._make_link_char_format(label))
+            edit.endEditBlock()
+
+            if new_cursor_pos is not None:
+                max_pos = max(0, int(self.document().characterCount()) - 1)
+                safe_pos = max(0, min(int(new_cursor_pos), max_pos))
+                cur = self.textCursor()
+                cur.setPosition(safe_pos)
+                self.setTextCursor(cur)
+        finally:
+            self._is_internal_change = was_internal
+        self._last_cursor_pos = int(self.textCursor().position())
+
+    def _bracket_link_span_containing_doc_pos(self, pos: int) -> tuple[int, int, str] | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p > max_pos:
+            return None
+        block = doc.findBlock(p)
+        if not block.isValid():
+            return None
+        text = block.text()
+        if not text or "[" not in text or "]" not in text:
+            return None
+
+        block_start = int(block.position())
+        local = p - block_start
+        for match in LINK_PATTERN.finditer(text):
+            m_start = int(match.start())
+            m_end = int(match.end())
+            if local <= m_start or local >= m_end:
+                continue
+            label = str(match.group("label") or "")
+            if not label:
+                continue
+            return block_start + m_start, block_start + m_end, label
+        return None
+
+    def _collapse_bracket_link_on_cursor_move(self, old_pos: int, new_pos: int) -> bool:
+        old_i = int(old_pos)
+        new_i = int(new_pos)
+        candidates = [old_i]
+        if new_i > old_i:
+            candidates.append(old_i - 1)
+        elif new_i < old_i:
+            candidates.append(old_i + 1)
+
+        span = None
+        for candidate in candidates:
+            span = self._bracket_link_span_containing_doc_pos(candidate)
+            if span:
+                break
+        if not span:
+            return False
+        start, end, label = span
+        if start < new_i < end:
+            return False
+
+        adjusted_pos = new_i
+        if adjusted_pos >= end:
+            adjusted_pos = max(0, adjusted_pos - 2)
+        self._replace_range_with_link_label(start=start, end=end, label=label, new_cursor_pos=adjusted_pos)
+        return True
+
+    def _expand_link_for_editing(
+        self,
+        cursor: QTextCursor | None = None,
+        *,
+        previous_pos: int | None = None,
+    ) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        span = self._link_span_at_cursor(cur)
+        if not span:
+            return False
+        start, end, label = span
+        pos = int(cur.position())
+
+        # Expand when caret is inside rendered link text.
+        # Also allow boundary entry if cursor direction indicates moving into the link.
+        if pos <= start or pos >= end:
+            allow_boundary_entry = False
+            if previous_pos is not None:
+                prev = int(previous_pos)
+                if pos == start and prev < pos:
+                    allow_boundary_entry = True
+                elif pos == end and prev > pos:
+                    allow_boundary_entry = True
+            if not allow_boundary_entry:
+                return False
+
+        replacement = f"[{label}]"
+        relative = pos - start
+
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            edit.insertText(replacement, QTextCharFormat())
+            edit.endEditBlock()
+
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(start + 1 + relative)
+            self.setTextCursor(new_cursor)
+        finally:
+            self._is_internal_change = was_internal
+        self._last_cursor_pos = int(self.textCursor().position())
+        return True
+
+    def _on_cursor_position_changed_for_link_editing(self) -> None:
+        if bool(self._is_internal_change):
+            self._last_cursor_pos = int(self.textCursor().position())
+            return
+        old_pos = int(self._last_cursor_pos)
+        new_pos = int(self.textCursor().position())
+        if old_pos != new_pos:
+            self._collapse_bracket_link_on_cursor_move(old_pos, new_pos)
+        self._expand_link_for_editing(self.textCursor(), previous_pos=old_pos)
+        self._last_cursor_pos = int(self.textCursor().position())
+
+    def _cursor_is_appending_to_link(self, cursor: QTextCursor | None = None) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        pos = int(cur.position())
+        left = self._link_target_at_doc_pos(pos - 1)
+        if not left:
+            return False
+        right = self._link_target_at_doc_pos(pos)
+        if right and right == left:
+            return False
+        return True
+
+    def _try_convert_recent_bracket_link(self) -> bool:
+        cur = self.textCursor()
+        block = cur.block()
+        if not block.isValid():
+            return False
+
+        block_text = block.text()
+        col = int(cur.positionInBlock())
+        end_idx = col - 1
+        if end_idx < 1 or end_idx >= len(block_text):
+            return False
+        if block_text[end_idx] != "]":
+            return False
+
+        start_idx = block_text.rfind("[", 0, end_idx)
+        if start_idx < 0:
+            return False
+        if "]" in block_text[start_idx + 1:end_idx]:
+            return False
+
+        label = block_text[start_idx + 1:end_idx]
+        if not label:
+            return False
+        if "\n" in label or "\r" in label or "[" in label or "]" in label:
+            return False
+
+        abs_start = int(block.position()) + start_idx
+        abs_end = int(block.position()) + end_idx + 1
+        self._replace_range_with_link_label(
+            start=abs_start,
+            end=abs_end,
+            label=label,
+            new_cursor_pos=abs_start + len(label),
+        )
+        return True
+
     def _show_context_menu(self, pos):
         menu = self.createStandardContextMenu()
         cursor = self.cursorForPosition(pos)
@@ -2208,6 +2485,41 @@ class TDocEditorWidget(QTextEdit):
                     return
 
         super().mousePressEvent(e)
+
+    def keyPressEvent(self, event):
+        cursor_pos_before = int(self.textCursor().position())
+        text = str(event.text() or "")
+        should_break_link_append = bool(
+            text
+            and not bool(event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+            and self._cursor_is_appending_to_link(self.textCursor())
+        )
+        if should_break_link_append:
+            self.setCurrentCharFormat(QTextCharFormat())
+
+        was_internal = bool(self._is_internal_change)
+        super().keyPressEvent(event)
+        if was_internal:
+            return
+
+        if not bool(event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            if event.key() in (
+                Qt.Key_Left,
+                Qt.Key_Right,
+                Qt.Key_Up,
+                Qt.Key_Down,
+                Qt.Key_Home,
+                Qt.Key_End,
+            ):
+                self._expand_link_for_editing(self.textCursor(), previous_pos=cursor_pos_before)
+
+        if text == "]":
+            if self._try_convert_recent_bracket_link():
+                self._rebuild_extra_selections()
+                self._schedule_occurrence_marker_refresh()
+                if self._search_bar.isVisible():
+                    self._schedule_search_refresh(immediate=True)
+                self._refresh_overview_marker_area()
 
     def wheelEvent(self, event):
         mods = event.modifiers()

@@ -5,7 +5,7 @@ import shutil
 from typing import Callable, Optional, Any, Dict, List, cast
 
 from PySide6.QtCore import (
-    Qt, QAbstractItemModel, QModelIndex, QMimeData, QPoint, Signal, QObject
+    Qt, QAbstractItemModel, QModelIndex, QMimeData, QPoint, Signal, QObject, QItemSelectionModel
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
@@ -593,18 +593,29 @@ class FileSystemTreeWidget(QTreeView):
         )
         self.setModel(self._model)
         self.setHeaderHidden(True)
+        try:
+            self.header().setStretchLastSection(True)
+            self.header().setSectionResizeMode(0, self.header().ResizeMode.Stretch)
+        except Exception:
+            pass
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setExpandsOnDoubleClick(False)
 
-        self.doubleClicked.connect(self._on_double_clicked)
         self.expanded.connect(self._on_expanded)
         self._model.filesystemError.connect(self.operationError)
         self._model.filesystemMoved.connect(self._on_model_path_moved)
         self._pending_expanded_paths_for_move: Optional[set[str]] = None
+        self._mouse_press_pos: Optional[QPoint] = None
+        self._mouse_press_index: QModelIndex = QModelIndex()
+        self._mouse_press_modifiers: Qt.KeyboardModifiers = Qt.KeyboardModifier.NoModifier
+        self._mouse_drag_started = False
+        self._mouse_drag_distance = max(8, int(QApplication.startDragDistance()))
 
     def root_path(self) -> str:
         return self._model.root_path()
@@ -705,9 +716,111 @@ class FileSystemTreeWidget(QTreeView):
         if self._model.canFetchMore(index):
             self._model.fetchMore(index)
 
+    def _interaction_index_at(self, pos: QPoint) -> QModelIndex:
+        idx = self.indexAt(pos)
+        if idx.isValid():
+            return idx
+        vp = self.viewport()
+        if vp is None or not vp.rect().contains(pos):
+            return QModelIndex()
+        fallback_x = max(4, min(vp.width() - 1, int(self.indentation()) + 8))
+        return self.indexAt(QPoint(fallback_x, int(pos.y())))
+
+    def _reset_mouse_drag_tracking(self) -> None:
+        self._mouse_press_pos = None
+        self._mouse_press_index = QModelIndex()
+        self._mouse_press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._mouse_drag_started = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            index = self._interaction_index_at(pos)
+            self._mouse_press_pos = QPoint(pos)
+            self._mouse_press_index = QModelIndex(index)
+            self._mouse_press_modifiers = event.modifiers()
+            self._mouse_drag_started = False
+
+            no_selection_mods = not bool(
+                event.modifiers()
+                & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.ShiftModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                )
+            )
+            if no_selection_mods and index.isValid():
+                selection_model = self.selectionModel()
+                if selection_model is not None and not selection_model.isSelected(index):
+                    selection_model.setCurrentIndex(
+                        index,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+                    self.setCurrentIndex(index)
+        else:
+            self._reset_mouse_drag_tracking()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self._interaction_index_at(event.position().toPoint())
+            if index.isValid():
+                self._on_double_clicked(index)
+                self._reset_mouse_drag_tracking()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not bool(event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        if self._mouse_press_pos is None or not self._mouse_press_index.isValid():
+            super().mouseMoveEvent(event)
+            return
+
+        if bool(
+            self._mouse_press_modifiers
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        distance = (event.position().toPoint() - self._mouse_press_pos).manhattanLength()
+        if distance < self._mouse_drag_distance:
+            event.accept()
+            return
+
+        if not self._mouse_drag_started:
+            self._mouse_drag_started = True
+            actions = self.model().supportedDragActions() if self.model() is not None else Qt.DropAction.IgnoreAction
+            if bool(actions & Qt.DropAction.MoveAction):
+                action = Qt.DropAction.MoveAction
+            elif bool(actions & Qt.DropAction.CopyAction):
+                action = Qt.DropAction.CopyAction
+            else:
+                action = Qt.DropAction.IgnoreAction
+            if action != Qt.DropAction.IgnoreAction:
+                self.startDrag(action)
+            event.accept()
+            return
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._reset_mouse_drag_tracking()
+
     def dropEvent(self, event):
         self._pending_expanded_paths_for_move = self._collect_expanded_paths()
         super().dropEvent(event)
+        self._reset_mouse_drag_tracking()
         if not event.isAccepted():
             self._pending_expanded_paths_for_move = None
 
