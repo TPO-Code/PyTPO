@@ -7,7 +7,7 @@ import re
 import shlex
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMenu, QToolButton
+from PySide6.QtWidgets import QToolButton
 
 from src.lang_rust.cargo_discovery import discover_workspace_root_for_file
 from src.ui.widgets.terminal_widget import TerminalWidget
