@@ -21,6 +21,7 @@ from pyte import modes
 
 # ============================ Colors & Utilities ============================
 
+import ast
 class AnsiColor(Enum):
     BLACK = "black"
     RED = "red"
@@ -63,6 +64,23 @@ ANSI16: Dict[str, tuple[int, int, int]] = {color.value: rgb for color, rgb in AN
 _ANSI16_ORDER = [color.value for color in AnsiColor]
 _ANSI16_INDICES = {name: idx for idx, name in enumerate(_ANSI16_ORDER)}
 
+def _decode_systemd_env_value(value: str) -> str:
+    value = value.strip()
+
+    # Bash ANSI-C quoting: $'...'
+    if value.startswith("$'") and value.endswith("'"):
+        inner = value[2:-1]
+        return ast.literal_eval("'" + inner.replace("\\", "\\\\").replace("'", "\\'") + "'")
+
+    # Plain single or double quoted values
+    if (value.startswith("'") and value.endswith("'")) or (
+        value.startswith('"') and value.endswith('"')
+    ):
+        return value[1:-1]
+
+    return value
+
+
 def session_env_from_systemd_user() -> dict:
     """
     Return the user session environment as seen by the systemd user manager.
@@ -82,8 +100,7 @@ def session_env_from_systemd_user() -> dict:
             if not line or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            # systemctl output is already unescaped KEY=VALUE
-            env[k] = v
+            env[k] = _decode_systemd_env_value(v)
 
         # Top up essentials if missing (common for GUI launches)
         for k in ("HOME", "USER", "LOGNAME"):
@@ -91,13 +108,13 @@ def session_env_from_systemd_user() -> dict:
 
         # Top up display/session plumbing if missing (varies by distro/session)
         for k in (
-                "DISPLAY",
-                "WAYLAND_DISPLAY",
-                "XDG_RUNTIME_DIR",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "XDG_SESSION_TYPE",
-                "XDG_CURRENT_DESKTOP",
-                "DESKTOP_SESSION",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_SESSION_TYPE",
+            "XDG_CURRENT_DESKTOP",
+            "DESKTOP_SESSION",
         ):
             if k in os.environ:
                 env.setdefault(k, os.environ[k])
