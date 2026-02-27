@@ -14,7 +14,6 @@ from src.ui.widgets.terminal_widget import TerminalWidget
 
 RUN_EXIT_MARKER_RE = re.compile(r"__PYTPO_RUN_EXIT__:(-?\d+)")
 
-
 @dataclass
 class ConsoleTabSession:
     file_key: str

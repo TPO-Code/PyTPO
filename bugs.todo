@@ -5,33 +5,6 @@ Improvements:
         [ ] make the file dialog use our custom dialog
         [ ] make it self-contained for reusability
 
-    [ ] run configurations (project entrypoint + args)
-        [ ] support running specific file/module (not only current file)
-        [ ] add per-configuration arguments
-        [ ] add per-configuration working directory
-        [ ] add per-configuration interpreter override (optional)
-        [ ] execute via terminal pipeline (single execution path)
-            # this is planned after the major refactor
-            # current "run current file" stays as the fast path
-
-    [ ] script/task runner integration (terminal-backed)
-        [ ] add saved script tasks (bash/command)
-        [ ] open in new or reused terminal tab (configurable)
-        [ ] safe command construction (quoted paths, cwd handling)
-            # initial implementation can be command-posting to terminal
-            # this covers venv refresh and other maintenance scripts
-
-    [ ] stop flow polish
-        [✔] first press = graceful stop
-        [ ] second press = force stop
-        [ ] keep timer escalation as fallback safety net
-            # current model works on timer; second-press is safer UX
-
-    [ ] symbol-aware refactor tools
-        [ ] rename symbol
-        [ ] replace symbol
-            # find/replace-in-files is now the bridge workflow
-            # implement after refactor
 
     [ ] icon/branding polish
         [✔] create temporary app icon
@@ -39,17 +12,6 @@ Improvements:
         [ ] produce full icon family (16/24/32/48/64/128/256 + full mark)
         [ ] create monochrome variant
             # tiny icon now reads much better when scaled down
-
-    [ ] config boundaries hardening
-        [✔] move project metadata/state into .tide
-        [✔] ensure project.json reload applies only project-domain settings
-        [✔] keep theme/global ide prefs strictly in ide settings
-            # project settings and ide settings should stay clearly separated
-
-    [ ] diagnostics/search panel polish
-        [✔] add find and replace in files (indexed/non-filtered files only)
-        [✔] show results in dockable panel
-        [ ] add optional preview/selection controls for replace operations
 
     [ ] in the project.json store the explorers expanded folders so they persist across sessions
     [ ] in the project.json store the code folding of files.
@@ -59,23 +21,19 @@ Improvements:
     
 
 Bugs:
-    [✔] folded block selection behavior
-        # selecting a folded header now selects the whole folded block
-        # enables safer copy/paste/indent operations on collapsed scopes
 
-    [✔] interpreter selection ux gap
-        # users no longer need to type raw interpreter paths
-        # added browse flow and project environment discovery
-
-    [✔] project metadata clutter in project root
-        # moved ide project metadata into .tide for cleaner roots
-
-    [✔] project.json live apply completeness
-        # when project.json is edited/saved, all project-domain changes should be honored
-        # include project name, session/open editors, interpreter mappings, and run settings
-        
     [ ] when search/replace is visible, hitting enter in the editor goes to the next result.
         # this should only happen if the filter text box is in focus
         
     [ ] find in files will not go to the result if the file containing the result is already open
         # if the file is already open, navigate to that editor and place the cursor where it belongs
+    
+    [ ] when hitting enter form the end of folded code we have an issue where  the result is near the top of the folded code and not at the end as expected
+
+    [ ] AI assist setting keep getting reset with no obvious reason
+        # This results in having to re enter the model adress and having to re enable AI assist
+        
+Compleated:
+
+    
+    

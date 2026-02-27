@@ -17,7 +17,6 @@ _CPP_BUILDABLE_SUFFIXES = _CPP_RUNNABLE_SUFFIXES | {".h", ".hpp", ".hh", ".hxx"}
 _RUST_RUNNABLE_SUFFIXES = {".rs"}
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-
 class ExecutionController:
     def __init__(self, ide):
         self.ide = ide

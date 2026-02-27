@@ -1,0 +1,110 @@
+# Demo Notes
+
+This section is manual and should remain unchanged when the index regenerates.
+Use this space for project notes and TODOs.
+
+--------------------
+Index
+    Artifacts:
+        [Storm Key]
+            Aliases: [Storm Key], [Key of Storms]
+            Metadata: rarity=rare
+            References:
+                [demo/chapter_01.tdoc]: [7|demo/chapter_01.tdoc#L7]
+                [demo/reference/artifacts.tdoc]: [7|demo/reference/artifacts.tdoc#L7]
+
+        [Wheel of Dawn]
+            Aliases: [Wheel of Dawn], [Dawnwheel], [Wheel]
+            Metadata: rarity=legendary
+            References:
+                [demo/chapter_01.tdoc]: [10|demo/chapter_01.tdoc#L10]
+                [demo/reference/00_quickstart.tdoc]: [8|demo/reference/00_quickstart.tdoc#L8]
+                [demo/reference/artifacts.tdoc]: [6|demo/reference/artifacts.tdoc#L6]
+
+
+    Characters:
+        [Ari Vale]
+            Aliases: [Ari Vale], [Ari], [A Vale]
+            Metadata: role=protagonist; faction=Wardens of Ash
+            References:
+                [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6]
+                [demo/lore/broken_frontmatter.tdoc]: [5|demo/lore/broken_frontmatter.tdoc#L5]
+                [demo/reference/00_quickstart.tdoc]: [7|demo/reference/00_quickstart.tdoc#L7]
+                [demo/reference/artifacts.tdoc]: [7|demo/reference/artifacts.tdoc#L7]
+                [demo/reference/characters.tdoc]: [6|demo/reference/characters.tdoc#L6]
+
+        [Joren Flint]
+            Aliases: [Joren Flint], [Joren], [Captain Flint]
+            Metadata: role=rival
+            References:
+                [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6]
+                [demo/reference/characters.tdoc]: [8|demo/reference/characters.tdoc#L8]
+
+        [Mira Stone]
+            Aliases: [Mira Stone], [Mira]
+            Metadata: role=mentor
+            References:
+                [demo/chapter_01.tdoc]: [7|demo/chapter_01.tdoc#L7]
+                [demo/reference/00_quickstart.tdoc]: [7|demo/reference/00_quickstart.tdoc#L7]
+                [demo/reference/characters.tdoc]: [7|demo/reference/characters.tdoc#L7]
+
+
+    Factions:
+        [Wardens of Ash]
+            Aliases: [Wardens of Ash], [Wardens]
+            Metadata: alignment=neutral
+            References:
+                [demo/reference/characters.tdoc]: [6|demo/reference/characters.tdoc#L6]
+
+
+    Locations:
+        [Glass Harbor]
+            Aliases: [Glass Harbor], [Harbor]
+            Metadata: climate=fogbound
+            References:
+                [demo/reference/00_quickstart.tdoc]: [7|demo/reference/00_quickstart.tdoc#L7]
+
+        [Old Observatory]
+            Aliases: [Old Observatory]
+            Metadata: type=landmark
+            References:
+                [demo/chapter_01.tdoc]: [8|demo/chapter_01.tdoc#L8]
+
+        [Starfall Keep]
+            Aliases: [Starfall Keep], [Keep]
+            Metadata: status=ruins
+            References:
+                [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6]
+                [demo/reference/characters.tdoc]: [8|demo/reference/characters.tdoc#L8]
+
+
+    Unresolved:
+        These symbols are used but not defined in .tdocproject.
+        [Unbound Prophecy]
+            References:
+                [demo/reference/00_quickstart.tdoc]: [10|demo/reference/00_quickstart.tdoc#L10]
+
+
+    Documents:
+        [demo/chapter_01.tdoc]
+            Metadata: title=Chapter 1 - Storm Door; status=draft; tags=chapter, action
+            Indexing: on
+        [demo/lore/broken_frontmatter.tdoc]
+            Metadata: status=draft
+            Indexing: on
+        [demo/off_index_notes.tdoc]
+            Metadata: title=Private Notes; status=scratch; index=off
+            Indexing: off
+        [demo/reference/00_quickstart.tdoc]
+            Metadata: title=Demo Quickstart; status=active; tags=demo, overview
+            Indexing: on
+        [demo/reference/artifacts.tdoc]
+            Metadata: title=Artifact Notes; status=stable; tags=reference, items
+            Indexing: on
+        [demo/reference/characters.tdoc]
+            Metadata: title=Character Notes; status=stable; tags=reference, cast
+            Indexing: on
+
+
+    Frontmatter Warnings:
+        [demo/lore/broken_frontmatter.tdoc#L2] Malformed frontmatter line. Use 'key: value'.

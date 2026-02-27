@@ -264,39 +264,42 @@ class TerminalWidget(QtWidgets.QWidget):
 
     # -------- Init --------
     def __init__(
-            self,
-            shell="/bin/bash",
-            cwd=None,
-            env=None,
-            parent=None,
-            history_lines=5000,
-            quick_commands: Optional[List[Dict]] = None,
-            templates: Optional[List[Dict]] = None,
+        self,
+        shell=None,
+        login: bool = False,
+        cwd=None,
+        env=None,
+        parent=None,
+        history_lines=5000,
+        quick_commands: Optional[List[Dict]] = None,
+        templates: Optional[List[Dict]] = None,
     ):
+        if shell is None:
+            shell = os.environ.get("SHELL", "/bin/bash")
         super().__init__(parent)
         self.setObjectName("TerminalWidget")
         self.setProperty("surface", "terminal")
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_StyledBackground, True)  # allow QSS to paint background
-
+    
         # QSS/Palette-driven visuals
         self._cursor_color: QtGui.QColor = None  # set by _install_palette_defaults
         self._link_color: QtGui.QColor = None    # set by _install_palette_defaults
         self._install_palette_defaults()
-
+    
         # Font metrics from current widget font (QSS friendly)
         self._cell_w = self._cell_h = self._baseline = 0
         self._recompute_metrics()
-
+    
         # App state
         self._closing = False
         self._shell_exit_emitted = False
         self._history_limit = int(history_lines)
-
+    
         # Fixed emulator geometry (virtual)
         self._virt_cols = 200
         self._virt_rows = 200
-
+    
         # PTY process
         pid, fd = pty.fork()
         if pid == 0:
@@ -304,40 +307,46 @@ class TerminalWidget(QtWidgets.QWidget):
                 os.chdir(cwd)
             env2 = os.environ.copy()
             env2["TERM"] = "xterm-256color"
+            env2["SHELL"] = shell  # many tools key off this
             if env:
                 env2.update(env)
-            os.execvpe(shell, [shell, "-l"], env2)
+    
+            # Always interactive; optionally also login (Tilix-like default is interactive, non-login)
+            argv = [shell] + (["-l"] if login else []) + ["-i"]
+    
+            os.execvpe(shell, argv, env2)
+    
         self._pid, self._fd = pid, fd
-
+    
         # Nonblocking reads
         fl = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
+    
         # Emulator + stream
         self._screen = HistoryScreen(self._virt_cols, self._virt_rows, history=self._history_limit)
         self._screen.set_mode(modes.DECAWM)  # wraparound while printing
         self._stream = pyte.ByteStream(self._screen)
-
+    
         # Inform child once (we don't chase real window resizes)
         self._set_winsize(self._virt_rows, self._virt_cols)
-
+    
         # Async notifier
         self._notifier = QtCore.QSocketNotifier(fd, QtCore.QSocketNotifier.Read, self)
         self._notifier.activated.connect(self._read_ready)
-
+    
         # Viewport scrollback offset (0 = follow bottom)
         self._view_offset = 0
-
+    
         # Cursor blink
         self._cursor_visible = True
         self._blink = QtCore.QTimer(self)
         self._blink.timeout.connect(self._toggle_cursor)
         self._blink.start(600)
-
+    
         # Shortcuts
         self._paste_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+V"), self)
         self._paste_shortcut.activated.connect(self._paste_bracketed)
-
+    
         # Mouse / bracketed paste modes
         self.setMouseTracking(True)
         self._mouse_btns = 0
@@ -345,24 +354,23 @@ class TerminalWidget(QtWidgets.QWidget):
         self._mouse_mode_any = False   # 1003 any-motion
         self._mouse_mode_sgr = False   # 1006 SGR encoding
         self._bracket_paste_enabled = False  # xterm 2004 mode
-
+    
         # Selection
         self._sel_start = None  # (col, row) viewport coords
         self._sel_end = None
         self._selecting = False
-
+    
         # Commands model (quick + templates)
         self._quick_cmds: List[CommandSpec] = self._coerce_command_specs(quick_commands or [])
         self._templates: List[CommandSpec] = self._coerce_command_specs(templates or [])
         self._last_used: Optional[CommandSpec] = None
         self._edit_commands_callback: Optional[Callable[[], None]] = None
-
+    
         # UI: toolbar + context menu + Run button
         self._build_toolbar()
         self._build_run_button()
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
-
     # -------- Palette & Metrics (QSS-friendly) --------
     def _install_palette_defaults(self):
         pal = self.palette()

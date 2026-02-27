@@ -1,0 +1,21 @@
+# Demo configuration for TDOC feature tour
+include: demo/*.tdoc | demo/**/*.tdoc
+ignore: demo/drafts/**
+
+Characters:
+Ari Vale = Ari | A Vale
+    role=protagonist ; faction=Wardens of Ash
+Mira Stone = Mira ; role=mentor
+Joren Flint = Joren | Captain Flint ; role=rival
+
+Locations:
+Glass Harbor = Harbor ; climate=fogbound
+Starfall Keep = Keep ; status=ruins
+Old Observatory ; type=landmark
+
+Artifacts:
+Wheel of Dawn = Dawnwheel | Wheel ; rarity=legendary
+Storm Key = Key of Storms ; rarity=rare
+
+Factions:
+Wardens of Ash = Wardens ; alignment=neutral
