@@ -1,3 +1,4 @@
+import subprocess
 # tpops/widgets/tpo_terminal_widget.py
 import os
 import sys
@@ -61,6 +62,53 @@ ANSI16_DEFAULTS = {
 ANSI16: Dict[str, tuple[int, int, int]] = {color.value: rgb for color, rgb in ANSI16_DEFAULTS.items()}
 _ANSI16_ORDER = [color.value for color in AnsiColor]
 _ANSI16_INDICES = {name: idx for idx, name in enumerate(_ANSI16_ORDER)}
+
+def session_env_from_systemd_user() -> dict:
+    """
+    Return the user session environment as seen by the systemd user manager.
+
+    Falls back to the current process environment if systemd env can't be read.
+    """
+    try:
+        p = subprocess.run(
+            ["/usr/bin/systemctl", "--user", "show-environment"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        env: dict = {}
+        for line in p.stdout.splitlines():
+            if not line or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            # systemctl output is already unescaped KEY=VALUE
+            env[k] = v
+
+        # Top up essentials if missing (common for GUI launches)
+        for k in ("HOME", "USER", "LOGNAME"):
+            env.setdefault(k, os.environ.get(k, ""))
+
+        # Top up display/session plumbing if missing (varies by distro/session)
+        for k in (
+                "DISPLAY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_SESSION_TYPE",
+                "XDG_CURRENT_DESKTOP",
+                "DESKTOP_SESSION",
+        ):
+            if k in os.environ:
+                env.setdefault(k, os.environ[k])
+
+        # Safety net: if PATH is missing/empty, inherit current PATH
+        if not env.get("PATH"):
+            env["PATH"] = os.environ.get("PATH", "")
+
+        return env
+    except Exception:
+        return os.environ.copy()
 
 
 def qrgb(t): return QtGui.QColor(*t)
@@ -275,7 +323,15 @@ class TerminalWidget(QtWidgets.QWidget):
         templates: Optional[List[Dict]] = None,
     ):
         if shell is None:
-            shell = os.environ.get("SHELL", "/bin/bash")
+            # Prefer the user's configured login shell (reflects `chsh`), even if we inherited stale env.
+            try:
+                import pwd
+                shell = (pwd.getpwuid(os.getuid()).pw_shell or "").strip()
+            except Exception:
+                shell = ""
+        
+            # Fall back to inherited environment, then a sensible default.
+            shell = shell or os.environ.get("SHELL", "").strip() or "/bin/bash"
         super().__init__(parent)
         self.setObjectName("TerminalWidget")
         self.setProperty("surface", "terminal")
@@ -305,14 +361,14 @@ class TerminalWidget(QtWidgets.QWidget):
         if pid == 0:
             if cwd:
                 os.chdir(cwd)
-            env2 = os.environ.copy()
+            env2 = session_env_from_systemd_user()
             env2["TERM"] = "xterm-256color"
             env2["SHELL"] = shell  # many tools key off this
             if env:
                 env2.update(env)
     
             # Always interactive; optionally also login (Tilix-like default is interactive, non-login)
-            argv = [shell] + (["-l"] if login else []) + ["-i"]
+            argv = [shell] + (["-l", "i"] if login else []) + ["-i"]
     
             os.execvpe(shell, argv, env2)
     
@@ -371,6 +427,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._build_run_button()
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        
     # -------- Palette & Metrics (QSS-friendly) --------
     def _install_palette_defaults(self):
         pal = self.palette()
