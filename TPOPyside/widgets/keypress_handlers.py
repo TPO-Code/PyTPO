@@ -53,6 +53,7 @@ EXT_TO_LANG: dict[str, str] = {
     ".bash": "shell",
     ".zsh": "shell",
     ".ksh": "shell",
+    ".md": "markdown",
     ".todo": "todo",
     ".task": "todo",
     ".tasks": "todo",

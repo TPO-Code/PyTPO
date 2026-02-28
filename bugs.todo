@@ -4,6 +4,7 @@ Improvements:
     [ ] improve the file dialog
         [ ] make the file dialog use our custom dialog
         [ ] make it self-contained for reusability
+        [ ] implement thumbnails for images
 
 
     [ ] icon/branding polish
@@ -28,11 +29,13 @@ Bugs:
     [ ] find in files will not go to the result if the file containing the result is already open
         # if the file is already open, navigate to that editor and place the cursor where it belongs
     
-    [ ] when hitting enter form the end of folded code we have an issue where  the result is near the top of the folded code and not at the end as expected
+    [ ] when hitting enter form the end of folded code we have an issue where  the result is near the top of the folded code under the visible text and not at the end as expected
+        # This does make sense because the cursor is immediately after that text
 
     [ ] AI assist setting keep getting reset with no obvious reason
-        # This results in having to re enter the model adress and having to re enable AI assist
-        
+        # This results in having to re enter the model address and having to re enable AI assist
+    [ ] Project explorer is auto focusing on selected items when the item goes out of view when moving the vertical scroll keeping the selected item in view. this is not desired
+    
 Compleated:
 
     

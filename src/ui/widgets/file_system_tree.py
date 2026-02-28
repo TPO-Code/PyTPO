@@ -591,6 +591,7 @@ class FileSystemTreeWidget(QTreeView):
             exclude_path_predicate=exclude_path_predicate,
             parent=self,
         )
+        self.setAutoScroll(False)
         self.setModel(self._model)
         self.setHeaderHidden(True)
         try:

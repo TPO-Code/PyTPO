@@ -441,6 +441,105 @@ def todo_fold_ranges(source_text: str) -> list[tuple[int, int]]:
 
     return _normalize_fold_ranges(ranges, len(lines))
 
+def markdown_fold_ranges(source_text: str) -> list[tuple[int, int]]:
+    lines = str(source_text or "").splitlines()
+    line_count = len(lines)
+    ranges: list[tuple[int, int]] = []
+
+    heading_stack: list[tuple[int, int]] = []
+    # (level, start_line)
+
+    fence_start_line: int | None = None
+    fence_delim: str | None = None
+
+    def is_blank(s: str) -> bool:
+        return not s.strip()
+
+    def atx_heading_level(s: str) -> int | None:
+        m = re.match(r"^\s*(#{1,6})\s+.*$", s)
+        if not m:
+            return None
+        return len(m.group(1))
+
+    def is_setext_underline(s: str) -> int | None:
+        stripped = s.strip()
+        if re.match(r"^=+\s*$", stripped):
+            return 1
+        if re.match(r"^-+\s*$", stripped):
+            return 2
+        return None
+
+    def fence_info(s: str) -> tuple[str, str] | None:
+        m = re.match(r"^\s*(```+|~~~+)\s*([\w#+.-]*)\s*$", s)
+        if not m:
+            return None
+        return m.group(1), (m.group(2) or "").strip()
+
+    def close_headings_for_level(new_level: int, end_line: int):
+        nonlocal ranges, heading_stack
+        while heading_stack and heading_stack[-1][0] >= new_level:
+            _, start_line = heading_stack.pop()
+            if end_line > start_line:
+                ranges.append((start_line, end_line))
+
+    idx = 1
+    while idx <= line_count:
+        line = lines[idx - 1]
+
+        # ---------------------------------
+        # fenced code block handling
+        # ---------------------------------
+        fi = fence_info(line)
+        if fence_start_line is not None:
+            if fi and fi[0].startswith(fence_delim[0]):
+                if idx > fence_start_line:
+                    ranges.append((fence_start_line, idx))
+                fence_start_line = None
+                fence_delim = None
+            idx += 1
+            continue
+
+        if fi:
+            fence_start_line = idx
+            fence_delim = fi[0]
+            idx += 1
+            continue
+
+        # ---------------------------------
+        # setext heading handling
+        # ---------------------------------
+        if idx < line_count:
+            next_line = lines[idx]
+            setext_level = is_setext_underline(next_line)
+            if setext_level is not None and not is_blank(line):
+                close_headings_for_level(setext_level, idx - 1)
+                heading_stack.append((setext_level, idx))
+                idx += 2
+                continue
+
+        # ---------------------------------
+        # atx heading handling
+        # ---------------------------------
+        level = atx_heading_level(line)
+        if level is not None:
+            close_headings_for_level(level, idx - 1)
+            heading_stack.append((level, idx))
+            idx += 1
+            continue
+
+        idx += 1
+
+    # unclosed fence goes to EOF
+    if fence_start_line is not None and line_count > fence_start_line:
+        ranges.append((fence_start_line, line_count))
+
+    # close remaining headings to EOF
+    while heading_stack:
+        _, start_line = heading_stack.pop()
+        if line_count > start_line:
+            ranges.append((start_line, line_count))
+
+    return _normalize_fold_ranges(ranges, line_count)
 
 LANGUAGE_FOLD_PROVIDERS: dict[str, FoldProvider] = {
     "c": cpp_fold_ranges,
@@ -450,6 +549,7 @@ LANGUAGE_FOLD_PROVIDERS: dict[str, FoldProvider] = {
     "jsonc": json_fold_ranges,
     "rust": rust_fold_ranges,
     "todo": todo_fold_ranges,
+    "markdown": markdown_fold_ranges,
 }
 
 
@@ -514,4 +614,5 @@ __all__ = [
     "json_fold_ranges",
     "rust_fold_ranges",
     "todo_fold_ranges",
+    "markdown_fold_ranges",
 ]

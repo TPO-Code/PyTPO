@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from PySide6.QtGui import QBrush, QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import QBrush, QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QTextBlockUserData
 
 from TPOPyside.widgets.keypress_handlers import get_language_id
 
@@ -664,6 +664,425 @@ class BashHighlighter(QSyntaxHighlighter):
                 self.setFormat(m.start(), m.end() - m.start(), fmt)
         hide_hash_for_colors(self, text)
 
+
+class MarkdownBlockData(QTextBlockUserData):
+    def __init__(
+        self,
+        *,
+        in_fence: bool = False,
+        fence_delim: str = "",
+        fence_lang: str = "",
+        delegate_state: int = -1,
+    ):
+        super().__init__()
+        self.in_fence = in_fence
+        self.fence_delim = fence_delim
+        self.fence_lang = fence_lang
+        self.delegate_state = delegate_state
+        
+class MarkdownHighlighter(QSyntaxHighlighter):
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # -----------------------------
+        # Core formats
+        # -----------------------------
+        self.fmt_h1 = QTextCharFormat()
+        self.fmt_h1.setForeground(QColor("#4FC1FF"))
+        self.fmt_h1.setFontWeight(QFont.Bold)
+
+        self.fmt_h2 = QTextCharFormat()
+        self.fmt_h2.setForeground(QColor("#61AFEF"))
+        self.fmt_h2.setFontWeight(QFont.Bold)
+
+        self.fmt_h3 = QTextCharFormat()
+        self.fmt_h3.setForeground(QColor("#C586C0"))
+        self.fmt_h3.setFontWeight(QFont.Bold)
+
+        self.fmt_h4 = QTextCharFormat()
+        self.fmt_h4.setForeground(QColor("#D7BA7D"))
+        self.fmt_h4.setFontWeight(QFont.Bold)
+
+        self.fmt_h5 = QTextCharFormat()
+        self.fmt_h5.setForeground(QColor("#B5CEA8"))
+        self.fmt_h5.setFontWeight(QFont.Bold)
+
+        self.fmt_h6 = QTextCharFormat()
+        self.fmt_h6.setForeground(QColor("#9CDCFE"))
+        self.fmt_h6.setFontWeight(QFont.Bold)
+
+        self.fmt_blockquote = QTextCharFormat()
+        self.fmt_blockquote.setForeground(QColor("#6A9955"))
+        self.fmt_blockquote.setFontItalic(True)
+
+        self.fmt_list = QTextCharFormat()
+        self.fmt_list.setForeground(QColor("#D7BA7D"))
+        self.fmt_list.setFontWeight(QFont.Bold)
+
+        self.fmt_hr = QTextCharFormat()
+        self.fmt_hr.setForeground(QColor("#808080"))
+        self.fmt_hr.setFontWeight(QFont.Bold)
+
+        self.fmt_inline_code = QTextCharFormat()
+        self.fmt_inline_code.setForeground(QColor("#D7BA7D"))
+        self.fmt_inline_code.setFontFamily("monospace")
+
+        self.fmt_bold = QTextCharFormat()
+        self.fmt_bold.setForeground(QColor("#CE9178"))
+        self.fmt_bold.setFontWeight(QFont.Bold)
+
+        self.fmt_italic = QTextCharFormat()
+        self.fmt_italic.setForeground(QColor("#CE9178"))
+        self.fmt_italic.setFontItalic(True)
+
+        self.fmt_bold_italic = QTextCharFormat()
+        self.fmt_bold_italic.setForeground(QColor("#CE9178"))
+        self.fmt_bold_italic.setFontWeight(QFont.Bold)
+        self.fmt_bold_italic.setFontItalic(True)
+
+        self.fmt_link_text = QTextCharFormat()
+        self.fmt_link_text.setForeground(QColor("#4FC1FF"))
+        self.fmt_link_text.setFontUnderline(True)
+
+        self.fmt_link_url = QTextCharFormat()
+        self.fmt_link_url.setForeground(QColor("#9CDCFE"))
+
+        self.fmt_image = QTextCharFormat()
+        self.fmt_image.setForeground(QColor("#C586C0"))
+
+        self.fmt_autolink = QTextCharFormat()
+        self.fmt_autolink.setForeground(QColor("#4FC1FF"))
+        self.fmt_autolink.setFontUnderline(True)
+
+        self.fmt_comment = QTextCharFormat()
+        self.fmt_comment.setForeground(QColor("#6A9955"))
+        self.fmt_comment.setFontItalic(True)
+
+        self.fmt_fence = QTextCharFormat()
+        self.fmt_fence.setForeground(QColor("#569CD6"))
+        self.fmt_fence.setFontWeight(QFont.Bold)
+
+        self.fmt_code_block_fallback = QTextCharFormat()
+        self.fmt_code_block_fallback.setForeground(QColor("#DCDCAA"))
+        self.fmt_code_block_fallback.setFontFamily("monospace")
+
+        # -----------------------------
+        # Regexes
+        # -----------------------------
+        self.re_atx_headings = [
+            (re.compile(r"^\s*#(?!#)\s+.*$"), self.fmt_h1),
+            (re.compile(r"^\s*##(?!#)\s+.*$"), self.fmt_h2),
+            (re.compile(r"^\s*###(?!#)\s+.*$"), self.fmt_h3),
+            (re.compile(r"^\s*####(?!#)\s+.*$"), self.fmt_h4),
+            (re.compile(r"^\s*#####(?!#)\s+.*$"), self.fmt_h5),
+            (re.compile(r"^\s*######(?!#)\s+.*$"), self.fmt_h6),
+        ]
+
+        self.re_blockquote = re.compile(r"^\s*>\s?.*$")
+        self.re_ulist = re.compile(r"^\s*[-+*]\s+")
+        self.re_olist = re.compile(r"^\s*\d+\.\s+")
+        self.re_hr = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
+        self.re_html_comment = re.compile(r"<!--.*?-->")
+
+        self.re_inline_code = re.compile(r"`[^`\n]+`")
+
+        self.re_bold_italic = re.compile(r"(\*\*\*|___)(?=\S)(.+?)(?<=\S)\1")
+        self.re_bold = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+        self.re_italic = re.compile(r"(\*|_)(?=\S)(.+?)(?<=\S)\1")
+
+        self.re_autolink_url = re.compile(r"<https?://[^ >]+>")
+        self.re_autolink_email = re.compile(r"<[^ >@]+@[^ >]+>")
+
+        self.re_image = re.compile(r"!\[([^\]]*)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)")
+        self.re_link_inline = re.compile(r"\[([^\]]+)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)")
+        self.re_link_reference = re.compile(r"\[([^\]]+)\]\[([^\]]*)\]")
+        self.re_link_def = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s+(\S+).*$")
+
+        self.re_fence = re.compile(r"^\s*(```+|~~~+)\s*([\w#+.-]*)\s*$")
+        self.re_setext_h1 = re.compile(r"^\s*=+\s*$")
+        self.re_setext_h2 = re.compile(r"^\s*-+\s*$")
+
+        # alias map for fenced code language names
+        self.fence_language_aliases = {
+            "py": "python",
+            "python": "python",
+            "html": "html",
+            "htm": "html",
+            "xml": "xml",
+            "js": "javascript",
+            "javascript": "javascript",
+            "jsx": "javascriptreact",
+            "php": "php",
+            "c": "c",
+            "h": "c",
+            "hpp": "cpp",
+            "cc": "cpp",
+            "cxx": "cpp",
+            "cpp": "cpp",
+            "json": "json",
+            "jsonc": "jsonc",
+            "rs": "rust",
+            "rust": "rust",
+            "css": "css",
+            "scss": "scss",
+            "less": "less",
+            "sh": "shell",
+            "bash": "shell",
+            "zsh": "shell",
+            "make": "make",
+            "mk": "make",
+            "md": "markdown",
+            "markdown": "markdown",
+            "todo": "todo",
+        }
+
+    # -------------------------------------------------
+    # Helpers
+    # -------------------------------------------------
+    def _apply_match(self, m: re.Match, fmt: QTextCharFormat):
+        self.setFormat(m.start(), m.end() - m.start(), fmt)
+
+    def _apply_regex(self, text: str, pattern: re.Pattern, fmt: QTextCharFormat):
+        for m in pattern.finditer(text):
+            self._apply_match(m, fmt)
+
+    def _previous_markdown_data(self) -> MarkdownBlockData | None:
+        prev_block = self.currentBlock().previous()
+        if not prev_block.isValid():
+            return None
+        data = prev_block.userData()
+        return data if isinstance(data, MarkdownBlockData) else None
+
+    def _current_text(self) -> str:
+        return self.currentBlock().text()
+
+    def _next_text(self) -> str:
+        next_block = self.currentBlock().next()
+        if not next_block.isValid():
+            return ""
+        return next_block.text()
+
+    def _set_block_data(
+        self,
+        *,
+        in_fence: bool,
+        fence_delim: str = "",
+        fence_lang: str = "",
+        delegate_state: int = -1,
+    ):
+        self.setCurrentBlockUserData(
+            MarkdownBlockData(
+                in_fence=in_fence,
+                fence_delim=fence_delim,
+                fence_lang=fence_lang,
+                delegate_state=delegate_state,
+            )
+        )
+
+    def _is_setext_heading_text_line(self, text: str) -> QTextCharFormat | None:
+        if not text.strip():
+            return None
+        next_text = self._next_text()
+        if self.re_setext_h1.match(next_text):
+            return self.fmt_h1
+        if self.re_setext_h2.match(next_text):
+            return self.fmt_h2
+        return None
+
+    def _format_inline_links_and_images(self, text: str):
+        # images: ![alt](url)
+        for m in self.re_image.finditer(text):
+            full_start, full_end = m.span(0)
+            alt_start, alt_end = m.span(1)
+            url_start, url_end = m.span(2)
+
+            self.setFormat(full_start, full_end - full_start, self.fmt_image)
+            self.setFormat(alt_start, alt_end - alt_start, self.fmt_link_text)
+            self.setFormat(url_start, url_end - url_start, self.fmt_link_url)
+
+        # inline links: [text](url)
+        for m in self.re_link_inline.finditer(text):
+            txt_start, txt_end = m.span(1)
+            url_start, url_end = m.span(2)
+
+            self.setFormat(txt_start, txt_end - txt_start, self.fmt_link_text)
+            self.setFormat(url_start, url_end - url_start, self.fmt_link_url)
+
+        # reference links: [text][id]
+        for m in self.re_link_reference.finditer(text):
+            txt_start, txt_end = m.span(1)
+            self.setFormat(txt_start, txt_end - txt_start, self.fmt_link_text)
+
+        # link definitions: [id]: https://...
+        for m in self.re_link_def.finditer(text):
+            id_start, id_end = m.span(1)
+            url_start, url_end = m.span(2)
+            self.setFormat(id_start, id_end - id_start, self.fmt_link_text)
+            self.setFormat(url_start, url_end - url_start, self.fmt_link_url)
+
+        # autolinks
+        self._apply_regex(text, self.re_autolink_url, self.fmt_autolink)
+        self._apply_regex(text, self.re_autolink_email, self.fmt_autolink)
+
+    def _delegate_to_highlighter(
+        self,
+        text: str,
+        language: str,
+        previous_delegate_state: int,
+    ) -> int:
+        mapped_language = self.fence_language_aliases.get(language.lower(), language.lower())
+        delegate_cls = LANGUAGE_HIGHLIGHTER_MAP.get(mapped_language)
+
+        if delegate_cls is None or delegate_cls is MarkdownHighlighter:
+            self.setFormat(0, len(text), self.fmt_code_block_fallback)
+            return -1
+
+        delegate = delegate_cls(None)
+
+        applied_formats: list[tuple[int, int, QTextCharFormat]] = []
+        current_state = {"value": -1}
+
+        def fake_set_format(start: int, count: int, fmt: QTextCharFormat):
+            applied_formats.append((start, count, fmt))
+
+        def fake_previous_block_state():
+            return previous_delegate_state
+
+        def fake_set_current_block_state(state: int):
+            current_state["value"] = state
+
+        # monkeypatch instance methods/attrs used by your existing highlighters
+        delegate.setFormat = fake_set_format
+        delegate.previousBlockState = fake_previous_block_state
+        delegate.setCurrentBlockState = fake_set_current_block_state
+
+        try:
+            delegate.highlightBlock(text)
+        except Exception:
+            self.setFormat(0, len(text), self.fmt_code_block_fallback)
+            return -1
+
+        if not applied_formats:
+            self.setFormat(0, len(text), self.fmt_code_block_fallback)
+        else:
+            for start, count, fmt in applied_formats:
+                self.setFormat(start, count, fmt)
+
+        return current_state["value"]
+
+    # -------------------------------------------------
+    # Main
+    # -------------------------------------------------
+    def highlightBlock(self, text: str):
+        self.setCurrentBlockState(0)
+
+        prev_data = self._previous_markdown_data()
+
+        # ---------------------------------------------
+        # Continue fenced code block from previous line
+        # ---------------------------------------------
+        if prev_data and prev_data.in_fence:
+            fence_match = self.re_fence.match(text)
+            if fence_match and fence_match.group(1).startswith(prev_data.fence_delim[0]):
+                self.setFormat(0, len(text), self.fmt_fence)
+                self._set_block_data(in_fence=False)
+                hide_hash_for_colors(self, text)
+                return
+
+            next_delegate_state = self._delegate_to_highlighter(
+                text=text,
+                language=prev_data.fence_lang,
+                previous_delegate_state=prev_data.delegate_state,
+            )
+            self._set_block_data(
+                in_fence=True,
+                fence_delim=prev_data.fence_delim,
+                fence_lang=prev_data.fence_lang,
+                delegate_state=next_delegate_state,
+            )
+            hide_hash_for_colors(self, text)
+            return
+
+        # ---------------------------------------------
+        # Fence opening
+        # ---------------------------------------------
+        fence_match = self.re_fence.match(text)
+        if fence_match:
+            delim = fence_match.group(1)
+            lang = (fence_match.group(2) or "").strip()
+            self.setFormat(0, len(text), self.fmt_fence)
+            self._set_block_data(
+                in_fence=True,
+                fence_delim=delim,
+                fence_lang=lang,
+                delegate_state=-1,
+            )
+            hide_hash_for_colors(self, text)
+            return
+
+        self._set_block_data(in_fence=False)
+
+        # ---------------------------------------------
+        # Setext heading underline line
+        # ---------------------------------------------
+        if self.re_setext_h1.match(text) or self.re_setext_h2.match(text):
+            self.setFormat(0, len(text), self.fmt_hr)
+            hide_hash_for_colors(self, text)
+            return
+
+        # ---------------------------------------------
+        # Setext heading text line
+        # ---------------------------------------------
+        setext_fmt = self._is_setext_heading_text_line(text)
+        if setext_fmt is not None:
+            self.setFormat(0, len(text), setext_fmt)
+            hide_hash_for_colors(self, text)
+            return
+
+        # ---------------------------------------------
+        # ATX headings
+        # ---------------------------------------------
+        for pat, fmt in self.re_atx_headings:
+            m = pat.match(text)
+            if m:
+                self.setFormat(0, len(text), fmt)
+                hide_hash_for_colors(self, text)
+                return
+
+        # ---------------------------------------------
+        # Block-level markdown
+        # ---------------------------------------------
+        if self.re_blockquote.match(text):
+            self.setFormat(0, len(text), self.fmt_blockquote)
+
+        if self.re_ulist.match(text):
+            m = self.re_ulist.match(text)
+            self.setFormat(m.start(), m.end() - m.start(), self.fmt_list)
+
+        if self.re_olist.match(text):
+            m = self.re_olist.match(text)
+            self.setFormat(m.start(), m.end() - m.start(), self.fmt_list)
+
+        if self.re_hr.match(text):
+            self.setFormat(0, len(text), self.fmt_hr)
+
+        self._apply_regex(text, self.re_html_comment, self.fmt_comment)
+
+        # ---------------------------------------------
+        # Inline markdown
+        # ---------------------------------------------
+        self._apply_regex(text, self.re_inline_code, self.fmt_inline_code)
+
+        # order matters a bit here
+        self._apply_regex(text, self.re_bold_italic, self.fmt_bold_italic)
+        self._apply_regex(text, self.re_bold, self.fmt_bold)
+        self._apply_regex(text, self.re_italic, self.fmt_italic)
+
+        self._format_inline_links_and_images(text)
+
+        hide_hash_for_colors(self, text)
+
 class TodoHighlighter(QSyntaxHighlighter):
     """
     Lightweight highlighter for .todo files.
@@ -801,6 +1220,7 @@ LANGUAGE_HIGHLIGHTER_MAP: dict[str, type[QSyntaxHighlighter]] = {
     "shell": BashHighlighter,
     "make": CppHighlighter,
     "todo": TodoHighlighter,
+    "markdown": MarkdownHighlighter,
 }
 
 
