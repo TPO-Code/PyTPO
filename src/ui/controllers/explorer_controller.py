@@ -517,9 +517,158 @@ class ExplorerController:
 
         self.ide.statusBar().showMessage(f"Opened in explorer: {target_dir}", 2200)
 
+    def _file_templates_config(self) -> list[dict]:
+        raw = self.settings_manager.get("file_templates", scope_preference="ide", default=[])
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(dict(item))
+        return out
+
+    def _populate_new_file_menu(self, menu: QMenu, target_dir: str) -> None:
+        templates = self._file_templates_config()
+        if self._build_new_file_menu(menu, templates=templates, target_dir=target_dir):
+            return
+        act_fallback = menu.addAction("Empty File")
+        act_fallback.triggered.connect(lambda: self._create_new_file(target_dir))
+
+    def _build_new_file_menu(self, menu: QMenu, *, templates: list[dict], target_dir: str) -> bool:
+        added = False
+        for node in templates:
+            label = str(node.get("label") or "").strip()
+            if not label:
+                continue
+            children = node.get("children")
+            if isinstance(children, list):
+                child_menu = menu.addMenu(label)
+                child_added = self._build_new_file_menu(
+                    child_menu,
+                    templates=[dict(item) for item in children if isinstance(item, dict)],
+                    target_dir=target_dir,
+                )
+                if not child_added:
+                    menu.removeAction(child_menu.menuAction())
+                    continue
+                added = True
+                continue
+
+            template_payload = dict(node)
+            act_template = menu.addAction(label)
+            act_template.triggered.connect(
+                lambda _checked=False, payload=template_payload, folder=target_dir: self._create_file_from_template(
+                    payload,
+                    folder,
+                )
+            )
+            added = True
+        return added
+
+    @staticmethod
+    def _normalize_template_extension(default_extension: object) -> str:
+        text = str(default_extension or "").strip()
+        if not text:
+            return ""
+        ext = "." + text.lstrip(".")
+        return "" if ext == "." else ext
+
+    def _apply_optional_extension(self, name: str, default_extension: object) -> str:
+        text = str(name or "").strip()
+        ext = self._normalize_template_extension(default_extension)
+        if not text or not ext:
+            return text
+        leaf = text.replace("\\", "/").split("/")[-1]
+        if not leaf:
+            return text
+        if leaf.lower().endswith(ext.lower()):
+            return text
+        if os.path.splitext(leaf)[1]:
+            return text
+        return f"{text}{ext}"
+
+    def _create_file_in_folder(
+        self,
+        *,
+        folder_path: str,
+        relative_name: str,
+        content: str = "",
+        title: str = "Create File",
+    ) -> str | None:
+        base = self._canonical_path(folder_path)
+        if not os.path.isdir(base):
+            self._show_tree_error(title, "Target directory does not exist.")
+            return None
+
+        rel_name = str(relative_name or "").strip()
+        if not rel_name:
+            self._show_tree_error(title, "File name cannot be empty.")
+            return None
+        rel_name = rel_name.replace("\\", "/")
+
+        target = self._canonical_path(os.path.join(base, rel_name))
+        if not self._path_has_prefix(target, base):
+            self._show_tree_error(title, "File path must stay inside the selected folder.")
+            return None
+        if os.path.exists(target):
+            self._show_tree_error(title, f"Path already exists:\n{target}")
+            return None
+
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "x", encoding="utf-8") as handle:
+                handle.write(str(content))
+        except Exception as exc:
+            self._show_tree_error(title, f"Could not create file:\n{exc}")
+            return None
+
+        self.refresh_subtree(base)
+        self.tree.select_path(target)
+        if self._should_open_created_files():
+            self.open_file(target)
+        self.ide.statusBar().showMessage(f"Created file: {rel_name}", 2000)
+        self.schedule_git_status_refresh(delay_ms=120)
+        return target
+
+    def _should_open_created_files(self) -> bool:
+        return bool(self.settings_manager.get("editor.open_created_files", scope_preference="ide", default=True))
+
+    def _create_file_from_template(self, template: dict, folder_path: str) -> None:
+        label = str(template.get("label") or "New File").strip() or "New File"
+        mode = str(template.get("mode") or "prompt").strip().lower()
+        if mode not in {"prompt", "fixed"}:
+            mode = "prompt"
+
+        if mode == "fixed":
+            name = str(template.get("fixed_name") or "").strip()
+            if not name:
+                self._show_tree_error("New File", f"Template '{label}' is missing fixed_name.")
+                return
+        else:
+            default_extension = self._normalize_template_extension(template.get("default_extension"))
+            if default_extension:
+                prompt_label = f"File name ({default_extension} optional):"
+            else:
+                prompt_label = "File name:"
+            requested = self._prompt_simple_name(
+                f"New File: {label}",
+                prompt_label,
+                allow_path_separators=True,
+            )
+            if requested is None:
+                return
+            name = self._apply_optional_extension(requested, default_extension)
+
+        self._create_file_in_folder(
+            folder_path=folder_path,
+            relative_name=name,
+            content=str(template.get("content") or ""),
+            title=f"New File: {label}",
+        )
+
     def _populate_folder_context_menu(self, menu: QMenu, folder_path: str):
-        act_new_file = menu.addAction("New File...")
-        act_new_file.triggered.connect(lambda: self._create_new_file(folder_path))
+        new_file_menu = menu.addMenu("New File")
+        self._populate_new_file_menu(new_file_menu, folder_path)
 
         act_new_folder = menu.addAction("New Folder...")
         act_new_folder.triggered.connect(lambda: self._create_new_folder(folder_path))
@@ -543,7 +692,7 @@ class ExplorerController:
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(folder_path))
-        self._apply_context_shortcut(act_rename, "_act_tree_rename")
+        self._apply_context_shortcut(act_rename, "_act_rename_symbol")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(folder_path))
@@ -577,6 +726,9 @@ class ExplorerController:
         act_open = menu.addAction("Open")
         act_open.triggered.connect(lambda: self.open_file(file_path))
 
+        new_file_menu = menu.addMenu("New File")
+        self._populate_new_file_menu(new_file_menu, os.path.dirname(file_path))
+
         menu.addSeparator()
 
         act_copy = menu.addAction("Copy")
@@ -598,7 +750,7 @@ class ExplorerController:
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(file_path))
-        self._apply_context_shortcut(act_rename, "_act_tree_rename")
+        self._apply_context_shortcut(act_rename, "_act_rename_symbol")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(file_path))
@@ -631,8 +783,8 @@ class ExplorerController:
         act_refresh.triggered.connect(lambda: self.refresh_subtree(os.path.dirname(file_path)))
 
     def _populate_root_context_menu(self, menu: QMenu):
-        act_new_file = menu.addAction("New File...")
-        act_new_file.triggered.connect(lambda: self._create_new_file(self.project_root))
+        new_file_menu = menu.addMenu("New File")
+        self._populate_new_file_menu(new_file_menu, self.project_root)
 
         act_new_folder = menu.addAction("New Folder...")
         act_new_folder.triggered.connect(lambda: self._create_new_folder(self.project_root))
@@ -691,26 +843,7 @@ class ExplorerController:
         if name is None:
             return
 
-        target = self._canonical_path(os.path.join(base, name))
-        if not self._path_has_prefix(target, base):
-            self._show_tree_error("Create File", "File path must stay inside the selected folder.")
-            return
-        if os.path.exists(target):
-            self._show_tree_error("Create File", f"Path already exists:\n{target}")
-            return
-
-        try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "x", encoding="utf-8"):
-                pass
-        except Exception as exc:
-            self._show_tree_error("Create File", f"Could not create file:\n{exc}")
-            return
-
-        self.refresh_subtree(base)
-        self.tree.select_path(target)
-        self.ide.statusBar().showMessage(f"Created file: {name}", 2000)
-        self.schedule_git_status_refresh(delay_ms=120)
+        self._create_file_in_folder(folder_path=base, relative_name=name, content="", title="Create File")
 
     def _create_new_folder(self, folder_path: str):
         base = self._canonical_path(folder_path)

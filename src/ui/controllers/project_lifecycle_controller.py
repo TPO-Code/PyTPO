@@ -25,6 +25,9 @@ class ProjectLifecycleController:
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
 
+    def _should_open_created_files(self) -> bool:
+        return bool(self.settings_manager.get("editor.open_created_files", scope_preference="ide", default=True))
+
     def _ide_python_executable(self) -> str:
         # IDE relaunches must use the IDE runtime interpreter, not project interpreters.
         key = "PYTPO_IDE_PYTHON"
@@ -66,14 +69,17 @@ class ProjectLifecycleController:
                 QMessageBox.warning(self.ide, "New File", f"Could not create folder:\n{exc}")
                 return
 
+        created = False
         if not os.path.exists(cpath):
             try:
                 Path(cpath).write_text("", encoding="utf-8")
             except Exception as exc:
                 QMessageBox.warning(self.ide, "New File", f"Could not create file:\n{exc}")
                 return
+            created = True
 
-        self.open_file(cpath)
+        if created and self._should_open_created_files():
+            self.open_file(cpath)
         self.refresh_subtree(parent_dir)
         self.ide.statusBar().showMessage(f"Created file: {os.path.basename(cpath)}", 1800)
 

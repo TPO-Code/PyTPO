@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 import re
@@ -92,6 +93,66 @@ def _coerce_bool(value: object, *, default: bool = False) -> bool:
         return False
     return bool(default)
 
+
+def _normalize_file_templates_config(
+    raw_value: object,
+    *,
+    fallback: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    def _normalize_ext(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        cleaned = "." + text.lstrip(".")
+        return "" if cleaned == "." else cleaned
+
+    def _normalize_nodes(raw_nodes: object, depth: int) -> list[dict[str, Any]]:
+        if depth > 10 or not isinstance(raw_nodes, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for raw in raw_nodes:
+            if not isinstance(raw, dict):
+                continue
+            label = str(raw.get("label") or "").strip()
+            if not label:
+                continue
+            children = raw.get("children")
+            if isinstance(children, list):
+                normalized_children = _normalize_nodes(children, depth + 1)
+                if normalized_children:
+                    out.append(
+                        {
+                            "label": label,
+                            "children": normalized_children,
+                        }
+                    )
+                continue
+
+            mode = str(raw.get("mode") or "prompt").strip().lower()
+            if mode not in {"prompt", "fixed"}:
+                mode = "prompt"
+            fixed_name = str(raw.get("fixed_name") or "").strip()
+            if mode == "fixed" and not fixed_name:
+                continue
+            out.append(
+                {
+                    "label": label,
+                    "mode": mode,
+                    "fixed_name": fixed_name,
+                    "default_extension": _normalize_ext(raw.get("default_extension")),
+                    "content": str(raw.get("content") or ""),
+                }
+            )
+        return out
+
+    normalized = _normalize_nodes(raw_value, 0)
+    if normalized:
+        return normalized
+    fallback_norm = _normalize_nodes(fallback, 0)
+    if fallback_norm:
+        return fallback_norm
+    return []
+
 IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
@@ -161,6 +222,7 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "file_dialog.tint_color": "file_dialog.tint_color",
     "file_dialog.tint_strength": "file_dialog.tint_strength",
     "file_dialog.starred_paths": "file_dialog.starred_paths",
+    "file_templates": "file_templates",
     "keybindings": "keybindings",
 }
 
@@ -190,6 +252,7 @@ IDE_KEY_PREFIXES: tuple[str, ...] = (
     "git",
     "editor",
     "file_dialog",
+    "file_templates",
     "keybindings",
     "defaults",
 )
@@ -358,6 +421,7 @@ class SettingsManager:
             "git",
             "editor",
             "file_dialog",
+            "file_templates",
             "keybindings",
             "defaults",
         ):
@@ -388,6 +452,7 @@ class SettingsManager:
                 "git",
                 "editor",
                 "file_dialog",
+                "file_templates",
                 "defaults",
             }:
                 ide_data[key] = value
@@ -806,9 +871,22 @@ class SettingsManager:
             self.project_store.dirty = True
         return changed
 
+    def _ide_file_contains_top_level_key(self, key: str) -> bool:
+        if not self.ide_store.persistent:
+            return False
+        path = self.ide_path
+        if not path.exists():
+            return False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return isinstance(raw, dict) and key in raw
+
     def _normalize_ide_settings(self) -> bool:
         data = self.ide_store.data
         before = deepcopy(data)
+        file_templates_present_on_disk = self._ide_file_contains_top_level_key("file_templates")
 
         theme = data.get("theme")
         data["theme"] = str(theme).strip() if isinstance(theme, str) and theme.strip() else "Dark"
@@ -1044,6 +1122,7 @@ class SettingsManager:
             )
         except Exception:
             editor_cfg["background_tint_strength"] = 0
+        editor_cfg["open_created_files"] = _coerce_bool(editor_cfg.get("open_created_files", True), default=True)
         editor_cfg["use_tabs"] = _coerce_bool(editor_cfg.get("use_tabs", False), default=False)
         try:
             editor_cfg["indent_width"] = max(1, min(8, int(editor_cfg.get("indent_width", 4))))
@@ -1120,6 +1199,12 @@ class SettingsManager:
         file_dialog_cfg["starred_paths"] = clean_starred_paths
         data["file_dialog"] = file_dialog_cfg
 
+        file_templates_default = default_ide_settings().get("file_templates", [])
+        data["file_templates"] = _normalize_file_templates_config(
+            data.get("file_templates"),
+            fallback=file_templates_default if isinstance(file_templates_default, list) else [],
+        )
+
         defaults = data.get("defaults")
         if not isinstance(defaults, dict):
             defaults = {}
@@ -1128,7 +1213,7 @@ class SettingsManager:
         defaults["interpreter"] = str(defaults.get("interpreter") or "python")
         data["defaults"] = defaults
 
-        changed = data != before
+        changed = data != before or not file_templates_present_on_disk
         if changed:
             self.ide_store.dirty = True
         return changed

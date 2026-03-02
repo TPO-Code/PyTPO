@@ -44,6 +44,7 @@ from src.ui.interpreter_utils import (
 )
 from src.ui.settings.ai_settings_page import AIAssistSettingsPage
 from src.ui.settings.build_configs_settings_page import BuildConfigsSettingsPage
+from src.ui.settings.file_templates_settings_page import FileTemplatesSettingsPage
 from src.ui.settings.github_settings_page import GitHubSettingsPage
 from src.ui.settings.git_settings_page import GitSettingsPage
 from src.ui.settings.keybindings_settings_page import KeybindingsSettingsPage
@@ -67,6 +68,7 @@ FieldType = Literal[
     "github_editor",
     "git_editor",
     "keybindings_editor",
+    "file_templates_editor",
     "build_configs_editor",
     "python_run_configs_editor",
     "rust_run_configs_editor",
@@ -132,6 +134,7 @@ PANEL_FIELD_TYPES: set[str] = {
     "github_editor",
     "git_editor",
     "keybindings_editor",
+    "file_templates_editor",
     "build_configs_editor",
     "python_run_configs_editor",
     "rust_run_configs_editor",
@@ -342,6 +345,7 @@ class SettingsDialog(DialogWindow):
             "ide-appearance": 102,
             "ide-editor-ux": 110,
             "ide-keybindings": 111,
+            "ide-file-templates": 112,
             "ide-run": 120,
             "ide-linting": 130,
             "ide-ai-assist": 131,
@@ -606,6 +610,21 @@ class SettingsDialog(DialogWindow):
 
         if field.type == "keybindings_editor":
             page = KeybindingsSettingsPage(manager=self.manager, parent=self)
+            return FieldBinding(
+                key=field.key,
+                scope=field.scope,
+                widget=page,
+                getter=lambda: None,
+                setter=lambda _value: None,
+                on_change=lambda _cb: None,
+                validate=lambda: [],
+                persist=False,
+                has_pending_changes=page.has_pending_settings_changes,
+                apply_changes=page.apply_settings_changes,
+            )
+
+        if field.type == "file_templates_editor":
+            page = FileTemplatesSettingsPage(manager=self.manager, parent=self)
             return FieldBinding(
                 key=field.key,
                 scope=field.scope,
@@ -1593,6 +1612,28 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                 ],
             ),
             SchemaPage(
+                id="ide-file-templates",
+                category="Editor",
+                title="File Templates",
+                scope="ide",
+                description="Configure Project Explorer New File templates and menu groupings.",
+                keywords=["new file", "template", "file templates", "project explorer", "boilerplate"],
+                sections=[
+                    SchemaSection(
+                        title="New File Templates",
+                        fields=[
+                            SchemaField(
+                                id="ide-file-templates-editor",
+                                key="file_templates",
+                                label="File Templates Editor",
+                                type="file_templates_editor",
+                                scope="ide",
+                            )
+                        ],
+                    )
+                ],
+            ),
+            SchemaPage(
                 id="ide-startup-projects",
                 category="General",
                 title="Startup / Projects",
@@ -2535,6 +2576,19 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 min=1,
                                 max=8,
                                 description="Spaces per indent level and visual width for tab-aware indentation.",
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="File Creation",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-open-created-files",
+                                key="editor.open_created_files",
+                                label="Open Newly Created Files",
+                                type="checkbox",
+                                scope="ide",
+                                description="When enabled, files created from New File actions open in the editor automatically.",
                             ),
                         ],
                     ),

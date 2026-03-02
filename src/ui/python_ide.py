@@ -1820,7 +1820,7 @@ class PythonIDE(Window):
         if self._act_format_selection is not None:
             self._act_format_selection.setEnabled(has_active_editor)
         if self._act_rename_symbol is not None:
-            self._act_rename_symbol.setEnabled(has_active_editor)
+            self._act_rename_symbol.setEnabled(has_active_editor or self._is_project_tree_focus_context())
         if self._act_extract_variable is not None:
             self._act_extract_variable.setEnabled(can_extract_variable)
         if self._act_extract_method is not None:
@@ -1913,9 +1913,9 @@ class PythonIDE(Window):
             )
         tree_rename = getattr(self, "_act_tree_rename", None)
         if isinstance(tree_rename, QAction):
-            tree_rename.setShortcut(
-                ",".join(get_action_sequence(bindings, scope="general", action_id="action.rename_symbol"))
-            )
+            # Rename shortcut is owned by the global rename action, which
+            # dispatches to editor or project tree based on focus context.
+            tree_rename.setShortcut("")
         tree_delete = getattr(self, "_act_tree_delete", None)
         if isinstance(tree_delete, QAction):
             tree_delete.setShortcut(

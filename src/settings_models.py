@@ -234,6 +234,7 @@ class IdeEditorSettings(TypedDict, total=False):
     background_image_brightness: int
     background_tint_color: str
     background_tint_strength: int
+    open_created_files: bool
     use_tabs: bool
     indent_width: int
     max_occurrence_highlights: int
@@ -265,6 +266,7 @@ class IdeSettings(TypedDict, total=False):
     git: IdeGitSettings
     editor: IdeEditorSettings
     file_dialog: IdeFileDialogSettings
+    file_templates: list[dict[str, Any]]
     keybindings: dict[str, dict[str, list[str]]]
     defaults: NewProjectDefaults
 
@@ -375,6 +377,41 @@ def default_project_settings() -> ProjectSettings:
 
 
 def default_ide_settings() -> IdeSettings:
+    default_file_templates = [
+        {
+            "label": "Empty File",
+            "mode": "prompt",
+            "fixed_name": "",
+            "default_extension": "",
+            "content": "",
+        },
+        {
+            "label": "Python",
+            "children": [
+                {
+                    "label": "Empty Python File",
+                    "mode": "prompt",
+                    "fixed_name": "",
+                    "default_extension": ".py",
+                    "content": "",
+                },
+                {
+                    "label": "Python Entry Point",
+                    "mode": "prompt",
+                    "fixed_name": "",
+                    "default_extension": ".py",
+                    "content": 'if __name__ == "__main__":\n    pass\n',
+                },
+                {
+                    "label": "__init__.py",
+                    "mode": "fixed",
+                    "fixed_name": "__init__.py",
+                    "default_extension": "",
+                    "content": "",
+                },
+            ],
+        },
+    ]
     defaults: IdeSettings = {
         "theme": "Dark",
         "font_size": 10,
@@ -419,6 +456,7 @@ def default_ide_settings() -> IdeSettings:
             "background_image_brightness": 100,
             "background_tint_color": "#000000",
             "background_tint_strength": 0,
+            "open_created_files": True,
             "use_tabs": False,
             "indent_width": 4,
             "max_occurrence_highlights": 3000,
@@ -433,6 +471,7 @@ def default_ide_settings() -> IdeSettings:
             "tint_strength": 0,
             "starred_paths": [],
         },
+        "file_templates": default_file_templates,
         "keybindings": default_keybindings(),
         "run": {
             "default_cwd": ".",
