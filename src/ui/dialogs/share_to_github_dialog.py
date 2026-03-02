@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QPlainTextEdit,
     QStyle,
     QTreeWidget,
     QTreeWidgetItem,
@@ -29,6 +28,7 @@ from src.git.github_share_service import (
 )
 from src.ui.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
+from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit, SpellcheckPlainTextEdit
 
 
 class ShareToGitHubDialog(DialogWindow):
@@ -97,7 +97,7 @@ class ShareToGitHubDialog(DialogWindow):
         row_repo.addWidget(self.repo_name_edit, 1)
         root.addLayout(row_repo)
 
-        self.description_edit = QPlainTextEdit()
+        self.description_edit = SpellcheckPlainTextEdit()
         self.description_edit.setPlaceholderText("Description (optional)")
         self.description_edit.setFixedHeight(82)
         root.addWidget(QLabel("Description"))
@@ -113,7 +113,8 @@ class ShareToGitHubDialog(DialogWindow):
 
         row_commit = QHBoxLayout()
         row_commit.addWidget(QLabel("Commit Message"), 0)
-        self.commit_message_edit = QLineEdit("Initial commit")
+        self.commit_message_edit = SpellcheckLineEdit()
+        self.commit_message_edit.setText("Initial commit")
         row_commit.addWidget(self.commit_message_edit, 1)
         root.addLayout(row_commit)
 

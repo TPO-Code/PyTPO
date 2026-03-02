@@ -316,6 +316,12 @@ class DiagnosticsController:
             return
         if not isinstance(menu_obj, QMenu):
             return
+        spell_menu_hook = getattr(self.ide, "_append_spellcheck_context_actions", None)
+        if callable(spell_menu_hook):
+            try:
+                spell_menu_hook(ed, menu_obj, payload_obj)
+            except Exception:
+                pass
         self._append_tdoc_marker_rename_action_to_menu(ed_ref, menu_obj, payload_obj)
         if not ed.file_path or not self._is_python_file_path(ed.file_path):
             return

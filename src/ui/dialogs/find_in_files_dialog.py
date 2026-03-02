@@ -6,13 +6,13 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.ui.custom_dialog import DialogWindow
+from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit
 from src.ui.widgets.find_in_files_results import FindInFilesResultsWidget
 
 
@@ -26,9 +26,9 @@ class FindInFilesDialog(DialogWindow):
         self.setWindowTitle("Find in Files")
         self.resize(920, 560)
 
-        self.find_edit = QLineEdit(self)
+        self.find_edit = SpellcheckLineEdit(self)
         self.find_edit.setPlaceholderText("Find text...")
-        self.replace_edit = QLineEdit(self)
+        self.replace_edit = SpellcheckLineEdit(self)
         self.replace_edit.setPlaceholderText("Replace with...")
 
         self.case_sensitive = QCheckBox("Case sensitive", self)

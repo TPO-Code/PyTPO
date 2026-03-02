@@ -91,6 +91,20 @@ _TDOC_COMPLETION_META_ROLE = int(Qt.UserRole) + 1
 _FILE_LINK_EXTENSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
+def _build_search_line_edit(editor: "TDocEditorWidget", parent: QWidget, *, role: str) -> QLineEdit:
+    factory = getattr(editor, "create_search_line_edit", None)
+    if callable(factory):
+        try:
+            candidate = factory(parent=parent, role=role)
+        except TypeError:
+            candidate = factory(parent)
+        except Exception:
+            candidate = None
+        if isinstance(candidate, QLineEdit):
+            return candidate
+    return QLineEdit(parent)
+
+
 def _coerce_bool(value: object, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -1406,11 +1420,11 @@ class _TDocSearchBar(QFrame):
             """
         )
 
-        self.find_edit = QLineEdit(self)
+        self.find_edit = _build_search_line_edit(self._editor, self, role="find")
         self.find_edit.setPlaceholderText("Find")
         self.find_edit.installEventFilter(self)
 
-        self.replace_edit = QLineEdit(self)
+        self.replace_edit = _build_search_line_edit(self._editor, self, role="replace")
         self.replace_edit.setPlaceholderText("Replace")
         self.replace_edit.installEventFilter(self)
 
@@ -1648,6 +1662,12 @@ class TDocEditorWidget(QTextEdit):
         self._lint_diagnostics: list[dict] = []
         self._lint_line_severity: dict[int, str] = {}
         self._lint_selections: list[QTextEdit.ExtraSelection] = []
+        self._spellcheck_diagnostics: list[dict[str, int]] = []
+        self._spellcheck_selections: list[QTextEdit.ExtraSelection] = []
+        self._spellcheck_visual_cfg: dict[str, object] = {
+            "enabled": False,
+            "color": "#66C07A",
+        }
         self._overview_search_lines: set[int] = set()
         self._overview_active_search_lines: set[int] = set()
         self._overview_occurrence_lines: set[int] = set()
@@ -1741,6 +1761,7 @@ class TDocEditorWidget(QTextEdit):
         self.rename_alias = None
         self.normalize_symbol = None
         self.go_to_symbol_definition = None
+        self.populate_context_menu = None
         self._hover_tooltip_target = ""
         self._hover_tooltip_text = ""
         self._apply_viewport_margins()
@@ -2950,6 +2971,51 @@ class TDocEditorWidget(QTextEdit):
         self.viewport().update()
         self._refresh_overview_marker_area()
 
+    def update_spellcheck_visual_settings(self, cfg: dict | None) -> None:
+        payload = cfg if isinstance(cfg, dict) else {}
+        merged: dict[str, object] = {
+            "enabled": bool(payload.get("enabled", False)),
+            "color": "#66C07A",
+        }
+        color = QColor(str(payload.get("color") or "#66C07A").strip())
+        if color.isValid():
+            merged["color"] = color.name(QColor.HexRgb)
+        if merged == self._spellcheck_visual_cfg:
+            return
+        self._spellcheck_visual_cfg = merged
+        self._rebuild_spellcheck_selections()
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
+    def set_spellcheck_diagnostics(self, diagnostics: list[dict] | None) -> None:
+        normalized: list[dict[str, int]] = []
+        doc_len = len(self.toPlainText())
+        for item in diagnostics or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            start = max(0, min(start, doc_len))
+            end = max(start + 1, min(end, doc_len))
+            normalized.append({"start": start, "end": end})
+            if len(normalized) >= 3000:
+                break
+        self._spellcheck_diagnostics = normalized
+        self._rebuild_spellcheck_selections()
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
+    def clear_spellcheck_diagnostics(self) -> None:
+        self._spellcheck_diagnostics = []
+        self._spellcheck_selections = []
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
     def _severity_rank(self, severity: str) -> int:
         if severity == "error":
             return 3
@@ -2991,8 +3057,36 @@ class TDocEditorWidget(QTextEdit):
             selections.append(sel)
         self._lint_selections = selections
 
+    def _rebuild_spellcheck_selections(self) -> None:
+        enabled = bool(self._spellcheck_visual_cfg.get("enabled", False))
+        if not enabled:
+            self._spellcheck_selections = []
+            return
+        color = QColor(str(self._spellcheck_visual_cfg.get("color") or "#66C07A"))
+        if not color.isValid():
+            color = QColor("#66C07A")
+        selections: list[QTextEdit.ExtraSelection] = []
+        for item in self._spellcheck_diagnostics:
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            sel = QTextEdit.ExtraSelection()
+            cur = QTextCursor(self.document())
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.KeepAnchor)
+            sel.cursor = cur
+            sel.format.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+            sel.format.setUnderlineColor(color)
+            selections.append(sel)
+        self._spellcheck_selections = selections
+
     def _rebuild_extra_selections(self):
         extra_selections = list(self._lint_selections)
+        extra_selections.extend(self._spellcheck_selections)
         extra_selections.extend(self._occurrence_highlight_selections)
         extra_selections.extend(self._search_highlight_selections)
         if self._search_active_selection is not None:
@@ -4168,6 +4262,20 @@ class TDocEditorWidget(QTextEdit):
                 if callable(self.normalize_symbol):
                     normalize_action = menu.addAction("Normalize This Symbol")
                     normalize_action.triggered.connect(lambda: self.normalize_symbol(label))
+
+        payload = {
+            "line": int(cursor.blockNumber() + 1),
+            "column": int(cursor.positionInBlock() + 1),
+            "cursor_pos": int(cursor.position()),
+            "local_pos": QPoint(pos),
+            "global_pos": QPoint(self.viewport().mapToGlobal(pos)),
+        }
+        context_populator = getattr(self, "populate_context_menu", None)
+        if callable(context_populator):
+            try:
+                context_populator(menu, payload)
+            except Exception:
+                pass
 
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
         if chosen is action_find:

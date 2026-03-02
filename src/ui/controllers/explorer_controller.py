@@ -7,10 +7,11 @@ import shutil
 
 from PySide6.QtCore import QMimeData, QPoint, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from src.ui.dialogs.interpreter_picker_dialog import InterpreterPickerDialog
 from src.ui.dialogs.paste_conflict_dialog import confirm_multi_paste_overwrite, prompt_single_paste_conflict
+from src.ui.widgets.spellcheck_inputs import get_spellcheck_text
 
 
 class ExplorerController:
@@ -1052,7 +1053,7 @@ class ExplorerController:
         allow_path_separators: bool = False,
     ) -> str | None:
         while True:
-            value, ok = QInputDialog.getText(self.ide, title, label, text=initial)
+            value, ok = get_spellcheck_text(self.ide, title, label, text=initial)
             if not ok:
                 return None
             name = str(value).strip()

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import QFileInfo, QPoint, QSize, QStandardPaths, Qt, Signal, QEvent, QUrl, QTimer
+from PySide6.QtCore import QFileInfo, QPoint, QSize, QStandardPaths, Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -29,7 +28,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -51,6 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.custom_dialog import DialogWindow
+from src.ui.widgets.spellcheck_inputs import get_spellcheck_text
 from .config import BackgroundOptions, FileDialogResult, SidebarLocation
 
 
@@ -1381,7 +1380,7 @@ class FileDialog(DialogWindow):
     def _new_folder(self):
         if self._in_starred_view:
             return
-        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
+        name, ok = get_spellcheck_text(self, "New Folder", "Folder name:", text="New Folder")
         if not ok:
             return
         clean_name = (name or "").strip() or "New Folder"
@@ -1396,7 +1395,7 @@ class FileDialog(DialogWindow):
     def _new_file(self):
         if self._in_starred_view:
             return
-        name, ok = QInputDialog.getText(self, "New File", "File name:", text="New File.txt")
+        name, ok = get_spellcheck_text(self, "New File", "File name:", text="New File.txt")
         if not ok:
             return
         clean_name = (name or "").strip() or "New File.txt"

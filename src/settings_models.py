@@ -24,7 +24,22 @@ class RunSettings(TypedDict, total=False):
     clear_output_before_run: bool
     focus_output_on_run: bool
     clear_terminal_before_run: bool
+    terminal_commands: "TerminalCommandsSettings"
     cmake: dict[str, Any]
+
+
+class TerminalCommandEntry(TypedDict, total=False):
+    label: str
+    cmd: str
+    params: list[str]
+    cwd: str
+    env: dict[str, str]
+    dryrun: bool
+
+
+class TerminalCommandsSettings(TypedDict, total=False):
+    quick_commands: list[TerminalCommandEntry]
+    templates: list[TerminalCommandEntry]
 
 
 class CMakeBuildConfig(TypedDict, total=False):
@@ -228,6 +243,7 @@ class IdeGitSettings(TypedDict, total=False):
 
 
 class IdeEditorSettings(TypedDict, total=False):
+    spellcheck: "IdeSpellcheckSettings"
     background_color: str
     background_image_path: str
     background_image_scale_mode: str
@@ -240,6 +256,14 @@ class IdeEditorSettings(TypedDict, total=False):
     max_occurrence_highlights: int
     occurrence_highlight_alpha: int
     word_wrap_enabled_file_types: list[str]
+
+
+class IdeSpellcheckSettings(TypedDict, total=False):
+    enabled: bool
+    color: str
+    debounce_ms: int
+    check_identifiers_in_code: bool
+    max_highlights: int
 
 
 class IdeFileDialogSettings(TypedDict, total=False):
@@ -450,6 +474,13 @@ def default_ide_settings() -> IdeSettings:
             "untracked_color": "#c8c8c8",
         },
         "editor": {
+            "spellcheck": {
+                "enabled": False,
+                "color": "#66C07A",
+                "debounce_ms": 420,
+                "check_identifiers_in_code": False,
+                "max_highlights": 1400,
+            },
             "background_color": "#252526",
             "background_image_path": "",
             "background_image_scale_mode": "stretch",
@@ -480,6 +511,10 @@ def default_ide_settings() -> IdeSettings:
             "clear_output_before_run": True,
             "focus_output_on_run": True,
             "clear_terminal_before_run": True,
+            "terminal_commands": {
+                "quick_commands": [],
+                "templates": [],
+            },
             "cmake": {
                 "build_dir": "build",
                 "build_type": "Debug",

@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QPlainTextEdit,
     QSpinBox,
     QStyle,
     QTreeWidget,
@@ -34,6 +33,7 @@ from src.git.github_release_service import (
 )
 from src.ui.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
+from src.ui.widgets.spellcheck_inputs import SpellcheckPlainTextEdit
 
 _BUILD_TAG_RE = re.compile(
     r"^v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\+build\.(?P<build>[0-9]+)$"
@@ -182,7 +182,7 @@ class GitCommitDialog(DialogWindow):
         selection_row.addStretch(1)
         root.addLayout(selection_row)
 
-        self.message_edit = QPlainTextEdit()
+        self.message_edit = SpellcheckPlainTextEdit()
         self.message_edit.setPlaceholderText("Commit message")
         self.message_edit.setFixedHeight(120)
         root.addWidget(self.message_edit)
@@ -219,7 +219,7 @@ class GitCommitDialog(DialogWindow):
         title_row.addWidget(self.release_title_edit, 1)
         release_layout.addLayout(title_row)
 
-        self.release_notes_edit = QPlainTextEdit()
+        self.release_notes_edit = SpellcheckPlainTextEdit()
         self.release_notes_edit.setPlaceholderText("Release notes (optional)")
         self.release_notes_edit.setFixedHeight(84)
         release_layout.addWidget(self.release_notes_edit)

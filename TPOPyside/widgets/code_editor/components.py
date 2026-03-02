@@ -23,6 +23,21 @@ from .helpers import _COMPLETION_ROW_META_ROLE
 if TYPE_CHECKING:
     from .editor import CodeEditor
 
+
+def _build_search_line_edit(editor: "CodeEditor", parent: QWidget, *, role: str) -> QLineEdit:
+    factory = getattr(editor, "create_search_line_edit", None)
+    if callable(factory):
+        try:
+            candidate = factory(parent=parent, role=role)
+        except TypeError:
+            candidate = factory(parent)
+        except Exception:
+            candidate = None
+        if isinstance(candidate, QLineEdit):
+            return candidate
+    return QLineEdit(parent)
+
+
 class _CompletionItemDelegate(QStyledItemDelegate):
     def __init__(self, editor: "CodeEditor"):
         super().__init__(editor)
@@ -118,11 +133,11 @@ class _EditorSearchBar(QFrame):
             """
         )
 
-        self.find_edit = QLineEdit(self)
+        self.find_edit = _build_search_line_edit(self._editor, self, role="find")
         self.find_edit.setPlaceholderText("Find")
         self.find_edit.installEventFilter(self)
 
-        self.replace_edit = QLineEdit(self)
+        self.replace_edit = _build_search_line_edit(self._editor, self, role="replace")
         self.replace_edit.setPlaceholderText("Replace")
         self.replace_edit.installEventFilter(self)
 

@@ -27,6 +27,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygon,
     QShortcut,
+    QTextCharFormat,
     QTextCursor,
     QTextFormat,
 )
@@ -144,6 +145,12 @@ class CodeEditor(QPlainTextEdit):
         self._lint_diagnostics: list[dict] = []
         self._lint_line_severity: dict[int, str] = {}
         self._lint_selections: list[QTextEdit.ExtraSelection] = []
+        self._spellcheck_diagnostics: list[dict[str, int]] = []
+        self._spellcheck_selections: list[QTextEdit.ExtraSelection] = []
+        self._spellcheck_visual_cfg: dict[str, object] = {
+            "enabled": False,
+            "color": "#66C07A",
+        }
         self._lint_visual_cfg = dict(_LINT_VISUAL_DEFAULTS)
         self._overview_cfg = dict(_OVERVIEW_MARKER_DEFAULTS)
         self._overview_search_lines: set[int] = set()
@@ -2247,6 +2254,51 @@ class CodeEditor(QPlainTextEdit):
         self.viewport().update()
         self._refresh_overview_marker_area()
 
+    def update_spellcheck_visual_settings(self, cfg: dict | None) -> None:
+        payload = cfg if isinstance(cfg, dict) else {}
+        merged: dict[str, object] = {
+            "enabled": bool(payload.get("enabled", False)),
+            "color": "#66C07A",
+        }
+        color = QColor(str(payload.get("color") or "#66C07A").strip())
+        if color.isValid():
+            merged["color"] = color.name(QColor.HexRgb)
+        if merged == self._spellcheck_visual_cfg:
+            return
+        self._spellcheck_visual_cfg = merged
+        self._rebuild_spellcheck_selections()
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
+    def set_spellcheck_diagnostics(self, diagnostics: list[dict] | None) -> None:
+        normalized: list[dict[str, int]] = []
+        doc_len = len(self.toPlainText())
+        for item in diagnostics or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            start = max(0, min(start, doc_len))
+            end = max(start + 1, min(end, doc_len))
+            normalized.append({"start": start, "end": end})
+            if len(normalized) >= 3000:
+                break
+        self._spellcheck_diagnostics = normalized
+        self._rebuild_spellcheck_selections()
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
+    def clear_spellcheck_diagnostics(self) -> None:
+        self._spellcheck_diagnostics = []
+        self._spellcheck_selections = []
+        self._rebuild_extra_selections()
+        self.viewport().update()
+
     def _severity_rank(self, severity: str) -> int:
         if severity == "error":
             return 3
@@ -2269,6 +2321,33 @@ class CodeEditor(QPlainTextEdit):
                 sel.format.setBackground(self._lint_line_background_color(severity))
                 selections.append(sel)
         self._lint_selections = selections
+
+    def _rebuild_spellcheck_selections(self) -> None:
+        enabled = bool(self._spellcheck_visual_cfg.get("enabled", False))
+        if not enabled:
+            self._spellcheck_selections = []
+            return
+        color = QColor(str(self._spellcheck_visual_cfg.get("color") or "#66C07A"))
+        if not color.isValid():
+            color = QColor("#66C07A")
+        selections: list[QTextEdit.ExtraSelection] = []
+        for item in self._spellcheck_diagnostics:
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except Exception:
+                continue
+            if start < 0 or end <= start:
+                continue
+            sel = QTextEdit.ExtraSelection()
+            cur = QTextCursor(self.document())
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.KeepAnchor)
+            sel.cursor = cur
+            sel.format.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+            sel.format.setUnderlineColor(color)
+            selections.append(sel)
+        self._spellcheck_selections = selections
 
     def _document_position_for_line_column(self, line: int, column: int) -> int:
         block = self.document().findBlockByNumber(max(0, int(line) - 1))
@@ -2422,6 +2501,7 @@ class CodeEditor(QPlainTextEdit):
 
     def _rebuild_extra_selections(self):
         extraSelections = list(self._lint_selections)
+        extraSelections.extend(self._spellcheck_selections)
         extraSelections.extend(self._occurrence_highlight_selections)
         extraSelections.extend(self._search_highlight_selections)
         if self._search_active_selection is not None:

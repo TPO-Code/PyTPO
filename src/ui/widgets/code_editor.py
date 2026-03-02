@@ -7,11 +7,14 @@ behavior can be added without coupling ``TPOPyside`` to the IDE.
 
 import re
 
+from PySide6.QtWidgets import QLineEdit
+
 from TPOPyside.widgets.code_editor import (
     CodeEditor as BaseCodeEditor,
     _extract_compact_signature,
     _normalize_signature_text,
 )
+from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit
 
 
 class CodeEditor(BaseCodeEditor):
@@ -44,6 +47,10 @@ class CodeEditor(BaseCodeEditor):
                 if value.lower() == suffix.lower():
                     return label
         return value
+
+    def create_search_line_edit(self, *, parent=None, role: str = "find") -> QLineEdit:
+        _ = role
+        return SpellcheckLineEdit(parent)
 
     def _completion_matches_prefix(self, item: dict, prefix: str) -> bool:
         if bool(item.get("is_ai_suggestion")):

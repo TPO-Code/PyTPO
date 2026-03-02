@@ -516,7 +516,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._btn_run = QtWidgets.QToolButton(self)
         self._btn_run.setObjectName("TerminalRunButton")
         self._btn_run.setProperty("surface", "terminal-run-button")
-        self._btn_run.setText("Run")
+        self._btn_run.setText("Quick Commands")
         self._btn_run.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
         self._run_menu = QtWidgets.QMenu(self._btn_run)
         self._run_menu.setObjectName("TerminalRunMenu")
@@ -528,21 +528,56 @@ class TerminalWidget(QtWidgets.QWidget):
 
     def _rebuild_run_menu(self):
         self._run_menu.clear()
+        has_entries = False
         if self._quick_cmds:
-            m_quick = self._run_menu.addMenu("Quick Commands")
-            for spec in self._quick_cmds:
-                act = m_quick.addAction(spec.label)
-                act.triggered.connect(lambda _, s=spec: self._execute_spec(s))
+            self._populate_grouped_command_menu(self._run_menu, self._quick_cmds)
+            has_entries = True
         if self._templates:
-            if self._quick_cmds:
+            if has_entries:
                 self._run_menu.addSeparator()
             m_tpl = self._run_menu.addMenu("Templates")
-            for spec in self._templates:
-                act = m_tpl.addAction(spec.label)
-                act.triggered.connect(lambda _, s=spec: self._execute_spec(s))
-        if self._quick_cmds or self._templates:
+            self._populate_grouped_command_menu(m_tpl, self._templates)
+            has_entries = True
+        if has_entries:
             self._run_menu.addSeparator()
         self._run_menu.addAction("Edit…").triggered.connect(self.open_commands_editor)
+
+    @staticmethod
+    def _label_segments(label: str) -> List[str]:
+        text = str(label or "").replace("\\", "/")
+        parts = [part.strip() for part in text.split("/") if part.strip()]
+        if parts:
+            return parts
+        fallback = str(label or "").strip()
+        return [fallback] if fallback else ["Command"]
+
+    @classmethod
+    def _command_sort_key(cls, spec: CommandSpec) -> tuple[str, str]:
+        path = "/".join(cls._label_segments(spec.label)).lower()
+        return path, str(spec.cmd or "").lower()
+
+    def _sorted_specs(self, specs: List[CommandSpec]) -> List[CommandSpec]:
+        return sorted(list(specs or []), key=self._command_sort_key)
+
+    def _populate_grouped_command_menu(self, root_menu: QtWidgets.QMenu, specs: List[CommandSpec]) -> None:
+        submenus: Dict[tuple[str, ...], QtWidgets.QMenu] = {(): root_menu}
+
+        def _ensure_path(path: tuple[str, ...]) -> QtWidgets.QMenu:
+            cached = submenus.get(path)
+            if cached is not None:
+                return cached
+            parent = _ensure_path(path[:-1])
+            node = parent.addMenu(path[-1])
+            submenus[path] = node
+            return node
+
+        for spec in self._sorted_specs(specs):
+            parts = self._label_segments(spec.label)
+            branch = tuple(parts[:-1])
+            leaf_label = parts[-1]
+            target_menu = _ensure_path(branch)
+            act = target_menu.addAction(leaf_label)
+            act.triggered.connect(lambda _, s=spec: self._execute_spec(s))
 
     def _coerce_command_specs(self, entries) -> List[CommandSpec]:
         specs: List[CommandSpec] = []
@@ -586,17 +621,21 @@ class TerminalWidget(QtWidgets.QWidget):
             )
 
     def _run_last_or_first(self):
-        spec = self._last_used or (self._quick_cmds[0] if self._quick_cmds else (self._templates[0] if self._templates else None))
+        first_quick = self._sorted_specs(self._quick_cmds)
+        first_tpl = self._sorted_specs(self._templates)
+        spec = self._last_used or (first_quick[0] if first_quick else (first_tpl[0] if first_tpl else None))
         if spec:
             self._execute_spec(spec)
 
     def add_quick_command(self, label: str, cmd: str, *, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None):
         self._quick_cmds.append(CommandSpec(label, cmd, [], cwd, env or {}))
+        self._quick_cmds = self._sorted_specs(self._quick_cmds)
         self._rebuild_run_menu()
 
     def add_template(self, label: str, cmd: str, *, params: Optional[List[str]] = None,
                      cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None, dryrun: bool = False):
         self._templates.append(CommandSpec(label, cmd, params or [], cwd, env or {}, dryrun))
+        self._templates = self._sorted_specs(self._templates)
         self._rebuild_run_menu()
 
     def set_commands(
@@ -608,9 +647,11 @@ class TerminalWidget(QtWidgets.QWidget):
         updated = False
         if quick_commands is not None:
             self._quick_cmds = self._coerce_command_specs(quick_commands)
+            self._quick_cmds = self._sorted_specs(self._quick_cmds)
             updated = True
         if templates is not None:
             self._templates = self._coerce_command_specs(templates)
+            self._templates = self._sorted_specs(self._templates)
             updated = True
         if updated:
             self._last_used = None

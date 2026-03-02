@@ -31,6 +31,8 @@ IDE_COMPLETION_KEYS: set[str] = {
     "show_doc_tooltip",
     "doc_tooltip_delay_ms",
 }
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _normalize_query_driver_text(value: object) -> str:
@@ -92,6 +94,67 @@ def _coerce_bool(value: object, *, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "n", ""}:
         return False
     return bool(default)
+
+
+def _normalize_terminal_command_entries(raw_entries: object, *, allow_params: bool) -> list[dict[str, Any]]:
+    if not isinstance(raw_entries, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            continue
+        label_parts = [
+            part.strip()
+            for part in str(raw.get("label") or "").replace("\\", "/").split("/")
+            if part.strip()
+        ]
+        label = "/".join(label_parts)
+        cmd = str(raw.get("cmd") or "").strip()
+        if not label or not cmd:
+            continue
+
+        cwd = str(raw.get("cwd") or "").strip()
+        env_raw = raw.get("env")
+        env: dict[str, str] = {}
+        if isinstance(env_raw, dict):
+            for key_obj, val_obj in env_raw.items():
+                key = str(key_obj or "").strip()
+                if not key or not _ENV_KEY_RE.match(key):
+                    continue
+                env[key] = str(val_obj or "")
+
+        entry: dict[str, Any] = {
+            "label": label,
+            "cmd": cmd,
+            "cwd": cwd,
+            "env": env,
+            "dryrun": bool(raw.get("dryrun", False)),
+            "params": [],
+        }
+
+        if allow_params:
+            params_raw = raw.get("params")
+            params: list[str] = []
+            seen: set[str] = set()
+            if isinstance(params_raw, list):
+                for item in params_raw:
+                    param = str(item or "").strip()
+                    if not param or not _PARAM_NAME_RE.match(param):
+                        continue
+                    if param in seen:
+                        continue
+                    seen.add(param)
+                    params.append(param)
+            entry["params"] = params
+
+        out.append(entry)
+    out.sort(
+        key=lambda item: (
+            str(item.get("label") or "").lower(),
+            str(item.get("cmd") or "").lower(),
+        )
+    )
+    return out
 
 
 def _normalize_file_templates_config(
@@ -918,6 +981,20 @@ class SettingsManager:
         ):
             run[bool_key] = bool(run.get(bool_key, True))
 
+        terminal_commands = run.get("terminal_commands")
+        if not isinstance(terminal_commands, dict):
+            terminal_commands = {}
+        run["terminal_commands"] = {
+            "quick_commands": _normalize_terminal_command_entries(
+                terminal_commands.get("quick_commands"),
+                allow_params=False,
+            ),
+            "templates": _normalize_terminal_command_entries(
+                terminal_commands.get("templates"),
+                allow_params=True,
+            ),
+        }
+
         cmake = run.get("cmake")
         if not isinstance(cmake, dict):
             cmake = {}
@@ -1153,6 +1230,30 @@ class SettingsManager:
                 seen_wrap_types.add(key)
                 clean_wrap_types.append(key)
         editor_cfg["word_wrap_enabled_file_types"] = clean_wrap_types
+
+        spell_cfg = editor_cfg.get("spellcheck")
+        if not isinstance(spell_cfg, dict):
+            spell_cfg = {}
+        spell_defaults = default_ide_settings()["editor"]["spellcheck"]
+        spell_cfg = deep_merge_defaults(spell_cfg, spell_defaults)
+        spell_cfg["enabled"] = _coerce_bool(spell_cfg.get("enabled", False), default=False)
+        color = str(spell_cfg.get("color") or spell_defaults.get("color", "#66C07A")).strip()
+        if not re.match(r"^#[0-9a-fA-F]{6}$", color):
+            color = str(spell_defaults.get("color", "#66C07A"))
+        spell_cfg["color"] = color
+        try:
+            spell_cfg["debounce_ms"] = max(120, min(2400, int(spell_cfg.get("debounce_ms", 420))))
+        except Exception:
+            spell_cfg["debounce_ms"] = 420
+        spell_cfg["check_identifiers_in_code"] = _coerce_bool(
+            spell_cfg.get("check_identifiers_in_code", False),
+            default=False,
+        )
+        try:
+            spell_cfg["max_highlights"] = max(100, min(5000, int(spell_cfg.get("max_highlights", 1400))))
+        except Exception:
+            spell_cfg["max_highlights"] = 1400
+        editor_cfg["spellcheck"] = spell_cfg
         data["editor"] = editor_cfg
 
         file_dialog_cfg = data.get("file_dialog")

@@ -2580,6 +2580,54 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                         ],
                     ),
                     SchemaSection(
+                        title="Spell Check",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-spellcheck-enabled",
+                                key="editor.spellcheck.enabled",
+                                label="Enable Spell Check",
+                                type="checkbox",
+                                scope="ide",
+                                description="Checks only the active editor tab.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-spellcheck-color",
+                                key="editor.spellcheck.color",
+                                label="Squiggle Color",
+                                type="color",
+                                scope="ide",
+                                description="Hex color like #66C07A.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-spellcheck-debounce",
+                                key="editor.spellcheck.debounce_ms",
+                                label="Debounce (ms)",
+                                type="spin",
+                                scope="ide",
+                                min=120,
+                                max=2400,
+                                description="Delay before re-checking while typing.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-spellcheck-identifiers",
+                                key="editor.spellcheck.check_identifiers_in_code",
+                                label="Check Code Identifiers",
+                                type="checkbox",
+                                scope="ide",
+                                description="When disabled, code checks comments and string literals only.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-spellcheck-max-highlights",
+                                key="editor.spellcheck.max_highlights",
+                                label="Max Misspelling Squiggles",
+                                type="spin",
+                                scope="ide",
+                                min=100,
+                                max=5000,
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
                         title="File Creation",
                         fields=[
                             SchemaField(

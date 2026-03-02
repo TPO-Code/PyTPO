@@ -57,19 +57,21 @@ from src.ui.controllers import (
 from src.ui.custom_window import Window
 from src.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from src.ui.dialogs.file_dialog_bridge import get_save_file_name
+from src.ui.dialogs.terminal_commands_dialog import TerminalCommandsDialog
 from src.ui.settings_dialog import SettingsDialog as ScopedSettingsDialog, create_default_settings_schema
 
 from src.ui.editor_workspace import EditorTabs, EditorWidget, EditorWorkspace
 from src.ui.lint_manager import LintManager
+from src.ui.spellcheck_manager import SpellcheckManager
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
+from src.ui.widgets.tdoc_document_widget import TDocDocumentWidget
 from src.ui.widgets.usages_panel import UsagesPanel
 from src.ui.widgets.welcome_screen import WelcomeScreenWidget
 from TPOPyside.widgets.tdoc_support import (
     PROJECT_MARKER_FILENAME,
-    TDocDocumentWidget,
     TDocProjectIndex,
     collect_tdoc_diagnostics,
     is_tdoc_document_path,
@@ -536,6 +538,8 @@ class PythonIDE(Window):
         self._ai_recent_files: list[str] = []
         self._toolbar_ai_checkbox: QCheckBox | None = None
         self._toolbar_ai_toggle_guard = False
+        self._toolbar_spell_checkbox: QCheckBox | None = None
+        self._toolbar_spell_toggle_guard = False
         self._lsp_noise_notice_shown = False
         self._clangd_std_header_prompt_keys: set[str] = set()
         self._clangd_repair_active = False
@@ -599,6 +603,7 @@ class PythonIDE(Window):
         self.theme_controller = ThemeController(self)
         self.search_controller = SearchController(self, self.project_context, parent=self)
         self.diagnostics_controller = DiagnosticsController(self, self.project_context)
+        self.spellcheck_manager = SpellcheckManager(self)
         self.action_registry = ActionRegistry
         self.explorer_controller = ExplorerController(self, None)
 
@@ -682,6 +687,7 @@ class PythonIDE(Window):
         elif self.console_tabs is not None and self.console_tabs.count() == 0:
             self.new_terminal_tab()
         self._refresh_runtime_action_states()
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._schedule_symbol_outline_refresh(immediate=True)
 
         self._startup_running = False
@@ -1458,7 +1464,16 @@ class PythonIDE(Window):
         self._toolbar_ai_checkbox = ai_chk
         self.add_window_right_control(ai_chk)
 
+        spell_chk = QCheckBox("Spell Check", self)
+        spell_chk.setObjectName("TitleBarSpellcheckToggle")
+        spell_chk.setFixedHeight(28)
+        spell_chk.setToolTip("Enable spell checking for the active editor tab")
+        spell_chk.toggled.connect(self._on_titlebar_spell_toggle_changed)
+        self._toolbar_spell_checkbox = spell_chk
+        self.add_window_right_control(spell_chk)
+
         self._sync_titlebar_ai_toggle()
+        self._sync_titlebar_spell_toggle()
         self._apply_custom_toolbar_window_settings()
 
     def _running_script_sessions(self):
@@ -1500,6 +1515,7 @@ class PythonIDE(Window):
 
     def _on_global_focus_changed(self, _old, _new) -> None:
         self._refresh_runtime_action_states()
+        self.spellcheck_manager.refresh_active_widget(immediate=False)
         self._schedule_symbol_outline_refresh(immediate=True)
 
     def _bind_editor_tab_action_hooks(self) -> None:
@@ -1513,6 +1529,7 @@ class PythonIDE(Window):
 
     def _on_editor_tabs_current_changed(self, _idx: int) -> None:
         self._refresh_runtime_action_states()
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._schedule_symbol_outline_refresh(immediate=True)
 
     def _on_outline_dock_visibility_changed(self, visible: bool) -> None:
@@ -1852,6 +1869,8 @@ class PythonIDE(Window):
             self._toolbar_controls_host.setVisible(project_loaded)
         if self._toolbar_ai_checkbox is not None:
             self._toolbar_ai_checkbox.setVisible(project_loaded)
+        if self._toolbar_spell_checkbox is not None:
+            self._toolbar_spell_checkbox.setVisible(project_loaded)
 
     def _update_toolbar_run_controls(self) -> None:
         self.execution_controller._update_toolbar_run_controls()
@@ -2013,6 +2032,15 @@ class PythonIDE(Window):
             return
         try:
             ed.update_lint_visual_settings(self._lint_visual_config())
+        except Exception:
+            pass
+
+    def _apply_spellcheck_visual_settings_to_widget(self, widget: object) -> None:
+        setter = getattr(widget, "update_spellcheck_visual_settings", None)
+        if not callable(setter):
+            return
+        try:
+            setter(self.spellcheck_manager.visual_settings_payload())
         except Exception:
             pass
 
@@ -2263,6 +2291,7 @@ class PythonIDE(Window):
         self.diagnostics_controller._attach_editor_lint_hooks(ed)
         self._apply_editor_indent_settings_to_editor(ed)
         self._apply_editor_overview_settings_to_editor(ed)
+        self._apply_spellcheck_visual_settings_to_widget(ed)
         self._apply_word_wrap_to_editor(ed)
         self._attach_editor_cpp_hooks(ed)
         self._attach_editor_rust_hooks(ed)
@@ -2282,6 +2311,7 @@ class PythonIDE(Window):
             self._request_lint_for_editor(ed, reason="idle", include_source_if_modified=True)
         elif self._is_tdoc_related_path(ed.file_path):
             self._schedule_tdoc_validation(ed.file_path)
+        self.spellcheck_manager.on_document_text_changed(ed)
         self._request_completion_for_editor(ed, reason="auto")
         self._request_ai_inline_for_editor(ed, reason="passive")
 
@@ -2309,6 +2339,19 @@ class PythonIDE(Window):
 
     def _on_editor_context_menu_about_to_show(self, ed_ref, menu_obj: object, payload_obj: object):
         self.diagnostics_controller._on_editor_context_menu_about_to_show(ed_ref, menu_obj, payload_obj)
+
+    def _append_spellcheck_context_actions(self, widget_obj: object, menu_obj: object, payload_obj: object) -> None:
+        manager = getattr(self, "spellcheck_manager", None)
+        add_actions = getattr(manager, "append_context_menu_actions", None)
+        if not callable(add_actions):
+            return
+        add_actions(widget_obj, menu_obj, payload_obj)
+
+    def _on_tdoc_context_menu_about_to_show(self, widget_ref, menu_obj: object, payload_obj: object) -> None:
+        widget = widget_ref() if callable(widget_ref) else widget_ref
+        if not isinstance(widget, TDocDocumentWidget):
+            return
+        self._append_spellcheck_context_actions(widget, menu_obj, payload_obj)
 
     def _on_editor_word_wrap_preference_changed(self, ed_ref, payload_obj: object) -> None:
         ed = ed_ref() if callable(ed_ref) else ed_ref
@@ -3434,6 +3477,30 @@ class PythonIDE(Window):
         state = "enabled" if checked else "disabled"
         self.statusBar().showMessage(f"AI Assist {state}.", 1600)
 
+    def _sync_titlebar_spell_toggle(self) -> None:
+        chk = self._toolbar_spell_checkbox
+        if chk is None:
+            return
+        enabled = bool(self.spellcheck_manager.is_enabled())
+        self._toolbar_spell_toggle_guard = True
+        try:
+            chk.setChecked(enabled)
+        finally:
+            self._toolbar_spell_toggle_guard = False
+
+    def _on_titlebar_spell_toggle_changed(self, checked: bool) -> None:
+        if self._toolbar_spell_toggle_guard:
+            return
+        actual = self.spellcheck_manager.set_enabled(bool(checked), persist=True)
+        self._toolbar_spell_toggle_guard = True
+        try:
+            if self._toolbar_spell_checkbox is not None and self._toolbar_spell_checkbox.isChecked() != actual:
+                self._toolbar_spell_checkbox.setChecked(actual)
+        finally:
+            self._toolbar_spell_toggle_guard = False
+        state = "enabled" if actual else "disabled"
+        self.statusBar().showMessage(f"Spell check {state}.", 1600)
+
     def _projects_config(self) -> dict:
         cfg = self.config.get("projects", {})
         return cfg if isinstance(cfg, dict) else {}
@@ -3700,7 +3767,112 @@ class PythonIDE(Window):
         )
 
     def _style_terminal_widget(self, terminal: TerminalWidget):
-        pass
+        self._apply_terminal_commands_to_terminal(terminal)
+
+    @staticmethod
+    def _normalize_terminal_run_commands(entries: object, *, allow_params: bool) -> list[dict]:
+        if not isinstance(entries, list):
+            return []
+        out: list[dict] = []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            label_parts = [
+                part.strip()
+                for part in str(raw.get("label") or "").replace("\\", "/").split("/")
+                if part.strip()
+            ]
+            label = "/".join(label_parts)
+            cmd = str(raw.get("cmd") or "").strip()
+            if not label or not cmd:
+                continue
+            payload = {
+                "label": label,
+                "cmd": cmd,
+                "cwd": str(raw.get("cwd") or "").strip(),
+                "env": raw.get("env") if isinstance(raw.get("env"), dict) else {},
+                "dryrun": bool(raw.get("dryrun", False)),
+                "params": [],
+            }
+            if allow_params:
+                params_raw = raw.get("params")
+                payload["params"] = (
+                    [str(item).strip() for item in params_raw if str(item).strip()]
+                    if isinstance(params_raw, list)
+                    else []
+                )
+            out.append(payload)
+        out.sort(
+            key=lambda item: (
+                str(item.get("label") or "").lower(),
+                str(item.get("cmd") or "").lower(),
+            )
+        )
+        return out
+
+    def _terminal_commands_config(self) -> dict[str, list[dict]]:
+        raw = self.settings_manager.get(
+            "run.terminal_commands",
+            scope_preference="ide",
+            default={},
+        )
+        cfg = raw if isinstance(raw, dict) else {}
+        return {
+            "quick_commands": self._normalize_terminal_run_commands(
+                cfg.get("quick_commands"),
+                allow_params=False,
+            ),
+            "templates": self._normalize_terminal_run_commands(
+                cfg.get("templates"),
+                allow_params=True,
+            ),
+        }
+
+    def _apply_terminal_commands_to_terminal(self, terminal: TerminalWidget | None) -> None:
+        if not isinstance(terminal, TerminalWidget):
+            return
+        cfg = self._terminal_commands_config()
+        terminal.set_commands(
+            quick_commands=cfg.get("quick_commands", []),
+            templates=cfg.get("templates", []),
+        )
+        terminal.set_commands_editor(self._open_terminal_commands_editor)
+
+    def _apply_terminal_commands_to_all_terminals(self) -> None:
+        tabs = self.console_tabs
+        if not isinstance(tabs, QTabWidget):
+            return
+        for idx in range(tabs.count()):
+            widget = tabs.widget(idx)
+            if not isinstance(widget, TerminalWidget):
+                continue
+            self._apply_terminal_commands_to_terminal(widget)
+
+    def _open_terminal_commands_editor(self) -> None:
+        current = self._terminal_commands_config()
+        dialog = TerminalCommandsDialog(
+            initial_quick=current.get("quick_commands", []),
+            initial_templates=current.get("templates", []),
+            use_native_chrome=self.use_native_chrome,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        payload = {
+            "quick_commands": dialog.quick_commands(),
+            "templates": dialog.templates(),
+        }
+        self.settings_manager.set("run.terminal_commands", payload, "ide")
+        try:
+            self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Terminal Commands", f"Could not save terminal commands:\n{exc}")
+            return
+
+        self.config = self.settings_manager.export_legacy_config()
+        self._apply_terminal_commands_to_all_terminals()
+        self.statusBar().showMessage("Terminal commands updated.", 2000)
 
     def _set_active_terminal(self, terminal: TerminalWidget | None):
         self.terminal = terminal
@@ -4366,6 +4538,7 @@ class PythonIDE(Window):
         self._apply_editor_background_to_editor(widget)
         self._apply_editor_indent_settings_to_editor(widget)
         self._apply_editor_overview_settings_to_editor(widget)
+        self._apply_spellcheck_visual_settings_to_widget(widget)
         try:
             widget.set_editor_font_preferences(
                 family=str(self.font_family or "").strip(),
@@ -4392,6 +4565,9 @@ class PythonIDE(Window):
         widget.go_to_symbol_definition = lambda symbol, w=ref: self._on_tdoc_symbol_definition_requested(w, symbol)
         widget.rename_alias = lambda label, w=ref: self._on_tdoc_rename_alias_requested(w, label)
         widget.normalize_symbol = lambda label, w=ref: self._on_tdoc_normalize_symbol_requested(w, label)
+        widget.populate_context_menu = lambda menu, payload, w=ref: self._on_tdoc_context_menu_about_to_show(
+            w, menu, payload
+        )
         font_step_signal = getattr(widget, "editorFontSizeStepRequested", None)
         if font_step_signal is not None and hasattr(font_step_signal, "connect"):
             font_step_signal.connect(lambda step, w=ref: self._on_editor_font_size_step_requested(w, step))
@@ -4407,11 +4583,13 @@ class PythonIDE(Window):
                 self._record_ai_recent_file(path)
                 self._schedule_tdoc_validation(path)
                 self._request_ai_inline_for_editor(obj, reason="passive")
+            self.spellcheck_manager.on_document_text_changed(obj)
         widget.textChanged.connect(_on_tdoc_changed)
         widget.textChanged.connect(self._schedule_autosave)
 
         tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
         tabs.add_editor(widget)
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._schedule_tdoc_validation(cpath, delay_ms=0)
         return widget
 
@@ -4669,6 +4847,7 @@ class PythonIDE(Window):
                 self._schedule_tdoc_validation(cpath, delay_ms=0)
             self.statusBar().showMessage(f"Focused already-open file: {cpath}", 1800)
             self._refresh_runtime_action_states()
+            self.spellcheck_manager.refresh_active_widget(immediate=True)
             return
 
         if self._is_tdoc_path(cpath):
@@ -4698,6 +4877,7 @@ class PythonIDE(Window):
             if self._is_tdoc_related_path(cpath):
                 self._schedule_tdoc_validation(cpath, delay_ms=0)
         self._refresh_runtime_action_states()
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
 
         QTimer.singleShot(0, self.apply_default_layout)
         QTimer.singleShot(80, self.apply_default_layout)
@@ -5047,6 +5227,9 @@ class PythonIDE(Window):
             self.set_chrome_mode(desired_chrome)
         self._apply_custom_toolbar_window_settings()
         self._sync_titlebar_ai_toggle()
+        self.spellcheck_manager.reload_settings()
+        self._sync_titlebar_spell_toggle()
+        self._apply_terminal_commands_to_all_terminals()
         self._update_toolbar_run_controls()
         self.populate_python_run_config_menu()
         self.populate_toolbar_python_run_menu()
@@ -5074,6 +5257,7 @@ class PythonIDE(Window):
             self._apply_editor_overview_settings_to_editor(ed)
             self._apply_completion_ui_settings_to_editor(ed)
             self._apply_lint_visual_settings_to_editor(ed)
+            self._apply_spellcheck_visual_settings_to_widget(ed)
             self._attach_editor_cpp_hooks(ed)
             self._attach_editor_rust_hooks(ed)
             if not bool(ai_cfg.get("enabled", False)):
@@ -5083,6 +5267,7 @@ class PythonIDE(Window):
                 self._apply_editor_background_to_editor(widget)
                 self._apply_editor_indent_settings_to_editor(widget)
                 self._apply_editor_overview_settings_to_editor(widget)
+                self._apply_spellcheck_visual_settings_to_widget(widget)
                 completion_setter = getattr(widget, "update_completion_ui_settings", None)
                 if callable(completion_setter):
                     try:
@@ -5093,6 +5278,7 @@ class PythonIDE(Window):
                     clear_inline = getattr(widget, "clear_inline_suggestion", None)
                     if callable(clear_inline):
                         clear_inline()
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()
@@ -5201,6 +5387,8 @@ class PythonIDE(Window):
     def closeEvent(self, event: QCloseEvent):
         if hasattr(self, "workspace_controller"):
             self.workspace_controller.stop()
+        if hasattr(self, "spellcheck_manager"):
+            self.spellcheck_manager.shutdown()
         if hasattr(self, "version_control_controller"):
             self.version_control_controller.cleanup()
         skip_prompt = self._skip_close_save_prompt_once
