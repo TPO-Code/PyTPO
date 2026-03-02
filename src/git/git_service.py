@@ -715,6 +715,25 @@ class GitService:
             return False
         return self._is_tracked(root, target)
 
+    def read_head_file_text(self, repo_root: str, rel_path: str) -> str | None:
+        root = self._require_repo(repo_root)
+        target = str(rel_path or "").strip().replace("\\", "/")
+        if not target:
+            return None
+        try:
+            return self._run_git(root, ["show", f"HEAD:{target}"], check=True)
+        except GitServiceError as exc:
+            detail = str(exc or "").lower()
+            if (
+                "does not exist in 'head'" in detail
+                or "exists on disk, but not in 'head'" in detail
+                or "bad object head:" in detail
+                or "invalid object name 'head'" in detail
+                or "unknown revision or path not in the working tree" in detail
+            ):
+                return None
+            raise
+
     # ---------- Internals ----------
 
     def _is_tracked(self, repo_root: str, rel_path: str) -> bool:

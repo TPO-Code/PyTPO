@@ -250,6 +250,8 @@ class IdeEditorSettings(TypedDict, total=False):
     background_image_brightness: int
     background_tint_color: str
     background_tint_strength: int
+    editor_dirty_background: str
+    editor_uncommitted_background: str
     open_created_files: bool
     use_tabs: bool
     indent_width: int
@@ -487,6 +489,8 @@ def default_ide_settings() -> IdeSettings:
             "background_image_brightness": 100,
             "background_tint_color": "#000000",
             "background_tint_strength": 0,
+            "editor_dirty_background": "#ffcc0030",
+            "editor_uncommitted_background": "#ff4d4d24",
             "open_created_files": True,
             "use_tabs": False,
             "indent_width": 4,

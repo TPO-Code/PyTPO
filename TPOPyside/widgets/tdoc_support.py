@@ -500,34 +500,66 @@ def collect_tdoc_diagnostics(
     canonicalize: Callable[[str], str],
     source: str = "tdoc",
     content_overrides: dict[str, str] | None = None,
+    focus_paths: list[str] | set[str] | None = None,
 ) -> tuple[str, dict[str, list[dict]]]:
     """Return `(resolved_root, diagnostics_by_file)` for TDOC validation."""
 
     cpath = canonicalize(file_path)
     root = canonicalize(resolve_tdoc_root_for_path(cpath, project_root=project_root))
+    root_path = Path(root)
 
-    findings = TDocProjectIndex.validate_project(root, content_overrides=content_overrides)
+    doc_rel_paths: set[str] | None = None
+    if focus_paths is not None:
+        normalized: set[str] = set()
+        for raw_path in focus_paths:
+            candidate = canonicalize(raw_path)
+            if not candidate or not candidate.lower().endswith(DOC_SUFFIX):
+                continue
+            try:
+                rel = str(Path(candidate).relative_to(root_path)).replace("\\", "/")
+            except Exception:
+                continue
+            if rel:
+                normalized.add(rel)
+        doc_rel_paths = normalized
+
+    findings = TDocProjectIndex.validate_project(
+        root,
+        content_overrides=content_overrides,
+        doc_rel_paths=doc_rel_paths,
+    )
     marker_path = canonicalize(str(Path(root) / PROJECT_MARKER_FILENAME))
 
     by_file: dict[str, list[dict]] = {}
 
-    def _push(path: str, line: int, severity: str, message: str) -> None:
+    def _push(
+        path: str,
+        line: int,
+        severity: str,
+        message: str,
+        *,
+        column: int | None = None,
+        end_line: int | None = None,
+        end_column: int | None = None,
+    ) -> None:
         key = canonicalize(path)
         rows = by_file.setdefault(key, [])
         line_num = max(1, int(line or 1))
-        rows.append(
-            {
-                "file_path": key,
-                "line": line_num,
-                "column": 1,
-                "end_line": line_num,
-                "end_column": 1,
-                "severity": str(severity or "warning").strip().lower() or "warning",
-                "source": source,
-                "code": "TDOC",
-                "message": str(message or "").strip(),
-            }
-        )
+        row = {
+            "file_path": key,
+            "line": line_num,
+            "severity": str(severity or "warning").strip().lower() or "warning",
+            "source": source,
+            "code": "TDOC",
+            "message": str(message or "").strip(),
+        }
+        if isinstance(column, int) and column > 0:
+            row["column"] = int(column)
+        if isinstance(end_line, int) and end_line > 0:
+            row["end_line"] = int(end_line)
+        if isinstance(end_column, int) and end_column > 0:
+            row["end_column"] = int(end_column)
+        rows.append(row)
 
     for finding in findings:
         if not isinstance(finding, dict):
@@ -542,6 +574,18 @@ def collect_tdoc_diagnostics(
 
         line_value = finding.get("line")
         marker_line = int(line_value) if isinstance(line_value, int) else None
+        diag_column = None
+        raw_col = finding.get("column")
+        if isinstance(raw_col, int) and raw_col > 0:
+            diag_column = int(raw_col)
+        diag_end_line = None
+        raw_end_line = finding.get("end_line")
+        if isinstance(raw_end_line, int) and raw_end_line > 0:
+            diag_end_line = int(raw_end_line)
+        diag_end_column = None
+        raw_end_col = finding.get("end_column")
+        if isinstance(raw_end_col, int) and raw_end_col > 0:
+            diag_end_column = int(raw_end_col)
         finding_file = str(finding.get("file") or "").strip()
 
         diag_path = ""
@@ -574,7 +618,15 @@ def collect_tdoc_diagnostics(
                 diag_path = marker_path if os.path.exists(marker_path) else cpath
                 diag_line = 1
 
-        _push(diag_path, diag_line, severity, message)
+        _push(
+            diag_path,
+            diag_line,
+            severity,
+            message,
+            column=diag_column,
+            end_line=diag_end_line,
+            end_column=diag_end_column,
+        )
 
     return root, by_file
 

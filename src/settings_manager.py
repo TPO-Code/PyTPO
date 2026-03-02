@@ -33,6 +33,7 @@ IDE_COMPLETION_KEYS: set[str] = {
 }
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EDITOR_BACKGROUND_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$")
 
 
 def _normalize_query_driver_text(value: object) -> str:
@@ -276,6 +277,8 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "editor.background_image_brightness": "editor.background_image_brightness",
     "editor.background_tint_color": "editor.background_tint_color",
     "editor.background_tint_strength": "editor.background_tint_strength",
+    "editor.editor_dirty_background": "editor.editor_dirty_background",
+    "editor.editor_uncommitted_background": "editor.editor_uncommitted_background",
     "editor.use_tabs": "editor.use_tabs",
     "editor.indent_width": "editor.indent_width",
     "file_dialog": "file_dialog",
@@ -1199,6 +1202,16 @@ class SettingsManager:
             )
         except Exception:
             editor_cfg["background_tint_strength"] = 0
+        dirty_bg = str(editor_cfg.get("editor_dirty_background") or "#ffcc0030").strip() or "#ffcc0030"
+        if not _EDITOR_BACKGROUND_HEX_RE.fullmatch(dirty_bg):
+            dirty_bg = "#ffcc0030"
+        editor_cfg["editor_dirty_background"] = dirty_bg
+        uncommitted_bg = (
+            str(editor_cfg.get("editor_uncommitted_background") or "#ff4d4d24").strip() or "#ff4d4d24"
+        )
+        if not _EDITOR_BACKGROUND_HEX_RE.fullmatch(uncommitted_bg):
+            uncommitted_bg = "#ff4d4d24"
+        editor_cfg["editor_uncommitted_background"] = uncommitted_bg
         editor_cfg["open_created_files"] = _coerce_bool(editor_cfg.get("open_created_files", True), default=True)
         editor_cfg["use_tabs"] = _coerce_bool(editor_cfg.get("use_tabs", False), default=False)
         try:

@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer
+from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -614,6 +614,10 @@ class EditorTabs(QTabWidget):
         else:
             self.insertTab(target_idx, ed, "")
             new_idx = target_idx
+        self._connect_widget_document_signal(ed)
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
 
         self._refresh_tab_title(ed)
         self._reflow_pinned_tabs()
@@ -634,15 +638,49 @@ class EditorTabs(QTabWidget):
         idx = self.addTab(ed, _widget_display_name(ed))
         self.setCurrentIndex(idx)
         ed.setFocus()
-        doc = _widget_document(ed)
-        if doc is not None:
-            # Use a QObject-bound slot to avoid stale lambda/editor references after tab/view teardown.
-            doc.modificationChanged.connect(self._on_document_modification_changed)
+        self._connect_widget_document_signal(ed)
         self._refresh_tab_title(ed)
         self._reflow_pinned_tabs()
         if self.indexOf(ed) >= 0:
             self.setCurrentWidget(ed)
             ed.setFocus()
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+
+    def _connect_widget_document_signal(self, widget: QWidget | None) -> None:
+        if not _is_workspace_document_widget(widget):
+            return
+        doc = _widget_document(widget)
+        if doc is None:
+            return
+        try:
+            doc.modificationChanged.disconnect(self._on_document_modification_changed)
+        except Exception:
+            pass
+        try:
+            doc.modificationChanged.connect(self._on_document_modification_changed)
+        except Exception:
+            return
+
+    def _disconnect_widget_document_signal(self, widget: QWidget | None) -> None:
+        if not _is_workspace_document_widget(widget):
+            return
+        doc = _widget_document(widget)
+        if doc is None:
+            return
+        try:
+            doc.modificationChanged.disconnect(self._on_document_modification_changed)
+        except Exception:
+            pass
+
+    def removeTab(self, index: int) -> None:
+        widget = self.widget(index)
+        self._disconnect_widget_document_signal(widget)
+        super().removeTab(index)
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
 
     def _refresh_tab_title(self, ed: QWidget):
         idx = self.indexOf(ed)
@@ -666,6 +704,10 @@ class EditorTabs(QTabWidget):
             ed = self.widget(i)
             if _is_workspace_document_widget(ed):
                 self._refresh_tab_title(ed)
+        try:
+            self.workspace.documentModificationStateChanged.emit()
+        except Exception:
+            pass
 
     def _on_current_changed(self, _index: int):
         ed = self.currentWidget()
@@ -935,6 +977,10 @@ class EditorTabs(QTabWidget):
             else:
                 self.insertTab(target_idx, ed, "")
                 new_idx = target_idx
+            self._connect_widget_document_signal(ed)
+            notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+            if callable(notify):
+                notify()
             self._refresh_tab_title(ed)
             self._reflow_pinned_tabs()
             new_idx = self.indexOf(ed)
@@ -1012,6 +1058,9 @@ class EditorTearOutWindow(QMainWindow):
 
 
 class EditorWorkspace(QWidget):
+    documentModificationStateChanged = Signal()
+    documentWidgetsChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setContentsMargins(0, 0, 0, 0)
@@ -1034,6 +1083,12 @@ class EditorWorkspace(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.root_splitter)
+
+    def notify_document_widgets_changed(self) -> None:
+        try:
+            self.documentWidgetsChanged.emit()
+        except Exception:
+            pass
 
     def set_editor_font_defaults(
             self,

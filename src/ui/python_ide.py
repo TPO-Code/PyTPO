@@ -63,6 +63,7 @@ from src.ui.controllers import (
     VersionControlController,
     WorkspaceController,
 )
+from src.ui.editor_change_highlight_service import EditorChangeHighlightService
 from src.ui.custom_window import Window
 from src.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from src.ui.dialogs.file_dialog_bridge import get_save_file_name
@@ -496,7 +497,7 @@ class PythonIDE(Window):
         self._commit_md_save_timer = QTimer(self)
         self._commit_md_save_timer.setSingleShot(True)
         self._commit_md_save_timer.setInterval(350)
-        self._commit_md_save_timer.timeout.connect(self._flush_commit_md_dock_save)
+        self._commit_md_save_timer.timeout.connect(lambda: self._flush_commit_md_dock_save(report_conflict=False))
         self._commit_md_syncing_editor = False
 
         self._startup_done = False
@@ -630,6 +631,13 @@ class PythonIDE(Window):
         self._setup_project_fs_watcher()
         self.version_control_controller = VersionControlController(self, self.git_service, self.tree, parent=self)
         self.version_control_controller.statusChanged.connect(self._on_git_status_changed)
+        self.editor_change_highlight_service = EditorChangeHighlightService(
+            ide=self,
+            git_service=self.git_service,
+            canonicalize=self._canonical_path,
+            parent=self,
+        )
+        self._apply_editor_change_highlight_config()
         self.setup_bottom_panels()
         self.setup_commit_md_dock()
         self._setup_status_bar_widgets()
@@ -1157,6 +1165,7 @@ class PythonIDE(Window):
         editor.textChanged.connect(self._on_commit_md_editor_text_changed)
         self.commit_md_editor = editor
         self.dock_commit_md.setWidget(editor)
+        self._track_widget_change_highlights(editor)
 
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_commit_md)
         if isinstance(self.dock_outline, QDockWidget):
@@ -1191,6 +1200,15 @@ class PythonIDE(Window):
             if current != incoming:
                 editor.setPlainText(incoming)
             editor.document().setModified(False)
+            cpath = self._canonical_path(file_path)
+            self._external_conflict_signatures.pop(cpath, None)
+            sig = self._external_file_signature(cpath)
+            if sig is not None:
+                self._external_file_signatures[cpath] = sig
+            service = getattr(self, "editor_change_highlight_service", None)
+            refresher = getattr(service, "refresh_widget", None)
+            if callable(refresher):
+                refresher(editor, delay_ms=0)
         finally:
             self._commit_md_syncing_editor = False
 
@@ -1202,23 +1220,82 @@ class PythonIDE(Window):
     def _schedule_commit_md_dock_save(self) -> None:
         self._commit_md_save_timer.start()
 
-    def _flush_commit_md_dock_save(self) -> None:
+    def _flush_commit_md_dock_save(self, *, report_conflict: bool = False) -> bool:
         self._commit_md_save_timer.stop()
         editor = self.commit_md_editor
         if not isinstance(editor, CodeEditor):
-            return
+            return True
         if self._commit_md_syncing_editor:
-            return
+            return True
+
+        target_path = self._canonical_path(self._commit_md_file_path())
+        conflict_sig = self._external_conflict_signatures.get(target_path)
+        known_sig = self._external_file_signatures.get(target_path)
+        current_sig = self._external_file_signature(target_path)
+        if (
+            conflict_sig is None
+            and known_sig is not None
+            and current_sig is not None
+            and current_sig != known_sig
+        ):
+            # Detect external writes even when save happens before the next watcher tick.
+            self._external_conflict_signatures[target_path] = current_sig
+            conflict_sig = current_sig
+
+        if not editor.document().isModified():
+            if conflict_sig is not None:
+                try:
+                    disk_text = Path(target_path).read_text(encoding="utf-8")
+                except Exception:
+                    disk_text = None
+                if disk_text is not None and str(editor.toPlainText() or "") == str(disk_text):
+                    self._external_conflict_signatures.pop(target_path, None)
+            sig = self._external_file_signature(target_path)
+            if sig is not None:
+                self._external_file_signatures[target_path] = sig
+            return True
+
+        if conflict_sig is not None:
+            if report_conflict:
+                QMessageBox.warning(
+                    self,
+                    "Commit Draft Conflict",
+                    (
+                        "The commit draft changed on disk while this editor had unsaved changes.\n"
+                        "Save was skipped to avoid overwriting external edits."
+                    ),
+                )
+            else:
+                self.statusBar().showMessage(
+                    "Commit draft changed on disk; auto-save skipped to avoid overwrite.",
+                    2800,
+                )
+            if current_sig is not None:
+                self._external_file_signatures[target_path] = current_sig
+            return False
+
         try:
             path = ensure_commit_md_exists(self.project_root)
             write_commit_md_for_project(self.project_root, editor.toPlainText())
             editor.document().setModified(False)
             editor.set_file_path(str(path))
-        except Exception:
-            pass
+            self._note_editor_saved(editor, source="commit draft save")
+            return True
+        except Exception as exc:
+            if report_conflict:
+                QMessageBox.warning(self, "Commit Draft", f"Could not save commit draft:\n{exc}")
+            else:
+                self.statusBar().showMessage(f"Commit draft save failed: {exc}", 2600)
+            return False
 
     def read_commit_md_messages(self) -> tuple[str, str]:
-        self._flush_commit_md_dock_save()
+        if not self._flush_commit_md_dock_save(report_conflict=True):
+            editor = self.commit_md_editor
+            local_text = str(editor.toPlainText() or "") if isinstance(editor, CodeEditor) else ""
+            return (
+                get_commit_message_from_commit_md(local_text) or "",
+                get_release_message_from_commit_md(local_text) or "",
+            )
         try:
             text = load_commit_md_text(self.project_root)
         except Exception:
@@ -1228,7 +1305,8 @@ class PythonIDE(Window):
         return commit_message, release_message
 
     def update_commit_md_messages(self, *, commit_message: str, release_message: str) -> None:
-        self._flush_commit_md_dock_save()
+        if not self._flush_commit_md_dock_save(report_conflict=True):
+            return
         try:
             text = load_commit_md_text(self.project_root)
             updated = update_commit_md_sections(
@@ -1288,6 +1366,12 @@ class PythonIDE(Window):
 
     def _on_git_status_changed(self, _file_states: dict, _folder_states: dict, branch: str) -> None:
         self._refresh_git_branch_status_label(branch=branch)
+        service = getattr(self, "editor_change_highlight_service", None)
+        if service is not None and hasattr(service, "on_git_status_changed"):
+            try:
+                service.on_git_status_changed(_file_states)
+            except Exception:
+                pass
 
     def _refresh_git_branch_status_label(self, *, branch: str | None = None) -> None:
         label = self._status_git_branch_label
@@ -2115,6 +2199,40 @@ class PythonIDE(Window):
             "untracked": str(cfg.get("untracked_color") or "#c8c8c8"),
         }
 
+    def _editor_change_highlight_config(self) -> dict[str, str]:
+        editor_cfg = self.config.get("editor", {}) if isinstance(self.config, dict) else {}
+        cfg = editor_cfg if isinstance(editor_cfg, dict) else {}
+        return {
+            "dirty": str(cfg.get("editor_dirty_background") or "#ffcc0030").strip() or "#ffcc0030",
+            "uncommitted": (
+                str(cfg.get("editor_uncommitted_background") or "#ff4d4d24").strip() or "#ff4d4d24"
+            ),
+        }
+
+    def _apply_editor_change_highlight_config(self) -> None:
+        service = getattr(self, "editor_change_highlight_service", None)
+        setter = getattr(service, "set_overlay_colors", None)
+        if not callable(setter):
+            return
+        cfg = self._editor_change_highlight_config()
+        try:
+            setter(
+                dirty_background=cfg["dirty"],
+                uncommitted_background=cfg["uncommitted"],
+            )
+        except Exception:
+            pass
+
+    def _track_widget_change_highlights(self, widget: object) -> None:
+        service = getattr(self, "editor_change_highlight_service", None)
+        tracker = getattr(service, "track_widget", None)
+        if not callable(tracker):
+            return
+        try:
+            tracker(widget)
+        except Exception:
+            pass
+
     def _apply_git_tinting_config(self) -> None:
         self.version_control_controller._apply_git_tinting_config()
 
@@ -2427,6 +2545,7 @@ class PythonIDE(Window):
 
     def _attach_editor_lint_hooks(self, ed: EditorWidget):
         self.diagnostics_controller._attach_editor_lint_hooks(ed)
+        self._track_widget_change_highlights(ed)
         self._apply_editor_indent_settings_to_editor(ed)
         self._apply_editor_overview_settings_to_editor(ed)
         self._apply_spellcheck_visual_settings_to_widget(ed)
@@ -2490,6 +2609,122 @@ class PythonIDE(Window):
         if not isinstance(widget, TDocDocumentWidget):
             return
         self._append_spellcheck_context_actions(widget, menu_obj, payload_obj)
+        if not isinstance(menu_obj, QMenu):
+            return
+
+        file_path = self._document_widget_path(widget)
+        if not file_path:
+            return
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+        try:
+            line_num = int(payload.get("line") or 0)
+        except Exception:
+            line_num = 0
+        try:
+            col_num = int(payload.get("column") or 0)
+        except Exception:
+            col_num = 0
+        if line_num <= 0 or col_num <= 0:
+            try:
+                cur = widget.textCursor()
+                line_num = max(1, int(cur.blockNumber() + 1))
+                col_num = max(1, int(cur.positionInBlock() + 1))
+            except Exception:
+                line_num = max(1, line_num)
+                col_num = max(1, col_num)
+
+        diagnostics = self._tdoc_diagnostics_covering_position(
+            file_path=file_path,
+            line=line_num,
+            column=col_num,
+        )
+        if not diagnostics:
+            return
+
+        unresolved_diag = next(
+            (
+                diag
+                for diag in diagnostics
+                if self.diagnostics_controller._tdoc_unresolved_symbol_from_diagnostic(diag)
+            ),
+            None,
+        )
+        section_cap_diag = next(
+            (
+                diag
+                for diag in diagnostics
+                if self.diagnostics_controller._tdoc_section_cap_warning_from_diagnostic(diag)
+            ),
+            None,
+        )
+        if unresolved_diag is None and section_cap_diag is None:
+            return
+
+        menu_obj.addSeparator()
+        if isinstance(unresolved_diag, dict):
+            symbol = self.diagnostics_controller._tdoc_unresolved_symbol_from_diagnostic(unresolved_diag)
+            if symbol:
+                act_add_tdoc_symbol = QAction(f"Add '{symbol}' to .tdocproject", menu_obj)
+                act_add_tdoc_symbol.triggered.connect(
+                    lambda _checked=False, d=dict(unresolved_diag): self._on_problem_add_tdoc_symbol_requested(d)
+                )
+                menu_obj.addAction(act_add_tdoc_symbol)
+
+        if isinstance(section_cap_diag, dict):
+            section = self.diagnostics_controller._tdoc_section_cap_warning_from_diagnostic(section_cap_diag)
+            if section:
+                act_cap_section = QAction(f"Capitalize section '{section}'", menu_obj)
+                act_cap_section.triggered.connect(
+                    lambda _checked=False, d=dict(section_cap_diag): self._on_problem_capitalize_tdoc_section_requested(d)
+                )
+                menu_obj.addAction(act_cap_section)
+
+    def _tdoc_diagnostics_covering_position(self, *, file_path: str, line: int, column: int) -> list[dict]:
+        key = self._canonical_path(file_path)
+        rows = self._diagnostics_by_file.get(key, [])
+        line_num = max(1, int(line))
+        col_num = max(1, int(column))
+        out: list[dict] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "").strip().lower()
+            if source != "tdoc":
+                continue
+            try:
+                dline = int(item.get("line") or 0)
+            except Exception:
+                continue
+            if dline <= 0:
+                continue
+
+            try:
+                dcol = int(item.get("column") or 0)
+            except Exception:
+                dcol = 0
+            try:
+                dend_line = int(item.get("end_line") or 0)
+            except Exception:
+                dend_line = 0
+            try:
+                dend_col = int(item.get("end_column") or 0)
+            except Exception:
+                dend_col = 0
+
+            has_range = dcol > 0
+            if has_range:
+                end_line = max(dline, dend_line if dend_line > 0 else dline)
+                end_col = max(dcol, dend_col if dend_col > 0 else dcol)
+                if line_num < dline or line_num > end_line:
+                    continue
+                if dline == end_line and not (dcol <= col_num <= end_col):
+                    continue
+                out.append(item)
+                continue
+
+            if line_num == dline:
+                out.append(item)
+        return out
 
     def _on_editor_word_wrap_preference_changed(self, ed_ref, payload_obj: object) -> None:
         ed = ed_ref() if callable(ed_ref) else ed_ref
@@ -3748,6 +3983,11 @@ class PythonIDE(Window):
             if not path:
                 continue
             paths.add(self._canonical_path(path))
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, QWidget):
+            commit_path = self._document_widget_path(commit_editor)
+            if commit_path:
+                paths.add(self._canonical_path(commit_path))
         config_path = str(self.project_config_path or "").strip()
         if config_path:
             paths.add(self._canonical_path(config_path))
@@ -4022,7 +4262,13 @@ class PythonIDE(Window):
 
     @staticmethod
     def _document_widget_path(widget: QWidget | None) -> str:
-        return str(getattr(widget, "file_path", "") or "").strip()
+        if widget is None:
+            return ""
+        direct = str(getattr(widget, "file_path", "") or "").strip()
+        if direct:
+            return direct
+        # CodeEditor stores path in `_file_path` and does not expose `file_path`.
+        return str(getattr(widget, "_file_path", "") or "").strip()
 
     def _iter_open_document_widgets(self) -> list[QWidget]:
         return self.editor_workspace.all_document_widgets()
@@ -4061,13 +4307,33 @@ class PythonIDE(Window):
                 overrides[cpath] = text
         return overrides
 
+    def _open_tdoc_related_paths_for_root(self, root: str) -> set[str]:
+        root_path = self._canonical_path(root)
+        paths: set[str] = set()
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not self._is_tdoc_related_path(path):
+                continue
+            cpath = self._canonical_path(path)
+            if not self._path_has_prefix(cpath, root_path):
+                continue
+            paths.add(cpath)
+        return paths
+
     def _current_document_widget(self) -> QWidget | None:
         return self.editor_workspace.active_document_widget()
 
     def _find_open_document_for_path(self, canonical_path: str) -> QWidget | None:
         target = self._canonical_path(canonical_path)
         found = self.editor_workspace.find_document_by_path(target)
-        return found if isinstance(found, QWidget) else None
+        if isinstance(found, QWidget):
+            return found
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, QWidget):
+            commit_path = self._document_widget_path(commit_editor)
+            if commit_path and self._canonical_path(commit_path) == target:
+                return commit_editor
+        return None
 
     def _focus_document_widget(self, widget: QWidget) -> None:
         if not isinstance(widget, QWidget):
@@ -4109,10 +4375,13 @@ class PythonIDE(Window):
         root_key = self._canonical_path(root)
         previous = self._tdoc_diagnostics_by_root.get(root_key, {})
         previous_files = set(previous.keys())
+        open_paths = self._open_tdoc_related_paths_for_root(root_key)
 
         normalized: dict[str, list[dict]] = {}
         for file_path, rows in diagnostics_by_file.items():
             cpath = self._canonical_path(file_path)
+            if cpath not in open_paths:
+                continue
             clean_rows = [d for d in rows if isinstance(d, dict)]
             if clean_rows:
                 normalized[cpath] = clean_rows
@@ -4170,29 +4439,40 @@ class PythonIDE(Window):
             return
         root_guess = self._canonical_path(resolve_tdoc_root_for_path(cpath, project_root=self.project_root))
         content_overrides = self._tdoc_content_overrides_for_root(root_guess)
+        focus_paths = self._open_tdoc_related_paths_for_root(root_guess)
+        focus_paths.add(cpath)
         root, by_file = collect_tdoc_diagnostics(
             file_path=cpath,
             project_root=self.project_root,
             canonicalize=self._canonical_path,
             source="tdoc",
             content_overrides=content_overrides,
+            focus_paths=focus_paths,
         )
         self._set_tdoc_diagnostics_for_root(root, by_file)
 
     def _refresh_all_tdoc_diagnostics(self) -> None:
-        roots: set[str] = set()
+        root_to_paths: dict[str, set[str]] = {}
         for widget in self._iter_open_document_widgets():
             path = self._document_widget_path(widget)
             if not self._is_tdoc_related_path(path):
                 continue
             root_guess = self._canonical_path(resolve_tdoc_root_for_path(path, project_root=self.project_root))
+            root_to_paths.setdefault(root_guess, set()).add(self._canonical_path(path))
+
+        roots: set[str] = set()
+        for root_guess, focus_paths in root_to_paths.items():
+            sample_path = next(iter(focus_paths), "")
+            if not sample_path:
+                continue
             content_overrides = self._tdoc_content_overrides_for_root(root_guess)
             root, by_file = collect_tdoc_diagnostics(
-                file_path=path,
+                file_path=sample_path,
                 project_root=self.project_root,
                 canonicalize=self._canonical_path,
                 source="tdoc",
                 content_overrides=content_overrides,
+                focus_paths=focus_paths,
             )
             roots.add(root)
             self._set_tdoc_diagnostics_for_root(root, by_file)
@@ -4205,29 +4485,37 @@ class PythonIDE(Window):
             self._clear_all_tdoc_diagnostics()
 
     def _refresh_tdoc_diagnostics_for_project(self) -> None:
-        candidates: list[str] = []
-        visited_roots: set[str] = set()
-        for walk_root, _dirs, files in os.walk(self.project_root):
-            marker = os.path.join(walk_root, ".tdocproject")
-            if ".tdocproject" in files:
-                candidates.append(marker)
-            has_doc = any(name.lower().endswith(".tdoc") for name in files)
-            if has_doc:
-                # one sample document path per folder is enough to resolve/project-validate the root
-                sample = next((name for name in files if name.lower().endswith(".tdoc")), "")
-                if sample:
-                    candidates.append(os.path.join(walk_root, sample))
+        root_to_paths: dict[str, set[str]] = {}
+        for widget in self._iter_open_document_widgets():
+            path = self._document_widget_path(widget)
+            if not self._is_tdoc_related_path(path):
+                continue
+            cpath = self._canonical_path(path)
+            root = self._canonical_path(resolve_tdoc_root_for_path(cpath, project_root=self.project_root))
+            root_to_paths.setdefault(root, set()).add(cpath)
 
-        if not candidates:
+        if not root_to_paths:
             self._clear_all_tdoc_diagnostics()
             return
 
-        for candidate in candidates:
-            root = self._canonical_path(resolve_tdoc_root_for_path(candidate, project_root=self.project_root))
+        visited_roots: set[str] = set()
+        for root, focus_paths in root_to_paths.items():
             if root in visited_roots:
                 continue
             visited_roots.add(root)
-            self._refresh_tdoc_diagnostics_for_path(candidate)
+            sample_path = next(iter(focus_paths), "")
+            if not sample_path:
+                continue
+            content_overrides = self._tdoc_content_overrides_for_root(root)
+            resolved_root, by_file = collect_tdoc_diagnostics(
+                file_path=sample_path,
+                project_root=self.project_root,
+                canonicalize=self._canonical_path,
+                source="tdoc",
+                content_overrides=content_overrides,
+                focus_paths=focus_paths,
+            )
+            self._set_tdoc_diagnostics_for_root(resolved_root, by_file)
 
     def _on_tdoc_file_link_requested(self, widget_ref, target: str) -> None:
         widget = widget_ref() if callable(widget_ref) else widget_ref
@@ -4667,6 +4955,7 @@ class PythonIDE(Window):
         cpath = self._canonical_path(file_path)
         existing = self._find_open_document_for_path(cpath)
         if isinstance(existing, TDocDocumentWidget):
+            self._track_widget_change_highlights(existing)
             self._focus_document_widget(existing)
             self._schedule_tdoc_validation(cpath, delay_ms=0)
             return existing
@@ -4733,6 +5022,7 @@ class PythonIDE(Window):
 
         tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
         tabs.add_editor(widget)
+        self._track_widget_change_highlights(widget)
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._schedule_tdoc_validation(cpath, delay_ms=0)
         return widget
@@ -4795,6 +5085,8 @@ class PythonIDE(Window):
         new_c = self._canonical_path(new_path)
         moved_editors: list[EditorWidget] = []
         processed_code_docs: set[str] = set()
+        service = getattr(self, "editor_change_highlight_service", None)
+        path_notifier = getattr(service, "notify_file_path_changed", None)
 
         for widget in self._iter_open_document_widgets():
             if isinstance(widget, EditorWidget):
@@ -4823,11 +5115,15 @@ class PythonIDE(Window):
                 widget.set_file_path(relocated)
                 self._refresh_editor_title(widget)
                 moved_editors.append(widget)
+                if callable(path_notifier):
+                    path_notifier(src, relocated)
             elif hasattr(widget, "set_file_path"):
                 try:
                     widget.set_file_path(relocated)
                 except Exception:
                     pass
+                if callable(path_notifier):
+                    path_notifier(src, relocated)
                 for tabs in self.editor_workspace.all_tabs():
                     idx = tabs.indexOf(widget)
                     if idx >= 0:
@@ -4983,6 +5279,7 @@ class PythonIDE(Window):
 
         existing = self._find_open_document_for_path(cpath)
         if existing:
+            self._track_widget_change_highlights(existing)
             if isinstance(existing, EditorWidget):
                 self._attach_editor_lint_hooks(existing)
                 self._schedule_symbol_outline_refresh(immediate=True)
@@ -5086,6 +5383,10 @@ class PythonIDE(Window):
                 return
         else:
             setattr(widget, "file_path", new_path)
+        service = getattr(self, "editor_change_highlight_service", None)
+        path_notifier = getattr(service, "notify_file_path_changed", None)
+        if callable(path_notifier):
+            path_notifier(old_path, new_path)
 
         saver = getattr(widget, "save_file", None)
         if not callable(saver):
@@ -5391,10 +5692,12 @@ class PythonIDE(Window):
         self.rust_language_pack.update_project_settings(rust_cfg)
         self.inline_suggestion_controller.update_settings(ai_cfg)
         self._apply_git_tinting_config()
+        self._apply_editor_change_highlight_config()
         self._configure_git_poll_timer()
         self.schedule_git_status_refresh(delay_ms=80)
 
         for ed in self.editor_workspace.all_editors():
+            self._track_widget_change_highlights(ed)
             self._apply_editor_background_to_editor(ed)
             self._apply_editor_indent_settings_to_editor(ed)
             self._apply_editor_overview_settings_to_editor(ed)
@@ -5407,6 +5710,7 @@ class PythonIDE(Window):
                 ed.clear_inline_suggestion()
         for widget in self._iter_open_document_widgets():
             if isinstance(widget, TDocDocumentWidget):
+                self._track_widget_change_highlights(widget)
                 self._apply_editor_background_to_editor(widget)
                 self._apply_editor_indent_settings_to_editor(widget)
                 self._apply_editor_overview_settings_to_editor(widget)
@@ -5423,6 +5727,7 @@ class PythonIDE(Window):
                     if callable(clear_inline):
                         clear_inline()
         self.spellcheck_manager.refresh_active_widget(immediate=True)
+        self._track_widget_change_highlights(self.commit_md_editor)
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()
@@ -5543,7 +5848,7 @@ class PythonIDE(Window):
             event.ignore()
             return
 
-        self._flush_commit_md_dock_save()
+        self._flush_commit_md_dock_save(report_conflict=True)
         self._commit_md_save_timer.stop()
         self._project_fs_refresh_timer.stop()
         self._project_fs_watch_sync_timer.stop()

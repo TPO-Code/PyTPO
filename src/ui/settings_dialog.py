@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -144,6 +145,29 @@ PANEL_FIELD_TYPES: set[str] = {
 
 SETTINGS_TREE_NODE_KEY_ROLE = Qt.UserRole + 2
 SETTINGS_TREE_EXPANDED_PATHS_KEY = "ui.settings_dialog.tree_expanded_paths"
+_HEX_COLOR_WITH_ALPHA_RE = re.compile(r"^#(?P<rgb>[0-9a-fA-F]{6})(?P<alpha>[0-9a-fA-F]{2})?$")
+
+
+def _parse_color_value(value: object) -> QColor:
+    text = str(value or "").strip()
+    if not text:
+        return QColor()
+    match = _HEX_COLOR_WITH_ALPHA_RE.fullmatch(text)
+    if match:
+        rgb = str(match.group("rgb") or "")
+        alpha = str(match.group("alpha") or "")
+        try:
+            red = int(rgb[0:2], 16)
+            green = int(rgb[2:4], 16)
+            blue = int(rgb[4:6], 16)
+            if alpha:
+                return QColor(red, green, blue, int(alpha, 16))
+            return QColor(red, green, blue)
+        except Exception:
+            return QColor()
+    if text.startswith("#"):
+        return QColor()
+    return QColor(text)
 
 
 class SettingsDialog(DialogWindow):
@@ -751,7 +775,7 @@ class SettingsDialog(DialogWindow):
 
         if field.type == "color":
             line = QLineEdit()
-            line.setPlaceholderText("#RRGGBB")
+            line.setPlaceholderText("#RRGGBB or #RRGGBBAA")
 
             swatch = QPushButton()
             swatch.setFixedSize(34, 20)
@@ -767,10 +791,15 @@ class SettingsDialog(DialogWindow):
             row.addWidget(swatch)
 
             def update_swatch() -> None:
-                color = QColor(str(line.text() or "").strip())
+                color = _parse_color_value(line.text())
                 if color.isValid():
+                    rgba = f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
                     swatch.setStyleSheet(
-                        f"QPushButton {{ background-color: {color.name(QColor.HexRgb)}; border: 1px solid #6a6a6a; border-radius: 3px; }}"
+                        "QPushButton { "
+                        f"background-color: {rgba}; "
+                        "border: 1px solid #6a6a6a; "
+                        "border-radius: 3px; "
+                        "}"
                     )
                     swatch.setText("")
                     return
@@ -780,7 +809,8 @@ class SettingsDialog(DialogWindow):
                 swatch.setText("?")
 
             def pick_color() -> None:
-                initial = QColor(str(line.text() or "").strip())
+                current_text = str(line.text() or "").strip()
+                initial = _parse_color_value(current_text)
                 if not initial.isValid():
                     initial = QColor("#ffffff")
                 dialog = ColorPickerDialog(initial, self)
@@ -788,7 +818,13 @@ class SettingsDialog(DialogWindow):
                     return
                 picked = dialog.get_color()
                 if isinstance(picked, QColor) and picked.isValid():
-                    line.setText(picked.name(QColor.HexRgb))
+                    had_alpha = bool(_HEX_COLOR_WITH_ALPHA_RE.fullmatch(current_text)) and len(current_text) == 9
+                    if had_alpha or picked.alpha() < 255:
+                        line.setText(
+                            f"#{picked.red():02x}{picked.green():02x}{picked.blue():02x}{picked.alpha():02x}"
+                        )
+                    else:
+                        line.setText(picked.name(QColor.HexRgb))
 
             swatch.clicked.connect(pick_color)
             line.textChanged.connect(lambda *_args: update_swatch())
@@ -808,7 +844,7 @@ class SettingsDialog(DialogWindow):
                 text = str(line.text() or "").strip()
                 if not text:
                     return []
-                if QColor(text).isValid():
+                if _parse_color_value(text).isValid():
                     return []
                 return [f"{field.label}: invalid color."]
 
@@ -2189,6 +2225,33 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 scope="ide",
                                 min=0,
                                 max=100,
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="Editor Change Regions",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-dirty-bg",
+                                key="editor.editor_dirty_background",
+                                label="Unsaved Change Background",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Hex color like #ffcc0030 for in-editor unsaved changes "
+                                    "(disk vs live buffer)."
+                                ),
+                            ),
+                            SchemaField(
+                                id="ide-editor-uncommitted-bg",
+                                key="editor.editor_uncommitted_background",
+                                label="Git Uncommitted Background",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Hex color like #ff4d4d24 for in-editor saved-but-uncommitted "
+                                    "changes (HEAD vs disk)."
+                                ),
                             ),
                         ],
                     ),

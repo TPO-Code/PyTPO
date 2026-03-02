@@ -44,6 +44,14 @@ from PySide6.QtWidgets import (
     QToolTip,
     QWidget,
 )
+from TPOPyside.widgets.editor_change_regions import (
+    DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+    DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+    build_change_region_selections,
+    normalize_line_numbers,
+    parse_editor_overlay_color,
+    resolve_change_region_layer,
+)
 
 PROJECT_MARKER_FILENAME = ".tdocproject"
 INDEX_FILENAME = "index.tdoc"
@@ -487,10 +495,34 @@ class TDocProjectIndex:
         return True
 
     @staticmethod
-    def iter_doc_paths(root_path, include_patterns=None, ignore_patterns=None):
+    def iter_doc_paths(root_path, include_patterns=None, ignore_patterns=None, rel_path_filter=None):
         root = Path(root_path)
         include_patterns = include_patterns or []
         ignore_patterns = ignore_patterns or []
+        rel_filter: set[str] | None = None
+        if rel_path_filter is not None:
+            rel_filter = set()
+            for raw_rel in rel_path_filter:
+                rel = str(raw_rel or "").strip().replace("\\", "/").lstrip("/")
+                if not rel:
+                    continue
+                if any(part == ".." for part in Path(rel).parts):
+                    continue
+                if not rel.lower().endswith(DOC_SUFFIX):
+                    continue
+                rel_filter.add(rel)
+
+        if rel_filter is not None:
+            for rel_path in sorted(rel_filter, key=str.casefold):
+                if Path(rel_path).name == INDEX_FILENAME:
+                    continue
+                if not TDocProjectIndex._should_scan_doc(rel_path, include_patterns, ignore_patterns):
+                    continue
+                path = root / rel_path
+                if not path.exists() or not path.is_file():
+                    continue
+                yield path, rel_path
+            return
 
         for path in root.rglob(f"*{DOC_SUFFIX}"):
             if path.name == INDEX_FILENAME:
@@ -874,6 +906,7 @@ class TDocProjectIndex:
         include_patterns=None,
         ignore_patterns=None,
         content_overrides=None,
+        rel_path_filter=None,
     ):
         symbol_refs = defaultdict(set)
         unresolved_refs = defaultdict(set)
@@ -881,7 +914,12 @@ class TDocProjectIndex:
         frontmatter_issues = []
         normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
 
-        for path, rel_path in TDocProjectIndex.iter_doc_paths(root_path, include_patterns, ignore_patterns):
+        for path, rel_path in TDocProjectIndex.iter_doc_paths(
+            root_path,
+            include_patterns,
+            ignore_patterns,
+            rel_path_filter=rel_path_filter,
+        ):
             content, err = TDocProjectIndex._read_text_with_overrides(path, normalized_overrides)
             if err is not None:
                 print(f"Error reading {path}: {err}")
@@ -901,19 +939,33 @@ class TDocProjectIndex:
 
             for offset, line in enumerate(body_lines):
                 line_no = body_start_line + offset
+                rendered_col = 0
+                last_raw_pos = 0
                 for match in LINK_PATTERN.finditer(line):
+                    pre_text = line[last_raw_pos:match.start()]
+                    if pre_text:
+                        rendered_col += len(pre_text)
                     raw = match.group("label")
                     label = link_effective_target(raw)
+                    shown = link_display_text(raw)
+                    if not shown:
+                        shown = match.group(0)
                     if not label:
+                        rendered_col += len(shown)
+                        last_raw_pos = match.end()
                         continue
 
                     # [foo.tdoc] and [foo.tdoc#L42] are file links, not symbols.
                     file_path, _ = parse_file_link(label)
+                    start_col = int(rendered_col + 1)
+                    end_col = int(rendered_col + len(shown) + 1)
+                    rendered_col += len(shown)
+                    last_raw_pos = match.end()
                     if file_path:
                         continue
 
                     symbol = alias_to_symbol.get(label.casefold())
-                    ref = (rel_path, line_no)
+                    ref = (rel_path, line_no, start_col, end_col)
                     if symbol:
                         symbol_refs[symbol].add(ref)
                     else:
@@ -979,10 +1031,17 @@ class TDocProjectIndex:
         return touched_files, replacements
 
     @staticmethod
-    def validate_project(root_path, content_overrides=None):
+    def validate_project(root_path, content_overrides=None, doc_rel_paths=None):
         findings = []
         marker = TDocProjectIndex.marker_path(root_path)
         normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
+        rel_filter = None
+        if doc_rel_paths is not None:
+            rel_filter = {
+                str(raw_rel or "").strip().replace("\\", "/").lstrip("/")
+                for raw_rel in doc_rel_paths
+                if str(raw_rel or "").strip()
+            }
 
         if not marker.exists():
             findings.append(
@@ -1170,6 +1229,7 @@ class TDocProjectIndex:
             effective_includes,
             effective_ignores,
             content_overrides=normalized_overrides,
+            rel_path_filter=rel_filter,
         )
         for issue in frontmatter_issues:
             findings.append(
@@ -1178,21 +1238,32 @@ class TDocProjectIndex:
                     "message": f"{issue['file']}:{issue['line']} - {issue['message']}",
                     "line": None,
                 }
-            )
+        )
         for unresolved in sorted(unresolved_refs.keys(), key=str.casefold):
             refs = sorted(unresolved_refs[unresolved], key=lambda x: (x[0].casefold(), x[1]))
-            sample = ", ".join(f"{p}#L{ln}" for p, ln in refs[:3])
+            sample = ", ".join(f"{str(row[0])}#L{int(row[1])}" for row in refs[:3])
             extra = f" (+{len(refs) - 3} more)" if len(refs) > 3 else ""
-            findings.append(
-                {
-                    "severity": "warning",
-                    "message": f"Unresolved symbol '{unresolved}' used at {sample}{extra}.",
-                    "line": None,
-                }
-            )
+            finding = {
+                "severity": "warning",
+                "message": f"Unresolved symbol '{unresolved}' used at {sample}{extra}.",
+                "line": None,
+            }
+            if refs:
+                first = refs[0]
+                finding["file"] = str(first[0])
+                finding["line"] = int(first[1])
+                finding["column"] = int(first[2])
+                finding["end_line"] = int(first[1])
+                finding["end_column"] = int(first[3])
+            findings.append(finding)
 
         seen_missing_images = set()
-        for path, rel_path in TDocProjectIndex.iter_doc_paths(root_path, effective_includes, effective_ignores):
+        for path, rel_path in TDocProjectIndex.iter_doc_paths(
+            root_path,
+            effective_includes,
+            effective_ignores,
+            rel_path_filter=rel_filter,
+        ):
             content, _err = TDocProjectIndex._read_text_with_overrides(path, normalized_overrides)
             if content is None:
                 continue
@@ -1221,6 +1292,9 @@ class TDocProjectIndex:
                             "severity": "warning",
                             "message": f"Missing image file '{rel_image}' used at {rel_path}#L{line_no}.",
                             "line": int(line_no),
+                            "column": int(match.start("body") + 1),
+                            "end_line": int(line_no),
+                            "end_column": int(match.end("body") + 1),
                             "file": str(rel_path),
                         }
                     )
@@ -1230,7 +1304,11 @@ class TDocProjectIndex:
     @staticmethod
     def _group_refs_by_file(refs):
         grouped = defaultdict(set)
-        for rel_path, line_no in refs:
+        for row in refs:
+            if not isinstance(row, (tuple, list)) or len(row) < 2:
+                continue
+            rel_path = row[0]
+            line_no = row[1]
             try:
                 ln = max(1, int(line_no))
             except Exception:
@@ -1652,6 +1730,19 @@ class TDocEditorWidget(QTextEdit):
         self._editor_background_source_pixmap: QPixmap | None = None
         self._editor_background_cache_size = QSize()
         self._editor_background_cache_pixmap: QPixmap | None = None
+        self._change_region_dirty_lines: set[int] = set()
+        self._change_region_uncommitted_lines: set[int] = set()
+        self._change_region_dirty_color = parse_editor_overlay_color(
+            DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+            DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+        )
+        self._change_region_uncommitted_color = parse_editor_overlay_color(
+            DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+            DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+        )
+        self._change_region_selections: list[QTextEdit.ExtraSelection] = []
+        self._overview_change_region_dirty_lines: set[int] = set()
+        self._overview_change_region_uncommitted_lines: set[int] = set()
         self._configured_keybindings = {
             "general": {
                 key: list(value)
@@ -3132,6 +3223,111 @@ class TDocEditorWidget(QTextEdit):
             return "squiggle"
         return mode
 
+    def set_change_region_colors(
+        self,
+        *,
+        dirty_background: str | QColor = DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+        uncommitted_background: str | QColor = DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+    ) -> None:
+        dirty = parse_editor_overlay_color(dirty_background, DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX)
+        uncommitted = parse_editor_overlay_color(uncommitted_background, DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX)
+        if (
+            dirty == self._change_region_dirty_color
+            and uncommitted == self._change_region_uncommitted_color
+        ):
+            return
+        self._change_region_dirty_color = dirty
+        self._change_region_uncommitted_color = uncommitted
+        self._rebuild_change_region_selections()
+        self._rebuild_extra_selections()
+
+    def set_change_region_highlights(
+        self,
+        *,
+        dirty_lines: set[int] | list[int] | tuple[int, ...] | None = None,
+        uncommitted_lines: set[int] | list[int] | tuple[int, ...] | None = None,
+        dirty_background: str | QColor | None = None,
+        uncommitted_background: str | QColor | None = None,
+    ) -> None:
+        next_dirty = normalize_line_numbers(dirty_lines)
+        next_uncommitted = normalize_line_numbers(uncommitted_lines)
+
+        if dirty_background is not None or uncommitted_background is not None:
+            self.set_change_region_colors(
+                dirty_background=(
+                    dirty_background
+                    if dirty_background is not None
+                    else self._change_region_dirty_color
+                ),
+                uncommitted_background=(
+                    uncommitted_background
+                    if uncommitted_background is not None
+                    else self._change_region_uncommitted_color
+                ),
+            )
+
+        if (
+            next_dirty == self._change_region_dirty_lines
+            and next_uncommitted == self._change_region_uncommitted_lines
+        ):
+            return
+
+        self._change_region_dirty_lines = next_dirty
+        self._change_region_uncommitted_lines = next_uncommitted
+        self._rebuild_change_region_selections()
+        self._rebuild_extra_selections()
+
+    def clear_change_region_highlights(self) -> None:
+        if not self._change_region_dirty_lines and not self._change_region_uncommitted_lines:
+            return
+        self._change_region_dirty_lines = set()
+        self._change_region_uncommitted_lines = set()
+        self._change_region_selections = []
+        self._refresh_overview_change_region_lines()
+        self._rebuild_extra_selections()
+        self._refresh_overview_marker_area()
+
+    def change_region_layer_for_line(self, line_number: int) -> str:
+        return resolve_change_region_layer(
+            int(line_number),
+            dirty_lines=self._change_region_dirty_lines,
+            uncommitted_lines=self._change_region_uncommitted_lines,
+        )
+
+    def _rebuild_change_region_selections(self) -> None:
+        self._change_region_selections = build_change_region_selections(
+            self.document(),
+            dirty_lines=self._change_region_dirty_lines,
+            uncommitted_lines=self._change_region_uncommitted_lines,
+            dirty_color=self._change_region_dirty_color,
+            uncommitted_color=self._change_region_uncommitted_color,
+        )
+        self._refresh_overview_change_region_lines()
+        self._refresh_overview_marker_area()
+
+    def _refresh_overview_change_region_lines(self) -> None:
+        dirty = {max(1, int(line)) for line in self._change_region_dirty_lines}
+        uncommitted: set[int] = set()
+        for line in self._change_region_uncommitted_lines:
+            line_number = max(1, int(line))
+            resolved = resolve_change_region_layer(
+                line_number,
+                dirty_lines=dirty,
+                uncommitted_lines=self._change_region_uncommitted_lines,
+            )
+            if resolved == "uncommitted":
+                uncommitted.add(line_number)
+        self._overview_change_region_dirty_lines = dirty
+        self._overview_change_region_uncommitted_lines = uncommitted
+
+    def _overview_change_region_lines_for_layer(self, layer: str) -> set[int]:
+        name = str(layer or "").strip().lower()
+        if name == "dirty":
+            return set(self._overview_change_region_dirty_lines)
+        if name != "uncommitted":
+            return set()
+        return set(self._overview_change_region_uncommitted_lines)
+
     def _rebuild_lint_selections(self):
         selections: list[QTextEdit.ExtraSelection] = []
         if self._lint_visual_mode() in {"line", "both"}:
@@ -3226,12 +3422,17 @@ class TDocEditorWidget(QTextEdit):
 
                 start_cursor = QTextCursor(self.document())
                 start_cursor.setPosition(start_pos)
-                end_cursor = QTextCursor(self.document())
-                end_cursor.setPosition(end_pos)
                 start_rect = self.cursorRect(start_cursor)
-                end_rect = self.cursorRect(end_cursor)
                 x1 = float(start_rect.left())
-                x2 = float(end_rect.left())
+                if end_pos > start_pos:
+                    # Use the last covered character rectangle for x2 so line-end
+                    # ranges don't collapse to the next-line cursor position.
+                    end_cursor = QTextCursor(self.document())
+                    end_cursor.setPosition(max(start_pos, end_pos - 1))
+                    end_rect = self.cursorRect(end_cursor)
+                    x2 = float(end_rect.right() + 1)
+                else:
+                    x2 = x1
                 if x2 <= x1:
                     x2 = x1 + float(max(4, self.fontMetrics().horizontalAdvance(" ")))
                 y = float(start_rect.bottom() - 1)
@@ -3285,7 +3486,8 @@ class TDocEditorWidget(QTextEdit):
         self._spellcheck_selections = selections
 
     def _rebuild_extra_selections(self):
-        extra_selections = list(self._lint_selections)
+        extra_selections = list(self._change_region_selections)
+        extra_selections.extend(self._lint_selections)
         extra_selections.extend(self._spellcheck_selections)
         extra_selections.extend(self._occurrence_highlight_selections)
         extra_selections.extend(self._search_highlight_selections)
@@ -3347,6 +3549,24 @@ class TDocEditorWidget(QTextEdit):
         total_lines = max(1, int(self.document().blockCount()))
         marker_w = max(2, int(self.overviewMarkerArea.width()) - 2)
         x = 1
+        self._paint_overview_line_set(
+            painter,
+            self._overview_change_region_lines_for_layer("uncommitted"),
+            color=QColor(self._change_region_uncommitted_color),
+            x=x,
+            width=marker_w,
+            total_lines=total_lines,
+            content_h=content_h,
+        )
+        self._paint_overview_line_set(
+            painter,
+            self._overview_change_region_lines_for_layer("dirty"),
+            color=QColor(self._change_region_dirty_color),
+            x=x,
+            width=marker_w,
+            total_lines=total_lines,
+            content_h=content_h,
+        )
         self._paint_overview_line_set(
             painter,
             self._overview_occurrence_lines,

@@ -84,6 +84,14 @@ from .syntax_highlighters import (
     ensure_highlighter as ensure_editor_highlighter,
     set_highlighter_for_file as set_editor_highlighter_for_file,
 )
+from TPOPyside.widgets.editor_change_regions import (
+    DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+    DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+    build_change_region_selections,
+    normalize_line_numbers,
+    parse_editor_overlay_color,
+    resolve_change_region_layer,
+)
 
 
 def leading_whitespace(line: str) -> str:
@@ -380,6 +388,19 @@ class CodeEditor(QPlainTextEdit):
         self._editor_background_source_pixmap: QPixmap | None = None
         self._editor_background_cache_size = QSize()
         self._editor_background_cache_pixmap: QPixmap | None = None
+        self._change_region_dirty_lines: set[int] = set()
+        self._change_region_uncommitted_lines: set[int] = set()
+        self._change_region_dirty_color = parse_editor_overlay_color(
+            DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+            DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+        )
+        self._change_region_uncommitted_color = parse_editor_overlay_color(
+            DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+            DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+        )
+        self._change_region_selections: list[QTextEdit.ExtraSelection] = []
+        self._overview_change_region_dirty_lines: set[int] = set()
+        self._overview_change_region_uncommitted_lines: set[int] = set()
 
         self._todo_hovering_box = False
 
@@ -603,6 +624,8 @@ class CodeEditor(QPlainTextEdit):
         super().setDocument(document)
         self._apply_highlighter()
         self._apply_fold_provider()
+        self._rebuild_change_region_selections()
+        self._rebuild_extra_selections()
 
     def _apply_highlighter(self):
         ensure_editor_highlighter(self)
@@ -2201,6 +2224,24 @@ class CodeEditor(QPlainTextEdit):
         x = 1
         self._paint_overview_line_set(
             painter,
+            self._overview_change_region_lines_for_layer("uncommitted"),
+            color=QColor(self._change_region_uncommitted_color),
+            x=x,
+            width=marker_w,
+            total_lines=total_lines,
+            content_h=content_h,
+        )
+        self._paint_overview_line_set(
+            painter,
+            self._overview_change_region_lines_for_layer("dirty"),
+            color=QColor(self._change_region_dirty_color),
+            x=x,
+            width=marker_w,
+            total_lines=total_lines,
+            content_h=content_h,
+        )
+        self._paint_overview_line_set(
+            painter,
             self._overview_occurrence_lines,
             color=QColor(str(self._overview_cfg.get("occurrence_color", "#66A86A"))),
             x=x,
@@ -2494,6 +2535,111 @@ class CodeEditor(QPlainTextEdit):
             return "squiggle"
         return mode
 
+    def set_change_region_colors(
+        self,
+        *,
+        dirty_background: str | QColor = DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
+        uncommitted_background: str | QColor = DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX,
+    ) -> None:
+        dirty = parse_editor_overlay_color(dirty_background, DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX)
+        uncommitted = parse_editor_overlay_color(uncommitted_background, DEFAULT_EDITOR_UNCOMMITTED_BACKGROUND_HEX)
+        if (
+            dirty == self._change_region_dirty_color
+            and uncommitted == self._change_region_uncommitted_color
+        ):
+            return
+        self._change_region_dirty_color = dirty
+        self._change_region_uncommitted_color = uncommitted
+        self._rebuild_change_region_selections()
+        self._rebuild_extra_selections()
+
+    def set_change_region_highlights(
+        self,
+        *,
+        dirty_lines: set[int] | list[int] | tuple[int, ...] | None = None,
+        uncommitted_lines: set[int] | list[int] | tuple[int, ...] | None = None,
+        dirty_background: str | QColor | None = None,
+        uncommitted_background: str | QColor | None = None,
+    ) -> None:
+        next_dirty = normalize_line_numbers(dirty_lines)
+        next_uncommitted = normalize_line_numbers(uncommitted_lines)
+
+        if dirty_background is not None or uncommitted_background is not None:
+            self.set_change_region_colors(
+                dirty_background=(
+                    dirty_background
+                    if dirty_background is not None
+                    else self._change_region_dirty_color
+                ),
+                uncommitted_background=(
+                    uncommitted_background
+                    if uncommitted_background is not None
+                    else self._change_region_uncommitted_color
+                ),
+            )
+
+        if (
+            next_dirty == self._change_region_dirty_lines
+            and next_uncommitted == self._change_region_uncommitted_lines
+        ):
+            return
+
+        self._change_region_dirty_lines = next_dirty
+        self._change_region_uncommitted_lines = next_uncommitted
+        self._rebuild_change_region_selections()
+        self._rebuild_extra_selections()
+
+    def clear_change_region_highlights(self) -> None:
+        if not self._change_region_dirty_lines and not self._change_region_uncommitted_lines:
+            return
+        self._change_region_dirty_lines = set()
+        self._change_region_uncommitted_lines = set()
+        self._change_region_selections = []
+        self._refresh_overview_change_region_lines()
+        self._rebuild_extra_selections()
+        self._refresh_overview_marker_area()
+
+    def change_region_layer_for_line(self, line_number: int) -> str:
+        return resolve_change_region_layer(
+            int(line_number),
+            dirty_lines=self._change_region_dirty_lines,
+            uncommitted_lines=self._change_region_uncommitted_lines,
+        )
+
+    def _rebuild_change_region_selections(self) -> None:
+        self._change_region_selections = build_change_region_selections(
+            self.document(),
+            dirty_lines=self._change_region_dirty_lines,
+            uncommitted_lines=self._change_region_uncommitted_lines,
+            dirty_color=self._change_region_dirty_color,
+            uncommitted_color=self._change_region_uncommitted_color,
+        )
+        self._refresh_overview_change_region_lines()
+        self._refresh_overview_marker_area()
+
+    def _refresh_overview_change_region_lines(self) -> None:
+        dirty = {max(1, int(line)) for line in self._change_region_dirty_lines}
+        uncommitted: set[int] = set()
+        for line in self._change_region_uncommitted_lines:
+            line_number = max(1, int(line))
+            resolved = resolve_change_region_layer(
+                line_number,
+                dirty_lines=dirty,
+                uncommitted_lines=self._change_region_uncommitted_lines,
+            )
+            if resolved == "uncommitted":
+                uncommitted.add(line_number)
+        self._overview_change_region_dirty_lines = dirty
+        self._overview_change_region_uncommitted_lines = uncommitted
+
+    def _overview_change_region_lines_for_layer(self, layer: str) -> set[int]:
+        name = str(layer or "").strip().lower()
+        if name == "dirty":
+            return set(self._overview_change_region_dirty_lines)
+        if name != "uncommitted":
+            return set()
+        return set(self._overview_change_region_uncommitted_lines)
+
     def _paint_lint_squiggles(self, event) -> None:
         if self._lint_visual_mode() not in {"squiggle", "both"}:
             return
@@ -2608,7 +2754,8 @@ class CodeEditor(QPlainTextEdit):
         return (first, last)
 
     def _rebuild_extra_selections(self):
-        extraSelections = list(self._lint_selections)
+        extraSelections = list(self._change_region_selections)
+        extraSelections.extend(self._lint_selections)
         extraSelections.extend(self._spellcheck_selections)
         extraSelections.extend(self._occurrence_highlight_selections)
         extraSelections.extend(self._search_highlight_selections)

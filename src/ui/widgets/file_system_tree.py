@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
 
 from src.ui.icons.file_icon_provider import FileIconProvider
 
-
 class _FsNode:
     def __init__(
             self,
@@ -112,12 +111,12 @@ class FileSystemTreeModel(QAbstractItemModel):
             if val:
                 merged[key] = val
         self._git_colors = merged
-        self._emit_foreground_update()
+        self._emit_state_update_all()
 
     def set_git_status_maps(self, *, file_states: Dict[str, str], folder_states: Dict[str, str]):
         self._git_file_states = {self._canonical(path): str(state) for path, state in file_states.items()}
         self._git_folder_states = {self._canonical(path): str(state) for path, state in folder_states.items()}
-        self._emit_foreground_update()
+        self._emit_state_update_all()
 
     def refresh_subtree(self, path: str, include_excluded: Optional[bool] = None):
         target = self._canonical(path)
@@ -486,14 +485,37 @@ class FileSystemTreeModel(QAbstractItemModel):
             self._unregister_node_recursive(child)
         self._path_map.pop(node.path, None)
 
-    def _emit_foreground_update(self):
+    def _git_state_for_node(self, path: str, is_dir: bool) -> str:
+        if is_dir:
+            return str(self._git_folder_states.get(path, "") or "").strip().lower()
+        return str(self._git_file_states.get(path, "") or "").strip().lower()
+
+    @staticmethod
+    def _state_data_roles() -> list[int]:
+        return [
+            Qt.ItemDataRole.ForegroundRole,
+            Qt.ItemDataRole.UserRole,
+        ]
+
+    def _emit_state_update_for_paths(self, paths: set[str]) -> None:
+        if not paths:
+            return
+        roles = self._state_data_roles()
+        for path in sorted(paths, key=lambda value: (len(value), value.lower())):
+            idx = self.index_from_path(path)
+            if idx.isValid():
+                self.dataChanged.emit(idx, idx, roles)
+
+    def _emit_state_update_all(self):
+        roles = self._state_data_roles()
+
         def _walk(parent_index: QModelIndex):
             rows = self.rowCount(parent_index)
             for row in range(rows):
                 idx = self.index(row, 0, parent_index)
                 if not idx.isValid():
                     continue
-                self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.ForegroundRole])
+                self.dataChanged.emit(idx, idx, roles)
                 node = cast(_FsNode, idx.internalPointer())
                 if node is not None and node.children_loaded:
                     _walk(idx)
@@ -511,10 +533,15 @@ class FileSystemTreeModel(QAbstractItemModel):
         return self._root_path
 
     def _metadata_for_path(self, path: str, is_dir: bool) -> Dict[str, Any]:
+        cpath = self._canonical(path)
+        git_state = self._git_state_for_node(cpath, is_dir) or "clean"
         return {
-            "path": self._canonical(path),
-            "relative_path": self._relative_to_root(path),
+            "path": cpath,
+            "relative_path": self._relative_to_root(cpath),
             "is_dir": bool(is_dir),
+            "dirty": False,
+            "git_state": git_state,
+            "state": "normal",
         }
 
     def _relative_to_root(self, path: str) -> str:
@@ -662,6 +689,9 @@ class FileSystemTreeWidget(QTreeView):
                 "path": cpath,
                 "relative_path": cpath,
                 "is_dir": is_dir,
+                "dirty": False,
+                "git_state": "clean",
+                "state": "normal",
             }
         return self._model.metadata_from_index(index)
 

@@ -146,6 +146,13 @@ class WorkspaceController(QObject):
             self._external_file_signatures[saved_path] = sig
         if self._is_project_config_path(saved_path) and not self.ide._project_config_reload_active:
             self._queue_project_config_reload(source=source, honor_open_editors=True)
+        change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
+        notifier = getattr(change_highlights, "notify_file_saved", None)
+        if callable(notifier):
+            try:
+                notifier(saved_path)
+            except Exception:
+                pass
 
     def _external_file_signature(self, path: str) -> tuple[bool, int, int] | None:
         try:
@@ -256,6 +263,13 @@ class WorkspaceController(QObject):
                 pass
             if isinstance(widget, EditorWidget):
                 self._refresh_editor_title(widget)
+            change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
+            notifier = getattr(change_highlights, "notify_file_reloaded", None)
+            if callable(notifier):
+                try:
+                    notifier(path)
+                except Exception:
+                    pass
             if is_project_config:
                 self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
             return
@@ -295,6 +309,13 @@ class WorkspaceController(QObject):
             if self._is_tdoc_related_path(path):
                 self._schedule_tdoc_validation(path, delay_ms=0)
         self.ide.statusBar().showMessage(f"Reloaded from disk: {os.path.basename(path)}", 1800)
+        change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
+        notifier = getattr(change_highlights, "notify_file_reloaded", None)
+        if callable(notifier):
+            try:
+                notifier(path)
+            except Exception:
+                pass
         if is_project_config:
             self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
 
