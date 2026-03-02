@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 
 from src.ui.editor_workspace import EditorWidget
@@ -22,6 +23,7 @@ class MarkdownEditorTab(QWidget):
         self._preview.setHeadFlags(MDHeadFlags.none)
         self._editor.setMinimumWidth(260)
         self._preview.setMinimumWidth(220)
+        self._sync_preview_background_from_editor()
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -117,6 +119,7 @@ class MarkdownEditorTab(QWidget):
         else:
             self._apply_default_splitter_sizes(force=True)
         if show_preview:
+            self._sync_preview_background_from_editor()
             self._queue_preview_refresh(immediate=True)
 
     def is_preview_visible(self) -> bool:
@@ -147,9 +150,38 @@ class MarkdownEditorTab(QWidget):
         if not self.is_preview_visible():
             self._pending_refresh_while_hidden = True
             return
+        self._sync_preview_background_from_editor()
         text = str(self._editor.toPlainText() or "")
         self._preview.setMarkdown(text, base_url=self._base_url())
         self._pending_refresh_while_hidden = False
+
+    def _sync_preview_background_from_editor(self) -> None:
+        color = None
+        getter = getattr(self._editor, "editor_background_color", None)
+        if callable(getter):
+            try:
+                candidate = getter()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, QColor) and candidate.isValid() and candidate.alpha() > 0:
+                color = candidate
+
+        if color is None:
+            candidate = getattr(self._editor, "_editor_background_color", None)
+            if isinstance(candidate, QColor) and candidate.isValid() and candidate.alpha() > 0:
+                color = candidate
+
+        if color is None:
+            try:
+                palette_color = QColor(self._editor.palette().color(self._editor.backgroundRole()))
+            except Exception:
+                palette_color = QColor()
+            if palette_color.isValid() and palette_color.alpha() > 0:
+                color = palette_color
+
+        setter = getattr(self._preview, "setPreferredPageBackgroundColor", None)
+        if callable(setter):
+            setter(color if isinstance(color, QColor) and color.isValid() else "")
 
     def _apply_default_splitter_sizes(self, *, force: bool = False) -> None:
         if not self.is_preview_visible():

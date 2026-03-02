@@ -1167,6 +1167,7 @@ class PythonIDE(Window):
             family=str(self.font_family or "").strip(),
             point_size=int(self.font_size),
         )
+        self._apply_editor_background_to_editor(editor)
         editor.textChanged.connect(self._on_commit_md_editor_text_changed)
         self.commit_md_editor = editor
         self.dock_commit_md.setWidget(editor)
@@ -2566,6 +2567,17 @@ class PythonIDE(Window):
                 background_tint_color=str(cfg.get("background_tint_color", "#000000") or "#000000"),
                 background_tint_strength=int(cfg.get("background_tint_strength", 0)),
             )
+        except Exception:
+            pass
+
+    def _apply_image_viewer_background_to_widget(self, widget: object) -> None:
+        setter = getattr(widget, "set_viewer_background", None)
+        if not callable(setter):
+            return
+        cfg = self._editor_background_config()
+        color = str(cfg.get("background_color", "#252526") or "#252526")
+        try:
+            setter(color)
         except Exception:
             pass
 
@@ -5435,6 +5447,7 @@ class PythonIDE(Window):
                     f"Could not open image file:\n{cpath}",
                 )
             return None
+        self._apply_image_viewer_background_to_widget(viewer)
         tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
         tabs.add_editor(viewer)
         return viewer
@@ -5916,8 +5929,11 @@ class PythonIDE(Window):
                     clear_inline = getattr(widget, "clear_inline_suggestion", None)
                     if callable(clear_inline):
                         clear_inline()
+            elif isinstance(widget, ImageViewerWidget):
+                self._apply_image_viewer_background_to_widget(widget)
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._track_widget_change_highlights(self.commit_md_editor)
+        self._apply_editor_background_to_editor(self.commit_md_editor)
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()

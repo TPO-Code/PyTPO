@@ -81,6 +81,7 @@ class MarkdownViewerWidget(QWidget):
         self._shell_loading: bool = False
         self._pending_md_html: str = ""
         self._pending_base_url: QUrl = QUrl()
+        self._preferred_page_bg: str = ""
 
         # explicit head flags (default blank header)
         self._head_flags: MDHeadFlags = MDHeadFlags.none
@@ -99,6 +100,11 @@ class MarkdownViewerWidget(QWidget):
         self._code_title_bg: str = pal.color(QPalette.AlternateBase).name()
         self._code_lineno_text: str = pal.color(QPalette.Mid).name()
         self._page_bg: str = pal.color(QPalette.Window).name()
+        self._scrollbar_track: str = pal.color(QPalette.Base).name()
+        self._scrollbar_thumb: str = pal.color(QPalette.Mid).name()
+        self._scrollbar_thumb_hover: str = pal.color(QPalette.Midlight).name()
+        self._scrollbar_size_px: int = 12
+        self._scrollbar_radius_px: int = 6
         self._hit_bg: str = "rgba(189,147,249,0.35)"
         self._hit_current: str = "rgba(255,184,108,0.6)"
         self._sync_theme_from_host()
@@ -237,6 +243,16 @@ class MarkdownViewerWidget(QWidget):
         self._hit_current = (v or "").strip()
         self._trigger_theme_update()
     hitCurrent = Property(str, getHitCurrent, setHitCurrent)
+
+    def setPreferredPageBackgroundColor(self, value: str | QColor | None) -> None:
+        color = QColor(value) if isinstance(value, QColor) else QColor(str(value or "").strip())
+        normalized = color.name() if color.isValid() else ""
+        if normalized == self._preferred_page_bg:
+            return
+        self._preferred_page_bg = normalized
+        self._sync_theme_from_host()
+        self._apply_webview_background()
+        self._trigger_theme_update()
 
     # compatibility placeholders
     def getBgColor(self) -> str: return ""
@@ -838,6 +854,11 @@ window.MV_scrollToAnchor = function(anchor) {
             "--border-color": self._border_color,
             "--code-title-bg": self._code_title_bg,
             "--code-lineno-text": self._code_lineno_text,
+            "--scrollbar-track": self._scrollbar_track,
+            "--scrollbar-thumb": self._scrollbar_thumb,
+            "--scrollbar-thumb-hover": self._scrollbar_thumb_hover,
+            "--scrollbar-size": f"{self._scrollbar_size_px}px",
+            "--scrollbar-radius": f"{self._scrollbar_radius_px}px",
             "--hit-bg": self._hit_bg,
             "--hit-current": self._hit_current,
             "--font-family": self._font_family or "system-ui",
@@ -865,6 +886,11 @@ window.MV_scrollToAnchor = function(anchor) {
   --border-color: #d0d0d0;
   --code-title-bg: rgba(0,0,0,0.08);
   --code-lineno-text: #8a8f98;
+  --scrollbar-track: #1f252f;
+  --scrollbar-thumb: #4a5568;
+  --scrollbar-thumb-hover: #65748a;
+  --scrollbar-size: 12px;
+  --scrollbar-radius: 6px;
   --hit-bg: rgba(255,226,143,0.6);
   --hit-current: rgba(250,166,26,0.7);
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -902,6 +928,32 @@ main ol ol { list-style-type: lower-alpha; } main ol ol ol { list-style-type: lo
 
 mark.mdhit { background: var(--hit-bg); padding: 0 2px; border-radius: 3px; }
 mark.mdhit.current { background: var(--hit-current); }
+
+/* Match app-themed scrollbars inside QWebEngine content. */
+* {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: var(--scrollbar-radius);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--scrollbar-radius);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
+}
 """
 
     def _code_block_css(self) -> str:
@@ -975,19 +1027,17 @@ td.code { padding: 0; }
             return {}
         source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
         pattern = re.compile(rf"{re.escape(selector)}\s*\{{(.*?)\}}", re.DOTALL | re.IGNORECASE)
-        match = pattern.search(source)
-        if not match:
-            return {}
         props: dict[str, str] = {}
-        for declaration in match.group(1).split(";"):
-            if ":" not in declaration:
-                continue
-            key, value = declaration.split(":", 1)
-            key = key.strip().lower()
-            value = value.strip()
-            if not key or not value:
-                continue
-            props[key] = value
+        for match in pattern.finditer(source):
+            for declaration in match.group(1).split(";"):
+                if ":" not in declaration:
+                    continue
+                key, value = declaration.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if not key or not value:
+                    continue
+                props[key] = value
         return props
 
     @staticmethod
@@ -1001,6 +1051,28 @@ td.code { padding: 0; }
             + 0.0722 * color.blueF()
         )
         return luminance < 0.5
+
+    @staticmethod
+    def _qss_px_to_int(value: object, default: int, *, minimum: int, maximum: int) -> int:
+        text = str(value or "").strip().lower()
+        if not text:
+            return int(default)
+        match = re.search(r"(-?\d+(?:\.\d+)?)", text)
+        if not match:
+            return int(default)
+        try:
+            raw = int(round(float(match.group(1))))
+        except Exception:
+            return int(default)
+        return max(int(minimum), min(int(maximum), raw))
+
+    @staticmethod
+    def _qss_pick(props: dict[str, str], *keys: str) -> str:
+        for key in keys:
+            value = str(props.get(key, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     def _sync_theme_from_host(self) -> None:
         # Prefer app QSS root colors because QWebEngine HTML does not inherit QSS.
@@ -1021,6 +1093,74 @@ td.code { padding: 0; }
         self._border_color = pal.color(QPalette.Mid).name()
         self._code_title_bg = pal.color(QPalette.AlternateBase).name()
         self._code_lineno_text = pal.color(QPalette.Mid).name()
+
+        sb_vertical = self._qss_props_for_selector(qss, "QScrollBar:vertical")
+        sb_horizontal = self._qss_props_for_selector(qss, "QScrollBar:horizontal")
+        sb_generic = self._qss_props_for_selector(qss, "QScrollBar")
+        sb_handle_v = self._qss_props_for_selector(qss, "QScrollBar::handle:vertical")
+        sb_handle_h = self._qss_props_for_selector(qss, "QScrollBar::handle:horizontal")
+        sb_handle = self._qss_props_for_selector(qss, "QScrollBar::handle")
+        sb_handle_hover_v = self._qss_props_for_selector(qss, "QScrollBar::handle:vertical:hover")
+        sb_handle_hover_h = self._qss_props_for_selector(qss, "QScrollBar::handle:horizontal:hover")
+        sb_handle_hover = self._qss_props_for_selector(qss, "QScrollBar::handle:hover")
+
+        track = (
+            self._qss_pick(sb_vertical, "background-color", "background")
+            or self._qss_pick(sb_horizontal, "background-color", "background")
+            or self._qss_pick(sb_generic, "background-color", "background")
+            or self._page_bg
+        )
+        thumb = (
+            self._qss_pick(sb_handle_v, "background-color", "background")
+            or self._qss_pick(sb_handle_h, "background-color", "background")
+            or self._qss_pick(sb_handle, "background-color", "background")
+        )
+        if not thumb:
+            thumb_color = QColor(pal.color(QPalette.Mid))
+            thumb = thumb_color.name()
+
+        thumb_hover = (
+            self._qss_pick(sb_handle_hover_v, "background-color", "background")
+            or self._qss_pick(sb_handle_hover_h, "background-color", "background")
+            or self._qss_pick(sb_handle_hover, "background-color", "background")
+        )
+        if not thumb_hover:
+            hover_color = QColor(thumb)
+            if not hover_color.isValid():
+                hover_color = QColor(pal.color(QPalette.Midlight))
+            if self._is_dark_color(track):
+                hover_color = hover_color.lighter(120)
+            else:
+                hover_color = hover_color.darker(115)
+            thumb_hover = hover_color.name()
+
+        size_px = self._qss_px_to_int(
+            self._qss_pick(sb_vertical, "width")
+            or self._qss_pick(sb_horizontal, "height")
+            or self._qss_pick(sb_generic, "width", "height"),
+            default=12,
+            minimum=8,
+            maximum=24,
+        )
+        radius_px = self._qss_px_to_int(
+            self._qss_pick(sb_handle_v, "border-radius")
+            or self._qss_pick(sb_handle_h, "border-radius")
+            or self._qss_pick(sb_handle, "border-radius")
+            or self._qss_pick(sb_vertical, "border-radius")
+            or self._qss_pick(sb_horizontal, "border-radius")
+            or self._qss_pick(sb_generic, "border-radius"),
+            default=max(4, min(10, size_px // 2)),
+            minimum=0,
+            maximum=20,
+        )
+
+        self._scrollbar_track = track
+        self._scrollbar_thumb = thumb
+        self._scrollbar_thumb_hover = thumb_hover
+        self._scrollbar_size_px = size_px
+        self._scrollbar_radius_px = radius_px
+        if self._preferred_page_bg:
+            self._page_bg = self._preferred_page_bg
         self._is_dark_theme = self._is_dark_color(self._page_bg)
 
     def _apply_webview_background(self) -> None:

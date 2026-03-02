@@ -1226,6 +1226,9 @@ class CodeEditor(QPlainTextEdit):
             viewport.setPalette(viewport_palette)
             viewport.setAutoFillBackground(False)
 
+    def editor_background_color(self) -> QColor:
+        return QColor(self._editor_background_color)
+
     def _paint_editor_background_layer(self, painter: QPainter, rect: QRect) -> None:
         target = self.viewport().rect() if self.viewport() is not None else QRect()
         if target.isEmpty():

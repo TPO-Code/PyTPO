@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QImageReader, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -134,8 +134,10 @@ class _ImageGraphicsView(QGraphicsView):
 class ImageViewerWidget(QWidget):
     def __init__(self, *, file_path: str | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("PyTPOImageViewer")
         self.editor_id = str(uuid.uuid4())
         self.file_path: str | None = None
+        self._background_color = QColor()
 
         self._scene = QGraphicsScene(self)
         self._pixmap_item = QGraphicsPixmapItem()
@@ -147,6 +149,7 @@ class ImageViewerWidget(QWidget):
         self._view.zoomChanged.connect(self._refresh_status_text)
 
         self._status_label = QLabel(self)
+        self._status_label.setObjectName("PyTPOImageViewerStatus")
         self._status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._status_label.setText("No image loaded")
 
@@ -155,6 +158,7 @@ class ImageViewerWidget(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self._view, 1)
         layout.addWidget(self._status_label, 0)
+        self.set_viewer_background("")
 
         if file_path:
             self.load_file(file_path)
@@ -174,6 +178,23 @@ class ImageViewerWidget(QWidget):
 
     def zoom_100(self) -> None:
         self._view.set_zoom_percent(100.0)
+
+    def set_viewer_background(self, value: str | QColor | None) -> None:
+        color = QColor(value) if isinstance(value, QColor) else QColor(str(value or "").strip())
+        if not color.isValid():
+            color = QColor(self.palette().color(self.backgroundRole()))
+        if not color.isValid():
+            color = QColor("#252526")
+        if color == self._background_color:
+            return
+        self._background_color = QColor(color)
+        bg_hex = self._background_color.name()
+        self._view.setBackgroundBrush(self._background_color)
+        self._scene.setBackgroundBrush(self._background_color)
+        self.setStyleSheet(
+            f"#PyTPOImageViewer{{background:{bg_hex};}}"
+            f"#PyTPOImageViewerStatus{{background:{bg_hex};}}"
+        )
 
     def load_file(self, path: str) -> bool:
         target = str(path or "").strip()
