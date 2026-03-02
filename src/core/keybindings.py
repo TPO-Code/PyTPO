@@ -98,6 +98,12 @@ KEYBINDING_ACTIONS: tuple[KeybindingAction, ...] = (
     KeybindingAction("general", "action.paste", "Paste", ("Ctrl+V",)),
     KeybindingAction("general", "action.find", "Find", ("Ctrl+F",)),
     KeybindingAction("general", "action.replace", "Replace", ("Ctrl+H",)),
+    KeybindingAction(
+        "general",
+        "action.duplicate_selection_or_line",
+        "Duplicate Selection/Line",
+        ("Ctrl+D",),
+    ),
     KeybindingAction("general", "action.go_to_definition", "Go to Definition", ("F12",)),
     KeybindingAction("general", "action.find_usages", "Find Usages", ("Shift+F12",)),
     KeybindingAction("general", "action.rename_symbol", "Rename Symbol", ("F2",)),

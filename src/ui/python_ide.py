@@ -1,7 +1,5 @@
 import os
 import re
-import shutil
-import sys
 import time
 import tomllib
 import weakref
@@ -284,7 +282,6 @@ class PythonIDE(Window):
     def __init__(self):
         requested_root = os.path.realpath(QDir.currentPath())
         ide_app_dir = self._default_ide_app_dir()
-        self._migrate_legacy_ide_settings_file(ide_app_dir)
         self.no_project_mode = os.environ.get(self.NO_PROJECT_MODE_ENV, "").strip() == "1"
         if self.no_project_mode:
             workspace = Path(ide_app_dir) / self.NO_PROJECT_DIRNAME
@@ -1926,10 +1923,11 @@ class PythonIDE(Window):
             )
 
         for ed in self.editor_workspace.all_editors():
-            if not isinstance(ed, EditorWidget):
+            configure_keybindings = getattr(ed, "configure_keybindings", None)
+            if not callable(configure_keybindings):
                 continue
             try:
-                ed.configure_keybindings(bindings)
+                configure_keybindings(bindings)
             except Exception:
                 pass
 
@@ -4381,6 +4379,12 @@ class PythonIDE(Window):
                 completion_setter(self._completion_config())
             except Exception:
                 pass
+        configure_keybindings = getattr(widget, "configure_keybindings", None)
+        if callable(configure_keybindings):
+            try:
+                configure_keybindings(self._keybindings_config())
+            except Exception:
+                pass
 
         ref = weakref.ref(widget)
         widget.open_file_by_name = lambda target, w=ref: self._on_tdoc_file_link_requested(w, target)
@@ -5131,33 +5135,6 @@ class PythonIDE(Window):
         app_root = Path(__file__).resolve().parents[2]
         return str(app_root / cls.IDE_SETTINGS_DIRNAME)
 
-    @classmethod
-    def _legacy_ide_app_dir(cls) -> Path:
-        return Path.home() / cls.IDE_SETTINGS_DIRNAME
-
-    @classmethod
-    def _migrate_legacy_ide_settings_file(cls, target_dir: str) -> None:
-        target_base = Path(target_dir).expanduser()
-        source_base = cls._legacy_ide_app_dir()
-        try:
-            if target_base.resolve() == source_base.resolve():
-                return
-        except Exception:
-            if str(target_base) == str(source_base):
-                return
-
-        source_file = source_base / "ide-settings.json"
-        target_file = target_base / "ide-settings.json"
-        if not source_file.exists() or target_file.exists():
-            return
-
-        try:
-            target_base.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_file, target_file)
-        except Exception:
-            # Best-effort migration; fallback is defaults in target directory.
-            return
-
     def load_or_create_project_config(self) -> dict:
         self.settings_manager.load_all()
         self.project_config_path = self._canonical_path(str(self.settings_manager.project_path))
@@ -5300,3 +5277,6 @@ class PythonIDE(Window):
         if app is not None:
             app.setApplicationName(self.APP_NAME)
             app.setApplicationDisplayName(title)
+
+
+__all__ = ["PythonIDE", "request_project_activation"]

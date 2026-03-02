@@ -6,6 +6,7 @@ import os
 import shutil
 
 from PySide6.QtCore import QMimeData, QPoint, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox
 
 from src.ui.dialogs.interpreter_picker_dialog import InterpreterPickerDialog
@@ -496,6 +497,26 @@ class ExplorerController:
                 return candidate
             counter += 1
 
+    def _show_in_system_explorer(self, path: str) -> None:
+        cpath = self._canonical_path(path)
+        if os.path.isdir(cpath):
+            target_dir = cpath
+        elif os.path.isfile(cpath):
+            target_dir = self._canonical_path(os.path.dirname(cpath))
+        else:
+            self._show_tree_error("Show in Explorer", f"Path does not exist:\n{cpath}")
+            return
+
+        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(target_dir))
+        if not ok:
+            self._show_tree_error(
+                "Show in Explorer",
+                f"Could not open system file explorer for:\n{target_dir}",
+            )
+            return
+
+        self.ide.statusBar().showMessage(f"Opened in explorer: {target_dir}", 2200)
+
     def _populate_folder_context_menu(self, menu: QMenu, folder_path: str):
         act_new_file = menu.addAction("New File...")
         act_new_file.triggered.connect(lambda: self._create_new_file(folder_path))
@@ -527,6 +548,10 @@ class ExplorerController:
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(folder_path))
         self._apply_context_shortcut(act_delete, "_act_tree_delete")
+
+        menu.addSeparator()
+        act_show_in_explorer = menu.addAction("Show in Explorer")
+        act_show_in_explorer.triggered.connect(lambda: self._show_in_system_explorer(folder_path))
 
         menu.addSeparator()
 
@@ -579,6 +604,9 @@ class ExplorerController:
         act_delete.triggered.connect(lambda: self._delete_path(file_path))
         self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
+        act_show_in_explorer = menu.addAction("Show in Explorer")
+        act_show_in_explorer.triggered.connect(lambda: self._show_in_system_explorer(file_path))
+
         excluded = self._is_file_explicitly_excluded(file_path)
         act_toggle_excluded = menu.addAction(
             "Include File in Indexing" if excluded else "Exclude File from Indexing"
@@ -615,6 +643,10 @@ class ExplorerController:
         act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(self.project_root))
         self._apply_context_shortcut(act_paste, "_act_tree_paste")
+
+        menu.addSeparator()
+        act_show_in_explorer = menu.addAction("Show in Explorer")
+        act_show_in_explorer.triggered.connect(lambda: self._show_in_system_explorer(self.project_root))
 
         menu.addSeparator()
 

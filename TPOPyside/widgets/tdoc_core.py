@@ -8,12 +8,14 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Mapping
 
 from PySide6.QtGui import (
     QColor,
     QFont,
     QKeyEvent,
     QKeySequence,
+    QShortcut,
     QPainter,
     QPalette,
     QPixmap,
@@ -32,7 +34,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QPushButton,
     QStyle,
     QStyleOptionViewItem,
@@ -1507,6 +1508,18 @@ class _TDocOverviewMarkerArea(QWidget):
         self._editor.overviewMarkerAreaMousePressEvent(event)
 
 
+class _TDocLineNumberArea(QWidget):
+    def __init__(self, editor: "TDocEditorWidget"):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor.lineNumberAreaWidth(), 0)
+
+    def paintEvent(self, event):
+        self._editor.lineNumberAreaPaintEvent(event)
+
+
 class _TDocCompletionItemDelegate(QStyledItemDelegate):
     def __init__(self, editor: "TDocEditorWidget"):
         super().__init__(editor)
@@ -1589,6 +1602,17 @@ class TDocEditorWidget(QTextEdit):
     LINK_RAW_PROPERTY = QTextCharFormat.UserProperty + 3
     IMAGE_RAW_PROPERTY = QTextCharFormat.UserProperty + 4
     IMAGE_PATH_PROPERTY = QTextCharFormat.UserProperty + 5
+    _default_keybindings: dict[str, dict[str, list[str]]] = {
+        "general": {
+            "action.find": ["Ctrl+F"],
+            "action.replace": ["Ctrl+H"],
+            "action.trigger_completion": ["Ctrl+Space"],
+            "action.ai_inline_assist": ["Alt+\\"],
+            "action.ai_inline_assist_alt_space": ["Alt+Space"],
+            "action.ai_inline_assist_ctrl_alt_space": ["Ctrl+Alt+Space"],
+            "action.duplicate_selection_or_line": ["Ctrl+D"],
+        },
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1610,6 +1634,13 @@ class TDocEditorWidget(QTextEdit):
         self._editor_background_source_pixmap: QPixmap | None = None
         self._editor_background_cache_size = QSize()
         self._editor_background_cache_pixmap: QPixmap | None = None
+        self._configured_keybindings = {
+            "general": {
+                key: list(value)
+                for key, value in self._default_keybindings.get("general", {}).items()
+            },
+        }
+        self._configured_shortcuts: list[QShortcut] = []
         self._apply_editor_background_palette()
 
         self._lint_visual_cfg = dict(_TDOC_LINT_VISUAL_DEFAULTS)
@@ -1678,16 +1709,21 @@ class TDocEditorWidget(QTextEdit):
         self.textChanged.connect(self._on_text_changed_search_refresh)
         self.textChanged.connect(self._schedule_occurrence_marker_refresh)
         self.textChanged.connect(self._on_text_changed_tdoc_completion_refresh)
+        self.textChanged.connect(self._refresh_line_number_area)
         self._completion_popup.itemClicked.connect(lambda _item: self._accept_tdoc_completion())
 
+        self.lineNumberArea = _TDocLineNumberArea(self)
         self.overviewMarkerArea = _TDocOverviewMarkerArea(self)
+        self.document().blockCountChanged.connect(self.updateLineNumberAreaWidth)
         self.verticalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
+        self.verticalScrollBar().valueChanged.connect(self._refresh_line_number_area)
         self.verticalScrollBar().valueChanged.connect(self._refresh_overview_marker_area)
         self.horizontalScrollBar().rangeChanged.connect(self._on_scrollbar_range_changed)
         self.cursorPositionChanged.connect(self.highlightCurrentLine)
         self.cursorPositionChanged.connect(self._on_cursor_position_changed_for_link_editing)
         self.cursorPositionChanged.connect(self._schedule_occurrence_marker_refresh)
         self.cursorPositionChanged.connect(self._on_cursor_position_changed_tdoc_completion_refresh)
+        self.cursorPositionChanged.connect(self._refresh_line_number_area)
         self.selectionChanged.connect(self._schedule_occurrence_marker_refresh)
 
         self._is_internal_change = False
@@ -1710,7 +1746,105 @@ class TDocEditorWidget(QTextEdit):
         self._apply_viewport_margins()
         self._position_search_bar()
         self.highlightCurrentLine()
+        self.updateLineNumberAreaWidth(0)
         self._schedule_occurrence_marker_refresh()
+        self._rebuild_configured_shortcuts()
+
+    @classmethod
+    def set_default_keybindings(cls, keybindings: Mapping[str, Mapping[str, list[str]]] | None) -> None:
+        merged = {
+            "general": {
+                key: list(value)
+                for key, value in cls._default_keybindings.get("general", {}).items()
+            },
+        }
+        payload = keybindings if isinstance(keybindings, Mapping) else {}
+        scoped = payload.get("general")
+        if isinstance(scoped, Mapping):
+            scope_map = merged.setdefault("general", {})
+            for action_id, sequence in scoped.items():
+                if not isinstance(sequence, list):
+                    continue
+                normalized = [str(item).strip() for item in sequence if str(item).strip()]
+                if normalized:
+                    scope_map[str(action_id)] = normalized
+        cls._default_keybindings = merged
+
+    def configure_keybindings(self, keybindings: Mapping[str, Mapping[str, list[str]]] | None) -> None:
+        self.__class__.set_default_keybindings(keybindings)
+        self._configured_keybindings = {
+            "general": {
+                key: list(value)
+                for key, value in self._default_keybindings.get("general", {}).items()
+            },
+        }
+        self._rebuild_configured_shortcuts()
+
+    def _action_sequence(self, scope: str, action_id: str) -> list[str]:
+        scoped = self._configured_keybindings.get(str(scope or "").strip().lower(), {})
+        if not isinstance(scoped, dict):
+            return []
+        sequence = scoped.get(str(action_id or "").strip())
+        if not isinstance(sequence, list):
+            return []
+        return [str(item).strip() for item in sequence if str(item).strip()]
+
+    @staticmethod
+    def _sequence_to_qkeysequence(sequence: list[str]) -> QKeySequence:
+        return QKeySequence(", ".join(str(item).strip() for item in sequence if str(item).strip()))
+
+    def _event_matches_action_shortcut(self, event: QKeyEvent, scope: str, action_id: str) -> bool:
+        sequence = self._action_sequence(scope, action_id)
+        if not sequence:
+            return False
+        chord = str(sequence[0] or "").strip()
+        if not chord:
+            return False
+        target = QKeySequence(chord)
+        if target.isEmpty():
+            return False
+        try:
+            mods = event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+            pressed = QKeySequence(int(mods) | int(event.key()))
+        except Exception:
+            return False
+        return bool(pressed.matches(target) == QKeySequence.SequenceMatch.ExactMatch)
+
+    def _clear_configured_shortcuts(self) -> None:
+        for shortcut in self._configured_shortcuts:
+            try:
+                shortcut.activated.disconnect()
+            except Exception:
+                pass
+            try:
+                shortcut.deleteLater()
+            except Exception:
+                pass
+        self._configured_shortcuts.clear()
+
+    def _install_shortcut(self, sequence: list[str], callback) -> None:
+        qseq = self._sequence_to_qkeysequence(sequence)
+        if qseq.isEmpty():
+            return
+        shortcut = QShortcut(qseq, self)
+        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(callback)
+        self._configured_shortcuts.append(shortcut)
+
+    def _rebuild_configured_shortcuts(self) -> None:
+        self._clear_configured_shortcuts()
+        self._install_shortcut(
+            self._action_sequence("general", "action.duplicate_selection_or_line"),
+            self._on_duplicate_selection_or_line_shortcut,
+        )
+
+    def _on_duplicate_selection_or_line_shortcut(self) -> None:
+        self.duplicate_selection_or_line()
 
     def update_completion_ui_settings(self, cfg: dict | None) -> None:
         payload = cfg if isinstance(cfg, dict) else {}
@@ -1753,14 +1887,21 @@ class TDocEditorWidget(QTextEdit):
         return "\t" if use_tabs else (" " * self._active_indent_width())
 
     def _handle_editor_shortcut_fallback(self, event: QKeyEvent) -> bool:
-        if event.matches(QKeySequence.Find):
+        if self._event_matches_action_shortcut(event, "general", "action.find"):
             self.show_find_bar()
             return True
-        if event.matches(QKeySequence.Replace):
+        if self._event_matches_action_shortcut(event, "general", "action.replace"):
             self.show_replace_bar()
             return True
-        if event.key() == Qt.Key_Space and bool(event.modifiers() & Qt.ControlModifier):
+        if self._event_matches_action_shortcut(event, "general", "action.trigger_completion"):
             self.request_manual_completion()
+            return True
+        if (
+            self._event_matches_action_shortcut(event, "general", "action.ai_inline_assist")
+            or self._event_matches_action_shortcut(event, "general", "action.ai_inline_assist_ctrl_alt_space")
+            or self._event_matches_action_shortcut(event, "general", "action.ai_inline_assist_alt_space")
+        ):
+            self.aiAssistRequested.emit("manual")
             return True
         if event.key() == Qt.Key_F3:
             if event.modifiers() & Qt.ShiftModifier:
@@ -2120,6 +2261,83 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             return 10
 
+    def lineNumberAreaWidth(self) -> int:
+        digits = 1
+        max_lines = max(1, int(self.document().blockCount()))
+        while max_lines >= 10:
+            max_lines //= 10
+            digits += 1
+        return 8 + self.fontMetrics().horizontalAdvance("9") * digits + 6
+
+    def updateLineNumberAreaWidth(self, _value: int = 0) -> None:
+        self._apply_viewport_margins()
+        self._refresh_line_number_area()
+
+    def _position_line_number_area(self) -> None:
+        if not hasattr(self, "lineNumberArea") or not isinstance(self.lineNumberArea, QWidget):
+            return
+        width = self.lineNumberAreaWidth()
+        if width <= 0:
+            self.lineNumberArea.hide()
+            return
+        vp = self.viewport().geometry()
+        self.lineNumberArea.setGeometry(
+            QRect(
+                max(0, vp.left() - width),
+                vp.top(),
+                width,
+                max(0, vp.height()),
+            )
+        )
+        self.lineNumberArea.show()
+        self.lineNumberArea.raise_()
+
+    def _refresh_line_number_area(self) -> None:
+        if hasattr(self, "lineNumberArea") and isinstance(self.lineNumberArea, QWidget):
+            self.lineNumberArea.update()
+
+    def lineNumberAreaPaintEvent(self, event) -> None:
+        if not hasattr(self, "lineNumberArea") or not isinstance(self.lineNumberArea, QWidget):
+            return
+
+        painter = QPainter(self.lineNumberArea)
+        gutter = QColor(self._editor_background_color)
+        if gutter.lightness() < 128:
+            gutter = gutter.darker(125)
+        else:
+            gutter = gutter.darker(108)
+        painter.fillRect(event.rect(), gutter)
+
+        current_block_no = int(self.textCursor().blockNumber())
+        rect = event.rect()
+        number_right = max(0, self.lineNumberArea.width() - 4)
+        block = self.document().firstBlock()
+
+        while block.isValid():
+            block_cursor = QTextCursor(block)
+            block_rect = self.cursorRect(block_cursor)
+            top = int(block_rect.top())
+            height = max(1, int(block_rect.height()))
+            if top > rect.bottom():
+                break
+            if top + height >= rect.top():
+                if int(block.blockNumber()) == current_block_no:
+                    number_color = QColor(gutter)
+                    number_color = number_color.lighter(205) if gutter.lightness() < 128 else number_color.darker(215)
+                else:
+                    number_color = QColor(gutter)
+                    number_color = number_color.lighter(145) if gutter.lightness() < 128 else number_color.darker(180)
+                painter.setPen(number_color)
+                painter.drawText(
+                    0,
+                    top,
+                    number_right,
+                    height,
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    str(int(block.blockNumber()) + 1),
+                )
+            block = block.next()
+
     def update_overview_marker_settings(self, overview_cfg: dict | None) -> None:
         cfg = overview_cfg if isinstance(overview_cfg, dict) else {}
         merged = dict(_TDOC_OVERVIEW_MARKER_DEFAULTS)
@@ -2190,8 +2408,10 @@ class TDocEditorWidget(QTextEdit):
 
     def _apply_viewport_margins(self):
         top_margin = self._search_top_margin()
+        left_margin = self.lineNumberAreaWidth()
         right_margin = self.overviewMarkerAreaWidth()
-        self.setViewportMargins(0, top_margin, right_margin, 0)
+        self.setViewportMargins(left_margin, top_margin, right_margin, 0)
+        self._position_line_number_area()
         self._position_overview_marker_area()
 
     def _position_overview_marker_area(self):
@@ -2214,7 +2434,9 @@ class TDocEditorWidget(QTextEdit):
         self.overviewMarkerArea.raise_()
 
     def _on_scrollbar_range_changed(self, *_args):
+        self._position_line_number_area()
         self._position_overview_marker_area()
+        self._refresh_line_number_area()
         self._refresh_overview_marker_area()
 
     def _position_search_bar(self):
@@ -3082,13 +3304,16 @@ class TDocEditorWidget(QTextEdit):
         self._apply_editor_background_palette()
         self._apply_viewport_margins()
         self._position_search_bar()
+        self._position_line_number_area()
         self._position_overview_marker_area()
+        self._refresh_line_number_area()
         self._refresh_overview_marker_area()
         self._position_tdoc_completion_popup()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
         if dx != 0 or dy != 0:
+            self._refresh_line_number_area()
             self._refresh_overview_marker_area()
             self._position_tdoc_completion_popup()
 
@@ -3934,7 +4159,7 @@ class TDocEditorWidget(QTextEdit):
             if callable(self.go_to_symbol_definition):
                 go_to_definition_action = menu.addAction("Go to Definition")
                 go_to_definition_action.triggered.connect(
-                    lambda s=symbol, l=label: self.go_to_symbol_definition(s or l)
+                    lambda s=symbol, label_text=label: self.go_to_symbol_definition(s or label_text)
                 )
             if label:
                 if callable(self.rename_alias):
@@ -4089,6 +4314,61 @@ class TDocEditorWidget(QTextEdit):
                 block = block.next()
         finally:
             cursor.endEditBlock()
+
+    def duplicate_selection_or_line(self) -> bool:
+        cursor = self.textCursor()
+        doc = self.document()
+
+        if cursor.hasSelection():
+            end = int(cursor.selectionEnd())
+            selected_text = str(cursor.selectedText() or "").replace("\u2029", "\n")
+            if not selected_text:
+                return False
+
+            cursor.beginEditBlock()
+            try:
+                insert_cursor = QTextCursor(doc)
+                insert_cursor.setPosition(end)
+                insert_cursor.insertText(selected_text)
+
+                restored = QTextCursor(doc)
+                restored.setPosition(end)
+                restored.setPosition(end + len(selected_text), QTextCursor.KeepAnchor)
+                self.setTextCursor(restored)
+            finally:
+                cursor.endEditBlock()
+            return True
+
+        block = cursor.block()
+        if not block.isValid():
+            return False
+
+        line_text = block.text()
+        current_col = int(cursor.positionInBlock())
+        next_block = block.next()
+        insert_at = int(next_block.position()) if next_block.isValid() else max(0, int(doc.characterCount()) - 1)
+        insert_text = (line_text + "\n") if next_block.isValid() else ("\n" + line_text)
+        target_block_no = int(block.blockNumber()) + 1
+
+        cursor.beginEditBlock()
+        try:
+            insert_cursor = QTextCursor(doc)
+            insert_cursor.setPosition(insert_at)
+            insert_cursor.insertText(insert_text)
+
+            dup_block = doc.findBlockByNumber(target_block_no)
+            if dup_block.isValid():
+                new_pos = int(dup_block.position()) + min(current_col, len(dup_block.text()))
+            else:
+                new_pos = insert_at
+
+            restored = QTextCursor(doc)
+            restored.setPosition(max(0, new_pos))
+            self.setTextCursor(restored)
+            self.ensureCursorVisible()
+        finally:
+            cursor.endEditBlock()
+        return True
 
     def keyPressEvent(self, event):
         text = str(event.text() or "")

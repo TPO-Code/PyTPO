@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer
-from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor
+from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -405,6 +405,8 @@ class DraggableTabBar(QTabBar):
 
 
 class EditorTabs(QTabWidget):
+    _missing_icon_warning_keys: set[str] = set()
+
     def __init__(self, workspace: "EditorWorkspace", owner_window: QMainWindow | None = None, parent=None):
         super().__init__(parent)
 
@@ -414,6 +416,10 @@ class EditorTabs(QTabWidget):
 
         self.workspace = workspace
         self.owner_window = owner_window
+        self._tab_reorder_guard = False
+        self._pin_icon_checked = False
+        self._pin_icon_available = False
+        self._pin_icon = QIcon()
 
         self._tabbar = DraggableTabBar(self, self)
         self.setTabBar(self._tabbar)
@@ -429,6 +435,132 @@ class EditorTabs(QTabWidget):
 
         self.tabCloseRequested.connect(self._on_tab_close_requested)
         self.currentChanged.connect(self._on_current_changed)
+        self.tabBar().tabMoved.connect(self._on_tab_bar_moved)
+
+    def _icon_search_roots(self) -> list[Path]:
+        host = self.workspace.parentWidget()
+        while host is not None:
+            roots_getter = getattr(host, "_toolbar_icon_roots", None)
+            if callable(roots_getter):
+                try:
+                    roots = roots_getter()
+                except Exception:
+                    roots = []
+                out = [Path(p) for p in roots if isinstance(p, (str, Path))]
+                if out:
+                    return out
+            host = host.parentWidget()
+        base = Path(__file__).resolve().parents[1]
+        return [
+            base / "icons",
+            base / "assets" / "icons",
+            base / "ui" / "icons",
+            base / "resources" / "icons",
+        ]
+
+    def _report_missing_pin_icon(self, *, icon_key: str, checked_candidates: list[str]) -> None:
+        key = str(icon_key or "").strip()
+        if not key:
+            return
+
+        host = self.workspace.parentWidget()
+        owner_key_set: set[str] | None = None
+        appender: Callable[..., Any] | None = None
+        while host is not None:
+            maybe_set = getattr(host, "_toolbar_missing_icon_keys", None)
+            if isinstance(maybe_set, set):
+                owner_key_set = maybe_set
+            maybe_append = getattr(host, "_append_debug_output_lines", None)
+            if callable(maybe_append):
+                appender = maybe_append
+            if owner_key_set is not None and appender is not None:
+                break
+            host = host.parentWidget()
+
+        if owner_key_set is not None:
+            if key in owner_key_set:
+                return
+            owner_key_set.add(key)
+        else:
+            if key in self._missing_icon_warning_keys:
+                return
+            self._missing_icon_warning_keys.add(key)
+
+        print(f"[PyTPO] Missing tab icon '{key}'. Falling back to '[pin]' text.")
+        if callable(appender):
+            appender(
+                [
+                    f"[Tabs] Missing icon '{key}'. Falling back to [pin] text.",
+                    "[Tabs] Checked files:",
+                    *[f"  - {path}" for path in checked_candidates],
+                ],
+                reveal=False,
+            )
+
+    def _ensure_pin_icon_loaded(self) -> bool:
+        if self._pin_icon_checked:
+            return bool(self._pin_icon_available) and not self._pin_icon.isNull()
+
+        self._pin_icon_checked = True
+        key = "pin"
+        extensions = (".svg", ".png", ".ico", ".jpg", ".jpeg")
+        checked: list[str] = []
+        for root in self._icon_search_roots():
+            for ext in extensions:
+                candidate = root / f"{key}{ext}"
+                checked.append(str(candidate))
+                if not candidate.is_file():
+                    continue
+                icon = QIcon(str(candidate))
+                if icon.isNull():
+                    continue
+                self._pin_icon = icon
+                self._pin_icon_available = True
+                return True
+
+        self._pin_icon_available = False
+        self._pin_icon = QIcon()
+        self._report_missing_pin_icon(icon_key=key, checked_candidates=checked)
+        return False
+
+    def _desired_tab_order_with_pins(self) -> list[QWidget]:
+        pinned: list[QWidget] = []
+        others: list[QWidget] = []
+        for i in range(self.count()):
+            widget = self.widget(i)
+            if _is_workspace_document_widget(widget) and self._is_tab_pinned(widget):
+                pinned.append(widget)
+            else:
+                others.append(widget)
+        return pinned + others
+
+    def _reflow_pinned_tabs(self) -> None:
+        if self._tab_reorder_guard or self.count() < 2:
+            return
+        desired = self._desired_tab_order_with_pins()
+        if len(desired) != self.count():
+            return
+        if all(self.widget(i) is desired[i] for i in range(self.count())):
+            return
+
+        current = self.currentWidget()
+        self._tab_reorder_guard = True
+        try:
+            for target_idx, widget in enumerate(desired):
+                src_idx = self.indexOf(widget)
+                if src_idx < 0 or src_idx == target_idx:
+                    continue
+                self.tabBar().moveTab(src_idx, target_idx)
+        finally:
+            self._tab_reorder_guard = False
+
+        if current is not None and self.indexOf(current) >= 0:
+            self.setCurrentWidget(current)
+
+    def _on_tab_bar_moved(self, _from: int, _to: int) -> None:
+        if self._tab_reorder_guard:
+            return
+        self._reflow_pinned_tabs()
 
     def _compute_zone(self, pos_widget):
         # pos_widget is QPoint in EditorTabs coords
@@ -484,6 +616,8 @@ class EditorTabs(QTabWidget):
             new_idx = target_idx
 
         self._refresh_tab_title(ed)
+        self._reflow_pinned_tabs()
+        new_idx = self.indexOf(ed)
         self.setCurrentIndex(new_idx)
         ed.setFocus()
 
@@ -505,13 +639,25 @@ class EditorTabs(QTabWidget):
             # Use a QObject-bound slot to avoid stale lambda/editor references after tab/view teardown.
             doc.modificationChanged.connect(self._on_document_modification_changed)
         self._refresh_tab_title(ed)
+        self._reflow_pinned_tabs()
+        if self.indexOf(ed) >= 0:
+            self.setCurrentWidget(ed)
+            ed.setFocus()
 
     def _refresh_tab_title(self, ed: QWidget):
         idx = self.indexOf(ed)
         if idx < 0:
             return
         dirty = "*" if _widget_modified(ed) else ""
-        pin_prefix = "[pin] " if self._is_tab_pinned(ed) else ""
+        pin_prefix = ""
+        if self._is_tab_pinned(ed):
+            if self._ensure_pin_icon_loaded():
+                self.setTabIcon(idx, self._pin_icon)
+            else:
+                self.setTabIcon(idx, QIcon())
+                pin_prefix = "[pin] "
+        else:
+            self.setTabIcon(idx, QIcon())
         self.setTabText(idx, f"{pin_prefix}{_widget_display_name(ed)}{dirty}")
 
     def _on_document_modification_changed(self, _modified: bool):
@@ -530,7 +676,7 @@ class EditorTabs(QTabWidget):
     def _is_tab_pinned(ed: QWidget | None) -> bool:
         return bool(getattr(ed, "_tab_pinned", False))
 
-    def _set_tab_pinned(self, ed: QWidget | None, pinned: bool) -> None:
+    def _set_tab_pinned(self, ed: QWidget | None, pinned: bool, *, reflow: bool = True) -> None:
         if not _is_workspace_document_widget(ed):
             return
         try:
@@ -538,15 +684,23 @@ class EditorTabs(QTabWidget):
         except Exception:
             return
         self._refresh_tab_title(ed)
+        if reflow:
+            self._reflow_pinned_tabs()
+            if self.indexOf(ed) >= 0:
+                self.setCurrentWidget(ed)
 
     def _unpin_all_tabs(self) -> None:
+        changed = False
         for i in range(self.count()):
             ed = self.widget(i)
             if not _is_workspace_document_widget(ed):
                 continue
             if not self._is_tab_pinned(ed):
                 continue
-            self._set_tab_pinned(ed, False)
+            self._set_tab_pinned(ed, False, reflow=False)
+            changed = True
+        if changed:
+            self._reflow_pinned_tabs()
 
     def _confirm_close_editor(self, ed: QWidget) -> bool:
         if not _is_workspace_document_widget(ed):
@@ -782,6 +936,8 @@ class EditorTabs(QTabWidget):
                 self.insertTab(target_idx, ed, "")
                 new_idx = target_idx
             self._refresh_tab_title(ed)
+            self._reflow_pinned_tabs()
+            new_idx = self.indexOf(ed)
             self.setCurrentIndex(new_idx)
             ed.setFocus()
 

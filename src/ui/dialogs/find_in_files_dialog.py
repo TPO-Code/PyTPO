@@ -3,25 +3,26 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
+from src.ui.custom_dialog import DialogWindow
 from src.ui.widgets.find_in_files_results import FindInFilesResultsWidget
 
 
-class FindInFilesDialog(QDialog):
+class FindInFilesDialog(DialogWindow):
     findRequested = Signal(dict)
     replaceRequested = Signal(dict)
     addDockRequested = Signal(dict)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, parent=None, use_native_chrome: bool = False):
+        super().__init__(use_native_chrome=use_native_chrome, resizable=True, parent=parent)
         self.setWindowTitle("Find in Files")
         self.resize(920, 560)
 
@@ -41,6 +42,9 @@ class FindInFilesDialog(QDialog):
 
         self.results_widget = FindInFilesResultsWidget(self)
 
+        host = QWidget(self)
+        self.set_content_widget(host)
+
         form = QGridLayout()
         form.setContentsMargins(0, 0, 0, 0)
         form.addWidget(QLabel("Find:"), 0, 0)
@@ -59,7 +63,7 @@ class FindInFilesDialog(QDialog):
         button_row.addStretch(1)
         button_row.addWidget(self.btn_close)
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout(host)
         layout.addLayout(form)
         layout.addLayout(button_row)
         layout.addWidget(self.results_widget, 1)

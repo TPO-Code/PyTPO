@@ -308,30 +308,62 @@ def toggle_cpp_comment_selection(editor: "CodeEditor") -> bool:
     return _toggle_cpp_comment_selection(editor)
 
 
+def _is_slash_like_shortcut_key(event: QKeyEvent) -> bool:
+    key = event.key()
+    text = event.text()
+    question_key = getattr(Qt, "Key_Question", Qt.Key_Slash)
+    return key in {Qt.Key_Slash, question_key} or text in {"/", "?"}
+
+
+def _matches_action_shortcut(
+    editor: "CodeEditor",
+    event: QKeyEvent,
+    *,
+    scope: str,
+    action_id: str,
+) -> bool:
+    matcher = getattr(editor, "_event_matches_action_shortcut", None)
+    if callable(matcher):
+        try:
+            if bool(matcher(event, scope, action_id)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _python_key_press_handler(editor: "CodeEditor", event: QKeyEvent) -> bool:
-    if bool(getattr(editor, "_python_comment_shortcut_managed", False)):
-        return False
+    if _matches_action_shortcut(
+        editor,
+        event,
+        scope="python",
+        action_id="action.python_comment_toggle",
+    ):
+        _toggle_python_comment_selection(editor)
+        return True
+
     mods = event.modifiers()
     if not bool(mods & Qt.ControlModifier):
         return False
     if bool(mods & (Qt.AltModifier | Qt.MetaModifier)):
         return False
-
-    key = event.key()
-    text = event.text()
-    question_key = getattr(Qt, "Key_Question", Qt.Key_Slash)
-    is_slash_shortcut = key in {Qt.Key_Slash, question_key} or text in {"/", "?"}
-    if not is_slash_shortcut:
+    if not _is_slash_like_shortcut_key(event):
         return False
 
-    # Ctrl+/ (and layouts where Ctrl+Shift+/ emits '?') toggles comments.
+    # Default fallback: Ctrl+/ (and layouts where Ctrl+Shift+/ emits '?').
     _toggle_python_comment_selection(editor)
     return True
 
 
 def _cpp_key_press_handler(editor: "CodeEditor", event: QKeyEvent) -> bool:
-    if bool(getattr(editor, "_cpp_comment_shortcut_managed", False)):
-        return False
+    if _matches_action_shortcut(
+        editor,
+        event,
+        scope="cpp",
+        action_id="action.cpp_comment_toggle",
+    ):
+        _toggle_cpp_comment_selection(editor)
+        return True
 
     mods = event.modifiers()
     if bool(mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
@@ -339,14 +371,10 @@ def _cpp_key_press_handler(editor: "CodeEditor", event: QKeyEvent) -> bool:
     if not bool(mods & Qt.ShiftModifier):
         return False
 
-    key = event.key()
-    text = event.text()
-    question_key = getattr(Qt, "Key_Question", Qt.Key_Slash)
-    is_slash_shortcut = key in {Qt.Key_Slash, question_key} or text in {"/", "?"}
-    if not is_slash_shortcut:
+    if not _is_slash_like_shortcut_key(event):
         return False
 
-    # Shift+/ toggles line comments for C/C++ files.
+    # Default fallback: Shift+/ toggles line comments for C/C++ files.
     _toggle_cpp_comment_selection(editor)
     return True
 
@@ -381,6 +409,36 @@ def dispatch_mouse_press(editor: "CodeEditor", event: QMouseEvent) -> bool:
     return bool(handler(editor, event))
 
 
+def _python_enter_indent_adjustment(editor: "CodeEditor", stripped_before: str) -> tuple[int, int]:
+    indent_width = max(1, int(getattr(editor, "indent_width", 4)))
+    dedent_cols = 0
+    extra_cols = 0
+
+    # Covers plain keywords and "except ValueError as e:".
+    if re.match(r"^(elif\b|else\b|except\b|finally\b)", stripped_before):
+        dedent_cols = indent_width
+    if stripped_before.endswith(":"):
+        extra_cols = indent_width
+
+    return dedent_cols, extra_cols
+
+
+ENTER_INDENT_ADJUSTERS: dict[str, Callable[["CodeEditor", str], tuple[int, int]]] = {
+    "python": _python_enter_indent_adjustment,
+}
+
+
+def language_enter_indent_adjustment(editor: "CodeEditor", stripped_before: str) -> tuple[int, int]:
+    handler = ENTER_INDENT_ADJUSTERS.get(editor.language_id())
+    if not callable(handler):
+        return 0, 0
+    try:
+        dedent_cols, extra_cols = handler(editor, str(stripped_before or ""))
+        return max(0, int(dedent_cols)), max(0, int(extra_cols))
+    except Exception:
+        return 0, 0
+
+
 __all__ = [
     "EXT_TO_LANG",
     "NAME_TO_LANG",
@@ -389,6 +447,7 @@ __all__ = [
     "get_language_id",
     "dispatch_key_press",
     "dispatch_mouse_press",
+    "language_enter_indent_adjustment",
     "is_todo_checkbox_at_pos",
     "toggle_cpp_comment_selection",
     "toggle_python_comment_selection",

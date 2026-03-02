@@ -139,6 +139,9 @@ PANEL_FIELD_TYPES: set[str] = {
     "clangd_repair_tools",
 }
 
+SETTINGS_TREE_NODE_KEY_ROLE = Qt.UserRole + 2
+SETTINGS_TREE_EXPANDED_PATHS_KEY = "ui.settings_dialog.tree_expanded_paths"
+
 
 class SettingsDialog(DialogWindow):
     """Schema-driven settings editor for both project and IDE scopes."""
@@ -166,6 +169,7 @@ class SettingsDialog(DialogWindow):
         self._ignore_changes = False
         self._dirty_scopes: set[SettingsScope] = set()
         self._bindings_by_page: dict[int, list[FieldBinding]] = {}
+        self._persisted_tree_expanded_paths = self._load_tree_expanded_paths_from_settings()
 
         self._build_ui()
         self._build_tree_and_pages()
@@ -206,13 +210,13 @@ class SettingsDialog(DialogWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.setRootIsDecorated(False)
-        self.tree.setItemsExpandable(False)
-        self.tree.setExpandsOnDoubleClick(False)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setItemsExpandable(True)
+        self.tree.setExpandsOnDoubleClick(True)
         self.tree.setIndentation(12)
         self.tree.setAllColumnsShowFocus(False)
-        # Keep the nav list flat: no branch gutter/markers and no native
-        # selection fill behind custom item backgrounds.
+        # Keep selection visuals minimal while preserving native tree branch
+        # markers so users can collapse/expand categories.
         self.tree.setStyleSheet(
             "QTreeView { "
             "  outline: none; "
@@ -221,12 +225,6 @@ class SettingsDialog(DialogWindow):
             "} "
             "QTreeView::item { border: none; } "
             "QTreeView::item:selected { border: none; } "
-            "QTreeView::branch { "
-            "  background: transparent; "
-            "  border: none; "
-            "  image: none; "
-            "  border-image: none; "
-            "}"
         )
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         left_layout.addWidget(self.tree, 1)
@@ -289,6 +287,7 @@ class SettingsDialog(DialogWindow):
         root.addLayout(footer)
 
     def _build_tree_and_pages(self) -> None:
+        runtime_expanded_paths = self._collect_tree_expanded_paths() if self.tree.topLevelItemCount() > 0 else None
         self.tree.clear()
         self._bindings_by_page.clear()
         while self.stack.count():
@@ -317,20 +316,37 @@ class SettingsDialog(DialogWindow):
         }
         project_group_order = {
             "General": 0,
-            "Build": 1,
-            "Run": 2,
-            "Languages": 3,
+            "Languages": 1,
+            "Execution": 2,
+            "Maintenance": 3,
+        }
+        ide_group_order = {
+            "General": 0,
+            "Editor": 1,
+            "Execution": 2,
+            "Code Intelligence": 3,
+            "Integrations": 4,
         }
         page_order_by_id = {
             "project-general": 0,
             "project-indexing": 1,
-            "project-maintenance": 2,
+            "project-interpreters": 10,
+            "project-cpp": 11,
+            "project-rust": 12,
             "project-build-configs": 10,
             "project-rust-run-configs": 11,
-            "project-run-configs": 20,
-            "project-interpreters": 30,
-            "project-cpp": 31,
-            "project-rust": 32,
+            "project-run-configs": 12,
+            "project-maintenance": 30,
+            "ide-startup-projects": 100,
+            "ide-window": 101,
+            "ide-appearance": 102,
+            "ide-editor-ux": 110,
+            "ide-keybindings": 111,
+            "ide-run": 120,
+            "ide-linting": 130,
+            "ide-ai-assist": 131,
+            "ide-git": 140,
+            "ide-github": 141,
         }
 
         def _scope_sort_key(name: str) -> tuple[int, str]:
@@ -344,6 +360,8 @@ class SettingsDialog(DialogWindow):
                 return (-1, "")
             if clean_scope == "Project":
                 return (project_group_order.get(clean_group, 100), clean_group.lower())
+            if clean_scope == "IDE":
+                return (ide_group_order.get(clean_group, 100), clean_group.lower())
             return (100, clean_group.lower())
 
         def _page_sort_key(page_spec: SchemaPage) -> tuple[int, str]:
@@ -357,16 +375,21 @@ class SettingsDialog(DialogWindow):
             font.setBold(True)
             scope_item.setFont(0, font)
             scope_item.setData(0, Qt.UserRole, None)
+            scope_path = (scope_name,)
+            scope_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, scope_path)
             self.tree.addTopLevelItem(scope_item)
 
             for group_name in sorted(grouped[scope_name].keys(), key=lambda item: _group_sort_key(scope_name, item)):
                 by_subcategory = grouped[scope_name][group_name]
 
                 group_parent = scope_item
+                group_path = scope_path
                 if group_name:
                     group_item = QTreeWidgetItem([group_name])
                     group_item.setFlags(group_item.flags() & ~Qt.ItemIsSelectable)
                     group_item.setData(0, Qt.UserRole, None)
+                    group_path = scope_path + (group_name,)
+                    group_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, group_path)
                     scope_item.addChild(group_item)
                     group_parent = group_item
 
@@ -377,6 +400,7 @@ class SettingsDialog(DialogWindow):
                         sub_item = QTreeWidgetItem([subcategory])
                         sub_item.setFlags(sub_item.flags() & ~Qt.ItemIsSelectable)
                         sub_item.setData(0, Qt.UserRole, None)
+                        sub_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, group_path + (subcategory,))
                         group_parent.addChild(sub_item)
                         parent_item = sub_item
 
@@ -404,7 +428,87 @@ class SettingsDialog(DialogWindow):
                 if idx >= 0:
                     self.tree.takeTopLevelItem(idx)
 
-        self.tree.expandAll()
+        if runtime_expanded_paths is None:
+            self._apply_tree_expanded_paths(self._persisted_tree_expanded_paths)
+        else:
+            self._apply_tree_expanded_paths(runtime_expanded_paths)
+
+    @staticmethod
+    def _normalize_tree_path(raw: Any) -> tuple[str, ...] | None:
+        if not isinstance(raw, (list, tuple)):
+            return None
+        path: list[str] = []
+        for part in raw:
+            text = str(part or "").strip()
+            if not text:
+                return None
+            path.append(text)
+        return tuple(path) if path else None
+
+    def _load_tree_expanded_paths_from_settings(self) -> set[tuple[str, ...]] | None:
+        stored = self.manager.get(SETTINGS_TREE_EXPANDED_PATHS_KEY, scope_preference="ide", default=None)
+        if stored is None:
+            return None
+        if not isinstance(stored, list):
+            return None
+        expanded_paths: set[tuple[str, ...]] = set()
+        for entry in stored:
+            normalized = self._normalize_tree_path(entry)
+            if normalized is not None:
+                expanded_paths.add(normalized)
+        return expanded_paths
+
+    def _iter_branch_items(self) -> list[QTreeWidgetItem]:
+        branches: list[QTreeWidgetItem] = []
+        stack: list[QTreeWidgetItem] = []
+        for index in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(index)
+            if top is not None:
+                stack.append(top)
+        while stack:
+            item = stack.pop()
+            if item.childCount() > 0:
+                branches.append(item)
+                for child_index in range(item.childCount()):
+                    child = item.child(child_index)
+                    if child is not None:
+                        stack.append(child)
+        return branches
+
+    def _collect_tree_expanded_paths(self) -> set[tuple[str, ...]]:
+        expanded_paths: set[tuple[str, ...]] = set()
+        for item in self._iter_branch_items():
+            if not item.isExpanded():
+                continue
+            normalized = self._normalize_tree_path(item.data(0, SETTINGS_TREE_NODE_KEY_ROLE))
+            if normalized is not None:
+                expanded_paths.add(normalized)
+        return expanded_paths
+
+    def _apply_tree_expanded_paths(self, expanded_paths: set[tuple[str, ...]] | None) -> None:
+        if expanded_paths is None:
+            self.tree.expandAll()
+            return
+        for item in self._iter_branch_items():
+            item.setExpanded(False)
+        for item in self._iter_branch_items():
+            normalized = self._normalize_tree_path(item.data(0, SETTINGS_TREE_NODE_KEY_ROLE))
+            if normalized is not None and normalized in expanded_paths:
+                item.setExpanded(True)
+
+    def _persist_tree_expanded_paths(self) -> None:
+        expanded_paths = self._collect_tree_expanded_paths()
+        serialized_paths = [list(path) for path in sorted(expanded_paths)]
+        try:
+            self.manager.set(SETTINGS_TREE_EXPANDED_PATHS_KEY, serialized_paths, "ide")
+            self.manager.save_all(scopes={"ide"}, only_dirty=True)
+            self._persisted_tree_expanded_paths = set(expanded_paths)
+        except Exception:
+            return
+
+    def done(self, result: int) -> None:
+        self._persist_tree_expanded_paths()
+        super().done(result)
 
     def _build_page_widget(self, page_spec: SchemaPage) -> tuple[QWidget, list[FieldBinding]]:
         scroll = QScrollArea()
@@ -1348,7 +1452,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
         pages=[
             SchemaPage(
                 id="ide-keybindings",
-                category="IDE",
+                category="Editor",
                 title="Keybindings",
                 scope="ide",
                 description="Customize global and language-specific keyboard shortcuts.",
@@ -1370,7 +1474,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-run",
-                category="IDE",
+                category="Execution",
                 title="Run",
                 scope="ide",
                 description="IDE run behavior and execution defaults.",
@@ -1490,7 +1594,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-startup-projects",
-                category="IDE",
+                category="General",
                 title="Startup / Projects",
                 scope="ide",
                 description="Project startup behavior, recent-project history, and file autosave.",
@@ -1793,7 +1897,8 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="project-build-configs",
-                category="Build",
+                category="Execution",
+                subcategory="Build",
                 title="C/C++",
                 scope="project",
                 description="Named CMake build/run presets for this project.",
@@ -1815,7 +1920,8 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="project-run-configs",
-                category="Run",
+                category="Execution",
+                subcategory="Run",
                 title="Configurations",
                 scope="project",
                 description="Named run presets for the current project.",
@@ -1837,7 +1943,8 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="project-rust-run-configs",
-                category="Build",
+                category="Execution",
+                subcategory="Build",
                 title="Rust (Cargo)",
                 scope="project",
                 description="Named Cargo run/test/build/custom presets for this project.",
@@ -1926,7 +2033,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="project-maintenance",
-                category="General",
+                category="Maintenance",
                 title="Maintenance",
                 scope="project",
                 description="Project-local IDE storage and cache maintenance.",
@@ -1948,7 +2055,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-appearance",
-                category="IDE",
+                category="General",
                 title="Appearance",
                 scope="ide",
                 description="Machine-local look and feel preferences.",
@@ -2100,7 +2207,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-window",
-                category="IDE",
+                category="General",
                 title="Window",
                 scope="ide",
                 description="Window chrome and desktop integration preferences.",
@@ -2129,7 +2236,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-linting",
-                category="IDE",
+                category="Code Intelligence",
                 title="Linting",
                 scope="ide",
                 description="IDE linting preferences and backend defaults.",
@@ -2292,7 +2399,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-editor-ux",
-                category="IDE",
+                category="Editor",
                 title="Editor UX",
                 scope="ide",
                 description="Completion behavior and UI preferences for this IDE instance.",
@@ -2460,7 +2567,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-ai-assist",
-                category="IDE",
+                category="Code Intelligence",
                 title="AI Assist",
                 scope="ide",
                 description="Inline AI completion settings and provider connection details.",
@@ -2490,7 +2597,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-github",
-                category="IDE",
+                category="Integrations",
                 title="GitHub",
                 scope="ide",
                 description="GitHub token sign-in and repository cloning configuration.",
@@ -2512,7 +2619,7 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
             SchemaPage(
                 id="ide-git",
-                category="IDE",
+                category="Integrations",
                 title="Git",
                 scope="ide",
                 description="Git project explorer tinting and source control defaults.",

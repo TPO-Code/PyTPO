@@ -16,6 +16,7 @@ _EDITOR_DEFAULT_KEYBINDINGS: dict[str, dict[str, list[str]]] = {
     "general": {
         "action.find": ["Ctrl+F"],
         "action.replace": ["Ctrl+H"],
+        "action.duplicate_selection_or_line": ["Ctrl+D"],
         "action.go_to_definition": ["F12"],
         "action.find_usages": ["Shift+F12"],
         "action.rename_symbol": ["F2"],

@@ -1,5 +1,4 @@
 Improvements:
-    [ ] make color picker dialog use our custom dialog
 
     [ ] improve the file dialog
         [ ] make the file dialog use our custom dialog
@@ -18,18 +17,9 @@ Improvements:
     [ ] in the project.json store the code folding of files.
         # double check when file is opened and be smart about restoring
     
-    [ ] ctrl+d to duplicate selected text
-    
 
 Bugs:
 
-
-    [ ] when hitting enter form the end of folded code we have an issue where  the result is near the top of the folded code under the visible text and not at the end as expected
-        # This does make sense because the cursor is immediately after that text but it is not the desired behaviour
-
-    [ ] AI assist setting keep getting reset with no obvious reason
-        # This results in having to re enter the model address and having to re enable AI assist
-        
     
 Compleated:
 

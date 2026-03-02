@@ -49,6 +49,7 @@ class NewProjectDialog(DialogWindow):
         self._default_create_in = str(default_create_in or "").strip() or str(Path.home())
         self._folder_name_touched = False
         self.created_project_path: str | None = None
+        self.created_project_name: str | None = None
         self.created_project_post_create_note: str | None = None
 
         self._build_ui()
@@ -210,6 +211,7 @@ class NewProjectDialog(DialogWindow):
             pass
 
         self.created_project_path = str(target)
+        self.created_project_name = project_name
         self.accept()
 
     def reject(self) -> None:

@@ -77,7 +77,7 @@ from .keypress_handlers import (
     dispatch_mouse_press as dispatch_language_mouse_press,
     get_language_id,
     is_todo_checkbox_at_pos,
-    toggle_python_comment_selection,
+    language_enter_indent_adjustment,
 )
 from .syntax_highlighters import (
     ensure_highlighter as ensure_editor_highlighter,
@@ -118,8 +118,6 @@ class CodeEditor(QPlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._python_comment_shortcut_managed = True
-        self._cpp_comment_shortcut_managed = False
         self._configured_keybindings = {
             "general": {
                 key: list(value)
@@ -384,8 +382,8 @@ class CodeEditor(QPlainTextEdit):
     def _rebuild_configured_shortcuts(self) -> None:
         self._clear_configured_shortcuts()
         self._install_shortcut(
-            self._action_sequence("python", "action.python_comment_toggle"),
-            self._on_python_comment_toggle_shortcut,
+            self._action_sequence("general", "action.duplicate_selection_or_line"),
+            self._on_duplicate_selection_or_line_shortcut,
         )
 
     def _event_matches_action_shortcut(self, event: QKeyEvent, scope: str, action_id: str) -> bool:
@@ -439,11 +437,6 @@ class CodeEditor(QPlainTextEdit):
                 return True
         return super().event(event)
 
-    def _on_python_comment_toggle_shortcut(self) -> None:
-        if self.language_id() != "python":
-            return
-        toggle_python_comment_selection(self)
-
     def set_editor_font_preferences(self, *, family: str | None = None, point_size: int | None = None) -> None:
         font = self.font()
         if isinstance(family, str) and family.strip():
@@ -456,6 +449,9 @@ class CodeEditor(QPlainTextEdit):
                 size = int(font.pointSize()) if int(font.pointSize()) > 0 else 10
             font.setPointSize(size)
         self.setFont(font)
+
+    def _on_duplicate_selection_or_line_shortcut(self) -> None:
+        self.duplicate_selection_or_line()
 
     def set_file_path(self, file_path: str | None):
         self._file_path = str(file_path) if file_path else None
@@ -3451,16 +3447,6 @@ class CodeEditor(QPlainTextEdit):
             i += 1
         return text[:i]
 
-    def _python_should_dedent_next_line(self, stripped_before: str) -> bool:
-        # Dedent triggers for next line
-        # Covers plain keywords and "except ValueError as e:"
-        return bool(re.match(r"^(elif\b|else\b|except\b|finally\b)", stripped_before))
-
-    def _python_starts_block(self, stripped_before: str) -> bool:
-        # Increase indent after line ending with ':'
-        # (good enough without full parser)
-        return stripped_before.endswith(":")
-
     def _matching_pair_for_right(self, ch: str) -> str | None:
         pairs = {"(": ")", "[": "]", "{": "}", '"': '"', "'": "'"}
         return pairs.get(ch)
@@ -3882,16 +3868,8 @@ class CodeEditor(QPlainTextEdit):
 
             stripped_before = before.strip()
 
-            # Python-smart dedent/indent logic
-            dedent_cols = 0
-            extra_cols = 0
-
-            if self.language_id() == "python":
-                indent_width = self._active_indent_width()
-                if self._python_should_dedent_next_line(stripped_before):
-                    dedent_cols = indent_width
-                if self._python_starts_block(stripped_before):
-                    extra_cols = indent_width
+            # Language-specific adjustment hook layered over generic Enter handling.
+            dedent_cols, extra_cols = language_enter_indent_adjustment(self, stripped_before)
 
             new_cols = max(0, base_cols - dedent_cols) + extra_cols
             indent_text = self._indent_string_from_columns(new_cols)
@@ -3936,6 +3914,61 @@ class CodeEditor(QPlainTextEdit):
         indent_width = self._active_indent_width()
         use_tabs = _coerce_bool(getattr(self, "use_tabs", False), default=False)
         return "\t" if use_tabs else (" " * indent_width)
+
+    def duplicate_selection_or_line(self) -> bool:
+        cursor = self.textCursor()
+        doc = self.document()
+
+        if cursor.hasSelection():
+            end = int(cursor.selectionEnd())
+            selected_text = str(cursor.selectedText() or "").replace("\u2029", "\n")
+            if not selected_text:
+                return False
+
+            cursor.beginEditBlock()
+            try:
+                insert_cursor = QTextCursor(doc)
+                insert_cursor.setPosition(end)
+                insert_cursor.insertText(selected_text)
+
+                restored = QTextCursor(doc)
+                restored.setPosition(end)
+                restored.setPosition(end + len(selected_text), QTextCursor.KeepAnchor)
+                self.setTextCursor(restored)
+            finally:
+                cursor.endEditBlock()
+            return True
+
+        block = cursor.block()
+        if not block.isValid():
+            return False
+
+        line_text = block.text()
+        current_col = int(cursor.positionInBlock())
+        next_block = block.next()
+        insert_at = int(next_block.position()) if next_block.isValid() else max(0, int(doc.characterCount()) - 1)
+        insert_text = (line_text + "\n") if next_block.isValid() else ("\n" + line_text)
+        target_block_no = int(block.blockNumber()) + 1
+
+        cursor.beginEditBlock()
+        try:
+            insert_cursor = QTextCursor(doc)
+            insert_cursor.setPosition(insert_at)
+            insert_cursor.insertText(insert_text)
+
+            dup_block = doc.findBlockByNumber(target_block_no)
+            if dup_block.isValid():
+                new_pos = int(dup_block.position()) + min(current_col, len(dup_block.text()))
+            else:
+                new_pos = insert_at
+
+            restored = QTextCursor(doc)
+            restored.setPosition(max(0, new_pos))
+            self.setTextCursor(restored)
+            self.ensureCursorVisible()
+        finally:
+            cursor.endEditBlock()
+        return True
 
 
     def _selected_block_range(self, cursor: QTextCursor) -> tuple[int, int]:

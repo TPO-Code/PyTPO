@@ -11,8 +11,10 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from src.instance_coordinator import request_project_activation
+from src.settings_manager import SettingsManager
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory, get_open_file_name, get_save_file_name
 from src.ui.dialogs.new_project_dialog import NewProjectDialog
+from src.ui.dialogs.project_name_dialog import ProjectNameDialog
 from src.ui.editor_workspace import EditorWidget
 
 
@@ -123,10 +125,11 @@ class ProjectLifecycleController:
         if not target:
             return
         post_create_note = str(dialog.created_project_post_create_note or "").strip()
+        project_name = str(dialog.created_project_name or "").strip()
         if post_create_note:
             QMessageBox.warning(self.ide, "New Project", post_create_note)
         self.ide.statusBar().showMessage(f"Created project: {target}", 2200)
-        self.open_project_path(target)
+        self.open_project_path(target, suggested_project_name=project_name)
 
     def _ask_project_open_mode(self, target_project: str) -> str | None:
         if self.no_project_mode:
@@ -271,7 +274,54 @@ class ProjectLifecycleController:
         self.ide._skip_close_save_prompt_once = True
         self.ide.close()
 
-    def open_project_path(self, path: str):
+    def _project_config_exists(self, project_path: str) -> bool:
+        project_json = Path(project_path) / self.PROJECT_JSON
+        return project_json.is_file()
+
+    def _default_project_name_for_path(self, project_path: str) -> str:
+        folder_name = str(Path(project_path).name or "").strip()
+        return folder_name or "My Python Project"
+
+    def _prompt_for_project_name(self, project_path: str) -> str | None:
+        default_name = self._default_project_name_for_path(project_path)
+        dialog = ProjectNameDialog(
+            project_path=project_path,
+            default_name=default_name,
+            use_native_chrome=self.use_native_chrome,
+            parent=self.ide,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        selected = str(dialog.project_name or "").strip()
+        if selected:
+            return selected
+        return default_name
+
+    def _seed_missing_project_config(self, project_path: str, *, suggested_project_name: str = "") -> bool:
+        if self._project_config_exists(project_path):
+            return True
+
+        project_name = str(suggested_project_name or "").strip()
+        if not project_name:
+            project_name = self._prompt_for_project_name(project_path) or ""
+        if not project_name:
+            return False
+
+        try:
+            manager = SettingsManager(project_root=project_path, ide_app_dir=self.ide_app_dir)
+            manager.load_all()
+            manager.set("project_name", project_name, "project")
+            manager.save_all(scopes={"project"}, only_dirty=True, allow_project_repair=True)
+        except Exception as exc:
+            QMessageBox.warning(
+                self.ide,
+                "Open Project",
+                f"Could not initialize project settings:\n{exc}",
+            )
+            return False
+        return True
+
+    def open_project_path(self, path: str, suggested_project_name: str = ""):
         target = self._canonical_path(path)
         if not os.path.isdir(target):
             QMessageBox.warning(self.ide, "Open Project", f"Project folder does not exist:\n{target}")
@@ -290,6 +340,8 @@ class ProjectLifecycleController:
 
         mode = self._ask_project_open_mode(target)
         if mode is None:
+            return
+        if not self._seed_missing_project_config(target, suggested_project_name=suggested_project_name):
             return
         if mode == "current":
             if self._open_project_in_current_window(target):

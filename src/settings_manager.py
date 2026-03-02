@@ -12,7 +12,7 @@ from src.settings_models import (
     default_ide_settings,
     default_project_settings,
 )
-from src.settings_store import JsonSettingsStore, ScopedSettingsStores, deep_merge_defaults, dot_delete, dot_get, dot_set
+from src.settings_store import JsonSettingsStore, ScopedSettingsStores, deep_merge_defaults
 
 
 IDE_COMPLETION_KEYS: set[str] = {
@@ -164,24 +164,6 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "keybindings": "keybindings",
 }
 
-PROJECT_TO_IDE_KEY_MAPPINGS: tuple[tuple[str, str], ...] = (
-    ("font_size", "font_size"),
-    ("font_family", "font_family"),
-    ("theme", "theme"),
-    ("window", "window"),
-    ("run", "run"),
-    ("projects", "projects"),
-    ("autosave", "autosave"),
-    ("lint", "lint"),
-    ("completion", "completion"),
-    ("ai_assist", "ai_assist"),
-    ("github", "github"),
-    ("git", "git"),
-    ("editor", "editor"),
-    ("file_dialog", "file_dialog"),
-    ("keybindings", "keybindings"),
-)
-
 PROJECT_KEY_PREFIXES: tuple[str, ...] = (
     "project_name",
     "interpreter",
@@ -283,9 +265,8 @@ class SettingsManager:
 
     def load_all(self) -> None:
         self.scoped_stores.load_all()
-        migrated = self.migrate_legacy_project_json()
         normalized = self._normalize_all()
-        if migrated or normalized or self.scoped_stores.dirty_scopes():
+        if normalized or self.scoped_stores.dirty_scopes():
             self.save_all(only_dirty=True)
 
     def save_all(
@@ -342,9 +323,6 @@ class SettingsManager:
 
     def restore_scope_defaults(self, scope: SettingsScope) -> None:
         self.scoped_stores.restore_scope_defaults(scope)
-
-    def migrate_legacy_project_json(self) -> bool:
-        return self._extract_ide_keys_from_project()
 
     def resolve_key_scope(self, key: str) -> tuple[SettingsScope, str] | None:
         alias = IDE_KEY_ALIASES.get(key)
@@ -437,7 +415,6 @@ class SettingsManager:
         return changed
 
     def _normalize_project_settings(self) -> bool:
-        moved = self._extract_ide_keys_from_project()
         data = self.project_store.data
         before = deepcopy(data)
         project_defaults = default_project_settings()
@@ -637,20 +614,6 @@ class SettingsManager:
             for idx, item in enumerate(raw_build_cfgs):
                 build_configs.append(_norm_build_cfg(item, idx))
 
-        # One-time migration path from IDE-scoped run.cmake presets.
-        if not build_configs:
-            ide_run = self.ide_store.data.get("run")
-            ide_cmake = ide_run.get("cmake") if isinstance(ide_run, dict) else {}
-            if isinstance(ide_cmake, dict):
-                migrated_cfgs = ide_cmake.get("build_configs")
-                if isinstance(migrated_cfgs, list):
-                    for idx, item in enumerate(migrated_cfgs):
-                        build_configs.append(_norm_build_cfg(item, idx))
-                    if build_configs:
-                        self.project_store.dirty = True
-                        if dot_delete(self.ide_store.data, "run.cmake.build_configs"):
-                            self.ide_store.dirty = True
-
         if not build_configs:
             defaults_cfgs = project_defaults["build"]["cmake"].get("build_configs", [])
             if isinstance(defaults_cfgs, list):
@@ -675,13 +638,6 @@ class SettingsManager:
         active_config = str(cmake_build.get("active_config") or "").strip()
         if not active_config and build_configs:
             active_config = str(build_configs[0].get("name") or "").strip()
-        if not active_config:
-            ide_run = self.ide_store.data.get("run")
-            ide_cmake = ide_run.get("cmake") if isinstance(ide_run, dict) else {}
-            if isinstance(ide_cmake, dict):
-                active_config = str(ide_cmake.get("active_config") or "").strip()
-                if active_config and dot_delete(self.ide_store.data, "run.cmake.active_config"):
-                    self.ide_store.dirty = True
         valid_names = {str(cfg.get("name") or "").strip().lower() for cfg in build_configs}
         if active_config.lower() not in valid_names and build_configs:
             active_config = str(build_configs[0].get("name") or "").strip()
@@ -846,9 +802,9 @@ class SettingsManager:
         data["open_editors"] = clean_editors
 
         changed = data != before
-        if moved or changed:
+        if changed:
             self.project_store.dirty = True
-        return moved or changed
+        return changed
 
     def _normalize_ide_settings(self) -> bool:
         data = self.ide_store.data
@@ -1176,27 +1132,3 @@ class SettingsManager:
         if changed:
             self.ide_store.dirty = True
         return changed
-
-    def _extract_ide_keys_from_project(self) -> bool:
-        """Keep project.json project-only by migrating known IDE keys to IDE scope."""
-        project = self.project_store.data
-        ide = self.ide_store.data
-        moved_any = False
-
-        for project_key, ide_key in PROJECT_TO_IDE_KEY_MAPPINGS:
-            marker = object()
-            value = dot_get(project, project_key, marker)
-            if value is marker:
-                continue
-            existing = dot_get(ide, ide_key, marker)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                dot_set(ide, ide_key, deep_merge_defaults(value, existing))
-            else:
-                dot_set(ide, ide_key, deepcopy(value))
-            if dot_delete(project, project_key):
-                moved_any = True
-            self.ide_store.dirty = True
-
-        if moved_any:
-            self.project_store.dirty = True
-        return moved_any

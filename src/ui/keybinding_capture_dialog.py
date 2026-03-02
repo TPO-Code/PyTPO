@@ -7,7 +7,6 @@ from typing import Sequence
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
-    QDialog,
     QDialogButtonBox,
     QLabel,
     QMessageBox,
@@ -16,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.keybindings import canonicalize_chord_text, normalize_sequence, sequence_to_text
+from src.ui.custom_dialog import DialogWindow
 
 
 def _manual_key_token_for_event(event: QKeyEvent) -> str:
@@ -72,16 +72,17 @@ def event_to_chord_text(event: QKeyEvent) -> str:
     return canonicalize_chord_text(raw)
 
 
-class KeybindingCaptureDialog(QDialog):
+class KeybindingCaptureDialog(DialogWindow):
     def __init__(
         self,
         *,
         action_name: str,
         initial_sequence: Sequence[str] | None = None,
         chord_timeout_ms: int = 1200,
+        use_native_chrome: bool = False,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(use_native_chrome=use_native_chrome, resizable=False, parent=parent)
         self.setWindowTitle("Capture Keybinding")
         self.setModal(True)
         self.resize(440, 180)
@@ -93,7 +94,9 @@ class KeybindingCaptureDialog(QDialog):
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(self._on_capture_timeout)
 
-        root = QVBoxLayout(self)
+        host = QWidget(self)
+        self.set_content_widget(host)
+        root = QVBoxLayout(host)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
 
@@ -111,7 +114,7 @@ class KeybindingCaptureDialog(QDialog):
         self._preview.setObjectName("KeybindingCapturePreview")
         root.addWidget(self._preview)
 
-        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=host)
         self._buttons.accepted.connect(self._accept_if_valid)
         self._buttons.rejected.connect(self.reject)
         root.addWidget(self._buttons)
