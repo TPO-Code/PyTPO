@@ -1586,8 +1586,9 @@ class TerminalWidget(QtWidgets.QWidget):
                                                  QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
             if res != QtWidgets.QMessageBox.Yes:
                 return
-        # 4) send to PTY via bash -lc
-        sent = f"bash -lc {self._bash_exec_arg(full)}\r"
+        # 4) execute in the live interactive shell so stateful commands
+        # (for example `source`, `cd`, or `export`) persist in-session.
+        sent = f"{full}\r"
         self._send(sent.encode("utf-8"))
         self._ensure_bottom()
         self._last_used = spec
@@ -1597,12 +1598,6 @@ class TerminalWidget(QtWidgets.QWidget):
     def _bash_quote(s: str) -> str:
         # Safe single-quote for bash
         return "'" + s.replace("'", "'\"'\"'") + "'"
-
-    @staticmethod
-    def _bash_exec_arg(s: str) -> str:
-        # argument for bash -lc '…'
-        return TerminalWidget._bash_quote(s)
-
 
 # --------------------------- Standalone demo ---------------------------
 

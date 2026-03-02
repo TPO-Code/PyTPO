@@ -468,18 +468,28 @@ class ProjectLifecycleController:
             return
 
         restored_keys: set[str] = set()
+        skipped_entries = False
         for item in docs:
             if not isinstance(item, dict):
+                skipped_entries = True
                 continue
             fp = item.get("file_path")
             dedupe_key = self._canonical_path(fp) if isinstance(fp, str) and fp else ""
             if dedupe_key and dedupe_key in restored_keys:
+                skipped_entries = True
                 continue
             if dedupe_key:
                 restored_keys.add(dedupe_key)
 
-            if isinstance(fp, str) and fp and os.path.exists(fp):
-                self.open_file(fp)
+            if not (isinstance(fp, str) and fp and os.path.exists(fp)):
+                skipped_entries = True
+                continue
+            opened = self.open_file(fp, show_errors=False)
+            if opened is None:
+                skipped_entries = True
+
+        if skipped_entries:
+            self.save_session_to_config()
 
     def save_session_to_config(self):
         self.config["open_editors"] = self._collect_open_editor_payload()

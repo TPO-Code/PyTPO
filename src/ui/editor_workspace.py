@@ -297,18 +297,22 @@ class EditorWidget(CodeEditor):
     def display_name(self) -> str:
         return os.path.basename(self.file_path) if self.file_path else "File"
 
-    def load_file(self, path: str):
+    def load_file(self, path: str, *, show_errors: bool = True) -> bool:
         if not os.path.exists(path):
-            QMessageBox.warning(self, "Open Error", f"File does not exist:\n{path}")
-            return
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"File does not exist:\n{path}")
+            return False
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.setPlainText(f.read())
             self.file_path = path
             self.document().setModified(False)
             self.set_file_path(path)
+            return True
         except Exception as e:
-            QMessageBox.warning(self, "Open Error", f"Could not read file:\n{e}")
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"Could not read file:\n{e}")
+            return False
 
     def save_file(self) -> bool:
         if not self.file_path:
@@ -1069,6 +1073,7 @@ class EditorWorkspace(QWidget):
         self._tearouts: list[EditorTearOutWindow] = []
         self._documents: dict[str, DocumentRecord] = {}
         self._cleanup_pending = False
+        self._path_opener: Callable[[str], Any] | None = None
         self._default_editor_font_size = 10
         self._default_editor_font_family: str | None = None
 
@@ -1089,6 +1094,9 @@ class EditorWorkspace(QWidget):
             self.documentWidgetsChanged.emit()
         except Exception:
             pass
+
+    def set_path_opener(self, opener: Callable[[str], Any] | None) -> None:
+        self._path_opener = opener if callable(opener) else None
 
     def set_editor_font_defaults(
             self,
@@ -1573,9 +1581,10 @@ class EditorWorkspace(QWidget):
         target = str(path or "").strip()
         if not target:
             return None
-        if callable(opener):
+        effective_opener = opener if callable(opener) else self._path_opener
+        if callable(effective_opener):
             try:
-                result = opener(target)
+                result = effective_opener(target)
             except Exception:
                 return None
             return result if isinstance(result, QWidget) else None
@@ -1589,6 +1598,7 @@ class EditorWorkspace(QWidget):
             font_family: str | None = None,
             *,
             force_new_view: bool = False,
+            show_errors: bool = True,
     ):
         self._ensure_valid_root_splitter()
         tabs = self._current_tabs() or self._ensure_one_main_tabs()
@@ -1608,7 +1618,9 @@ class EditorWorkspace(QWidget):
                 workspace=self,
             )
             if os.path.exists(cpath):
-                ed.load_file(cpath)
+                if not ed.load_file(cpath, show_errors=show_errors):
+                    ed.deleteLater()
+                    return None
             else:
                 ed.file_path = cpath
             record = DocumentRecord(

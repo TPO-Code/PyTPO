@@ -44,6 +44,7 @@ from src.services.commit_md import (
 )
 from src.settings_manager import SettingsManager
 from src.services.document_outline_service import build_document_outline
+from src.services.file_open_classifier import FileOpenKind, classify_file_for_open
 from src.services.project_policy_service import ProjectPolicyService
 
 from src.ui.console_run_manager import ConsoleRunManager
@@ -75,6 +76,7 @@ from src.ui.lint_manager import LintManager
 from src.ui.spellcheck_manager import SpellcheckManager
 from src.ui.widgets.code_editor import CodeEditor
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
+from src.ui.widgets.image_viewer import ImageViewerWidget
 from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
@@ -777,6 +779,7 @@ class PythonIDE(Window):
 
     def setup_editor_workspace_service(self):
         self.editor_workspace = EditorWorkspace(self)
+        self.editor_workspace.set_path_opener(self.open_file)
         self.editor_workspace.set_editor_font_defaults(
             font_size=int(self.font_size),
             font_family=str(self.font_family or "").strip(),
@@ -4787,8 +4790,7 @@ class PythonIDE(Window):
             loaded = False
             if isinstance(widget, EditorWidget):
                 try:
-                    widget.load_file(cpath)
-                    loaded = True
+                    loaded = bool(widget.load_file(cpath))
                 except Exception:
                     loaded = False
             else:
@@ -5272,24 +5274,67 @@ class PythonIDE(Window):
     def _to_repo_rel_paths(self, repo_root: str, paths: list[str]) -> list[str]:
         return self.git_workflow_controller._to_repo_rel_paths(repo_root, paths)
 
-    def open_file(self, path: str):
+    def _open_text_editor_tab(self, cpath: str, *, show_errors: bool) -> EditorWidget | None:
+        opened = self.editor_workspace.open_editor(
+            os.path.basename(cpath),
+            cpath,
+            font_size=self.font_size,
+            font_family=self.font_family,
+            show_errors=show_errors,
+        )
+        if not isinstance(opened, EditorWidget):
+            return None
+        if not opened.file_path:
+            return None
+        opened.file_path = cpath
+        try:
+            opened.configure_keybindings(self._keybindings_config())
+        except Exception:
+            pass
+        self._assign_dock_identity(opened)
+        return opened
+
+    def _open_image_viewer_tab(self, cpath: str, *, show_errors: bool) -> ImageViewerWidget | None:
+        viewer = ImageViewerWidget(parent=self.editor_workspace)
+        if not viewer.load_file(cpath):
+            viewer.deleteLater()
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "Open Image",
+                    f"Could not open image file:\n{cpath}",
+                )
+            return None
+        tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+        tabs.add_editor(viewer)
+        return viewer
+
+    def open_file(self, path: str, *, show_errors: bool = True) -> QWidget | None:
         cpath = self._canonical_path(path)
         if os.path.isdir(cpath):
-            return
+            return None
+        if not os.path.exists(cpath):
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"File does not exist:\n{cpath}")
+            return None
+        if not os.access(cpath, os.R_OK):
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"File is not readable:\n{cpath}")
+            return None
 
         existing = self._find_open_document_for_path(cpath)
         if existing:
             self._track_widget_change_highlights(existing)
             if isinstance(existing, EditorWidget):
                 self._attach_editor_lint_hooks(existing)
-                self._schedule_symbol_outline_refresh(immediate=True)
+            self._schedule_symbol_outline_refresh(immediate=True)
             self._focus_document_widget(existing)
             if self._is_tdoc_related_path(cpath):
                 self._schedule_tdoc_validation(cpath, delay_ms=0)
             self.statusBar().showMessage(f"Focused already-open file: {cpath}", 1800)
             self._refresh_runtime_action_states()
             self.spellcheck_manager.refresh_active_widget(immediate=True)
-            return
+            return existing
 
         if self._is_tdoc_path(cpath):
             opened_tdoc = self._open_tdoc_file(cpath)
@@ -5297,31 +5342,39 @@ class PythonIDE(Window):
                 self._refresh_runtime_action_states()
                 QTimer.singleShot(0, self.apply_default_layout)
                 QTimer.singleShot(80, self.apply_default_layout)
-                return
+                return opened_tdoc
+            return None
 
-        self.editor_workspace.open_editor(
-            os.path.basename(cpath),
-            cpath,
-            font_size=self.font_size,
-            font_family=self.font_family,
-        )
-        ed = self.current_editor()
-        if ed:
-            ed.file_path = cpath
-            try:
-                ed.configure_keybindings(self._keybindings_config())
-            except Exception:
-                pass
-            self._assign_dock_identity(ed)
-            self._attach_editor_lint_hooks(ed)
-            self._schedule_symbol_outline_refresh(immediate=True)
-            if self._is_tdoc_related_path(cpath):
-                self._schedule_tdoc_validation(cpath, delay_ms=0)
+        kind = classify_file_for_open(cpath)
+        opened: QWidget | None
+        if kind is FileOpenKind.IMAGE:
+            opened = self._open_image_viewer_tab(cpath, show_errors=show_errors)
+        elif kind is FileOpenKind.TEXT:
+            opened = self._open_text_editor_tab(cpath, show_errors=show_errors)
+        else:
+            if show_errors:
+                QMessageBox.information(
+                    self,
+                    "Binary File",
+                    "This file appears to be a binary file and cannot be opened as text.",
+                )
+            return None
+
+        if opened is None:
+            return None
+
+        self._track_widget_change_highlights(opened)
+        if isinstance(opened, EditorWidget):
+            self._attach_editor_lint_hooks(opened)
+        self._schedule_symbol_outline_refresh(immediate=True)
+        if self._is_tdoc_related_path(cpath):
+            self._schedule_tdoc_validation(cpath, delay_ms=0)
         self._refresh_runtime_action_states()
         self.spellcheck_manager.refresh_active_widget(immediate=True)
 
         QTimer.singleShot(0, self.apply_default_layout)
         QTimer.singleShot(80, self.apply_default_layout)
+        return opened
 
     def current_editor(self):
         return self.editor_workspace.active_editor()
