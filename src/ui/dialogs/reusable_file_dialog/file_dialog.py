@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QAction,
     QCloseEvent,
     QColor,
+    QImageReader,
     QPainter,
     QPixmap,
     QIcon,
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
 
 from src.ui.custom_dialog import DialogWindow
 from src.ui.widgets.spellcheck_inputs import get_spellcheck_text
+from src.services.file_open_classifier import is_image_extension
 from .config import BackgroundOptions, FileDialogResult, SidebarLocation
 
 
@@ -356,6 +358,7 @@ class FileDialog(DialogWindow):
             self._current_directory = Path.home()
 
         self._icon_provider = QFileIconProvider()
+        self._grid_thumbnail_cache: dict[tuple[str, int, int], QIcon] = {}
         self._entries: list[Path] = []
         self._updating_model = False
 
@@ -1092,7 +1095,7 @@ class FileDialog(DialogWindow):
 
             for row, entry in enumerate(entries):
                 normalized = self._normalize_path(entry)
-                icon = self._icon_provider.icon(QFileInfo(str(entry)))
+                icon = self._icon_for_entry(entry, normalized, icon_size=self._list_icon_size)
 
                 star_item = QTableWidgetItem()
                 star_item.setFlags(
@@ -1134,7 +1137,7 @@ class FileDialog(DialogWindow):
             self._grid.clear()
             for entry in entries:
                 normalized = self._normalize_path(entry)
-                icon = self._icon_provider.icon(QFileInfo(str(entry)))
+                icon = self._icon_for_entry(entry, normalized, icon_size=self._grid_icon_size)
                 name = entry.name
                 label = f"★ {name}" if normalized in self._starred_paths else name
                 item = QListWidgetItem(icon, label)
@@ -1143,6 +1146,63 @@ class FileDialog(DialogWindow):
                 self._grid.addItem(item)
         finally:
             self._grid.blockSignals(False)
+
+    def _icon_for_entry(self, entry: Path, normalized_path: str, *, icon_size: int) -> QIcon:
+        default_icon = self._icon_provider.icon(QFileInfo(str(entry)))
+        if not entry.is_file() or not is_image_extension(str(entry)):
+            return default_icon
+
+        cache_key = self._thumbnail_cache_key(entry, normalized_path, icon_size=icon_size)
+        cached_icon = self._grid_thumbnail_cache.get(cache_key)
+        if cached_icon is not None:
+            return cached_icon
+
+        thumbnail_icon = self._build_image_thumbnail_icon(entry, icon_size=icon_size)
+        if thumbnail_icon is None:
+            return default_icon
+
+        self._grid_thumbnail_cache[cache_key] = thumbnail_icon
+        if len(self._grid_thumbnail_cache) > 512:
+            self._grid_thumbnail_cache.pop(next(iter(self._grid_thumbnail_cache)))
+        return thumbnail_icon
+
+    def _thumbnail_cache_key(self, entry: Path, normalized_path: str, *, icon_size: int) -> tuple[str, int, int]:
+        try:
+            mtime_ns = int(entry.stat().st_mtime_ns)
+        except Exception:
+            mtime_ns = 0
+        return normalized_path, mtime_ns, max(1, int(icon_size))
+
+    def _build_image_thumbnail_icon(self, entry: Path, *, icon_size: int) -> QIcon | None:
+        reader = QImageReader(str(entry))
+        try:
+            if not reader.canRead():
+                return None
+        except Exception:
+            return None
+
+        target = QSize(max(1, int(icon_size)), max(1, int(icon_size)))
+        source_size = reader.size()
+        if source_size.isValid():
+            scaled_size = source_size.scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
+            if scaled_size.isValid():
+                reader.setScaledSize(scaled_size)
+
+        image = reader.read()
+        if image.isNull():
+            return None
+
+        thumb = QPixmap(target)
+        thumb.fill(Qt.GlobalColor.transparent)
+        pixmap = QPixmap.fromImage(image)
+        painter = QPainter(thumb)
+        try:
+            x = max(0, (target.width() - pixmap.width()) // 2)
+            y = max(0, (target.height() - pixmap.height()) // 2)
+            painter.drawPixmap(x, y, pixmap)
+        finally:
+            painter.end()
+        return QIcon(thumb)
 
     def _sync_filename_with_selection(self):
         selected = self._selected_paths()
@@ -1446,10 +1506,35 @@ class FileDialog(DialogWindow):
         self._table.setIconSize(QSize(self._list_icon_size, self._list_icon_size))
         for row in range(self._table.rowCount()):
             self._table.setRowHeight(row, max(30, self._list_icon_size + 8))
+        self._refresh_table_icons_for_zoom()
 
         self._grid.setIconSize(QSize(self._grid_icon_size, self._grid_icon_size))
         self._grid.setGridSize(QSize(self._grid_icon_size + 52, self._grid_icon_size + 60))
         self._grid.setSpacing(max(8, self._grid_icon_size // 10))
+        self._refresh_grid_icons_for_zoom()
+
+    def _refresh_table_icons_for_zoom(self) -> None:
+        for row in range(self._table.rowCount()):
+            name_item = self._table.item(row, _Columns.NAME)
+            if name_item is None:
+                continue
+            normalized = str(name_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if not normalized:
+                continue
+            icon = self._icon_for_entry(Path(normalized), normalized, icon_size=self._list_icon_size)
+            name_item.setIcon(icon)
+
+    def _refresh_grid_icons_for_zoom(self) -> None:
+        for index in range(self._grid.count()):
+            item = self._grid.item(index)
+            if item is None:
+                continue
+            normalized = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if not normalized:
+                continue
+            icon = self._icon_for_entry(Path(normalized), normalized, icon_size=self._grid_icon_size)
+            item.setIcon(icon)
+
     def _search_in_branch(self, root: Path, query: str) -> list[Path]:
         """
         Recursive search from root.

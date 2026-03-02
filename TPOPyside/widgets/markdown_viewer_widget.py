@@ -81,6 +81,8 @@ class MarkdownViewerWidget(QWidget):
         self._shell_loading: bool = False
         self._pending_md_html: str = ""
         self._pending_base_url: QUrl = QUrl()
+        self._pending_scroll_ratio: float | None = None
+        self._pending_scroll_smooth: bool = False
         self._preferred_page_bg: str = ""
 
         # explicit head flags (default blank header)
@@ -460,6 +462,7 @@ class MarkdownViewerWidget(QWidget):
             anchor = self._pending_anchor
             self._pending_anchor = ""
             self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(anchor)});")
+        self._schedule_pending_scroll_apply()
 
     def _shell_document_html(self) -> str:
         return f"""<!DOCTYPE html>
@@ -581,6 +584,48 @@ window.MV_scrollToAnchor = function(anchor) {
   return true;
 }
 
+window.MV_scrollToRatio = function(ratio, smooth) {
+  const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+  const docEl = document.documentElement || null;
+  const body = document.body || null;
+  const root = document.scrollingElement || docEl || body;
+  if (!root) return false;
+  const nodes = [root, docEl, body].filter(Boolean);
+  let maxScroll = 0;
+  nodes.forEach((el) => {
+    const h = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+    if (h > maxScroll) maxScroll = h;
+  });
+  const top = maxScroll <= 0 ? 0 : Math.round(r * maxScroll);
+  const behavior = smooth ? 'smooth' : 'auto';
+  let applied = false;
+
+  try {
+    if (typeof window.scrollTo === 'function') {
+      window.scrollTo({ top: top, behavior: behavior });
+      applied = true;
+    }
+  } catch (_err) {}
+
+  nodes.forEach((el) => {
+    try {
+      if (typeof el.scrollTo === 'function') {
+        el.scrollTo({ top: top, behavior: behavior });
+      } else {
+        el.scrollTop = top;
+      }
+      applied = true;
+    } catch (_err) {
+      try {
+        el.scrollTop = top;
+        applied = true;
+      } catch (_err2) {}
+    }
+  });
+
+  return applied;
+}
+
 // Search helpers (DOM-level)
 (function(){
   window.MV_clearMarks = function() {
@@ -668,6 +713,7 @@ window.MV_scrollToAnchor = function(anchor) {
             anchor = self._pending_anchor
             self._pending_anchor = ""
             self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(anchor)});")
+        self._schedule_pending_scroll_apply()
 
     # ---------- TOC helpers ----------
     def _collect_toc_tokens(self, token: dict, level: int):
@@ -732,6 +778,47 @@ window.MV_scrollToAnchor = function(anchor) {
     def _clear_pending_anchor_if_scrolled(self, ok: object, target: str) -> None:
         if bool(ok) and self._pending_anchor == target:
             self._pending_anchor = ""
+
+    def scroll_to_ratio(self, ratio: float, *, smooth: bool = False) -> None:
+        try:
+            value = float(ratio)
+        except Exception:
+            value = 0.0
+        value = max(0.0, min(1.0, value))
+        self._pending_scroll_ratio = value
+        self._pending_scroll_smooth = bool(smooth)
+        self._apply_pending_scroll_ratio()
+
+    def _schedule_pending_scroll_apply(self) -> None:
+        if self._pending_scroll_ratio is None or not self._shell_ready:
+            return
+        QTimer.singleShot(0, self._apply_pending_scroll_ratio)
+        QTimer.singleShot(48, self._apply_pending_scroll_ratio)
+
+    def _apply_pending_scroll_ratio(self) -> None:
+        if not self._shell_ready:
+            return
+        ratio = self._pending_scroll_ratio
+        if ratio is None:
+            return
+        smooth = bool(self._pending_scroll_smooth)
+        js = (
+            "(function(){"
+            f"const r={ratio:.6f};"
+            f"const s={str(smooth).lower()};"
+            "if (typeof MV_scrollToRatio !== 'function') return false;"
+            "requestAnimationFrame(() => { requestAnimationFrame(() => MV_scrollToRatio(r, s)); });"
+            "return true;"
+            "})();"
+        )
+        self.web_view.page().runJavaScript(
+            js,
+            lambda ok, expected=ratio: self._clear_pending_scroll_ratio_if_ok(ok, expected),
+        )
+
+    def _clear_pending_scroll_ratio_if_ok(self, ok: object, expected: float) -> None:
+        if bool(ok) and self._pending_scroll_ratio == expected:
+            self._pending_scroll_ratio = None
 
     @Slot()
     def zoom_in(self):

@@ -30,6 +30,13 @@ class MarkdownEditorTab(QWidget):
         self._refresh_timer.setInterval(220)
         self._refresh_timer.timeout.connect(self._render_preview)
         self._pending_refresh_while_hidden = False
+        self._pending_hidden_scroll_sync = False
+        self._sync_preview_scroll_use_caret = False
+
+        self._scroll_sync_timer = QTimer(self)
+        self._scroll_sync_timer.setSingleShot(True)
+        self._scroll_sync_timer.setInterval(50)
+        self._scroll_sync_timer.timeout.connect(self._sync_preview_scroll_position)
 
         self._splitter = QSplitter(self)
         self._splitter.setChildrenCollapsible(False)
@@ -45,7 +52,12 @@ class MarkdownEditorTab(QWidget):
         root.addWidget(self._splitter, 1)
 
         self._editor.textChanged.connect(lambda: self._queue_preview_refresh(immediate=False))
+        self._editor.cursorPositionChanged.connect(lambda: self._queue_preview_scroll_sync(use_caret=True, immediate=False))
+        self._editor.verticalScrollBar().valueChanged.connect(
+            lambda _value: self._queue_preview_scroll_sync(use_caret=False, immediate=False)
+        )
         self._queue_preview_refresh(immediate=True)
+        self._queue_preview_scroll_sync(use_caret=True, immediate=True)
 
     def __getattr__(self, name: str):
         return getattr(self._editor, name)
@@ -110,7 +122,9 @@ class MarkdownEditorTab(QWidget):
             self._preview.setVisible(False)
             self._splitter.setSizes([max(260, self.width()), 0])
             self._pending_refresh_while_hidden = True
+            self._pending_hidden_scroll_sync = True
             self._refresh_timer.stop()
+            self._scroll_sync_timer.stop()
             return
 
         self._preview.setVisible(True)
@@ -121,6 +135,7 @@ class MarkdownEditorTab(QWidget):
         if show_preview:
             self._sync_preview_background_from_editor()
             self._queue_preview_refresh(immediate=True)
+            self._queue_preview_scroll_sync(use_caret=True, immediate=True)
 
     def is_preview_visible(self) -> bool:
         return bool(self._preview.isVisible())
@@ -154,6 +169,59 @@ class MarkdownEditorTab(QWidget):
         text = str(self._editor.toPlainText() or "")
         self._preview.setMarkdown(text, base_url=self._base_url())
         self._pending_refresh_while_hidden = False
+        self._queue_preview_scroll_sync(use_caret=True, immediate=True)
+
+    def _queue_preview_scroll_sync(self, *, use_caret: bool, immediate: bool) -> None:
+        self._sync_preview_scroll_use_caret = bool(use_caret)
+        if not self.is_preview_visible():
+            self._pending_hidden_scroll_sync = True
+            self._scroll_sync_timer.stop()
+            return
+        if immediate:
+            self._scroll_sync_timer.start(0)
+            return
+        self._scroll_sync_timer.start()
+
+    def _sync_preview_scroll_position(self) -> None:
+        if not self.is_preview_visible():
+            self._pending_hidden_scroll_sync = True
+            return
+        ratio = self._editor_scroll_ratio(use_caret=self._sync_preview_scroll_use_caret)
+        self._preview.scroll_to_ratio(ratio, smooth=False)
+        self._pending_hidden_scroll_sync = False
+
+    def _editor_scroll_ratio(self, *, use_caret: bool) -> float:
+        if use_caret:
+            try:
+                cursor = self._editor.textCursor()
+                block = int(cursor.blockNumber())
+                count = int(self._editor.document().blockCount())
+            except Exception:
+                block = 0
+                count = 0
+            if count > 1:
+                return max(0.0, min(1.0, float(block) / float(count - 1)))
+
+        bar = self._editor.verticalScrollBar()
+        try:
+            minimum = int(bar.minimum())
+            maximum = int(bar.maximum())
+            value = int(bar.value())
+        except Exception:
+            minimum = maximum = value = 0
+        span = max(0, maximum - minimum)
+        if span > 0:
+            return max(0.0, min(1.0, float(value - minimum) / float(span)))
+
+        try:
+            cursor = self._editor.textCursor()
+            block = int(cursor.blockNumber())
+            count = int(self._editor.document().blockCount())
+        except Exception:
+            return 0.0
+        if count > 1:
+            return max(0.0, min(1.0, float(block) / float(count - 1)))
+        return 0.0
 
     def _sync_preview_background_from_editor(self) -> None:
         color = None
@@ -199,6 +267,8 @@ class MarkdownEditorTab(QWidget):
         self._apply_default_splitter_sizes(force=False)
         if self._pending_refresh_while_hidden and self.is_preview_visible():
             self._queue_preview_refresh(immediate=True)
+        if self._pending_hidden_scroll_sync and self.is_preview_visible():
+            self._queue_preview_scroll_sync(use_caret=False, immediate=True)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
