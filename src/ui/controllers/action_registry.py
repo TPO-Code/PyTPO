@@ -161,6 +161,16 @@ class ActionRegistry:
         ActionRegistry._register_shortcut_action(ide, act_paste, scope="general", action_ids=("action.paste",))
         edit_menu.addAction(act_paste)
 
+        act_paste_reindent = QAction("Paste and Reindent", ide)
+        act_paste_reindent.triggered.connect(ide.paste_and_reindent_focused_widget)
+        ActionRegistry._register_shortcut_action(
+            ide,
+            act_paste_reindent,
+            scope="general",
+            action_ids=("action.paste_and_reindent",),
+        )
+        edit_menu.addAction(act_paste_reindent)
+
         edit_menu.addSeparator()
 
         act_find = QAction("Find", ide)
@@ -275,6 +285,12 @@ class ActionRegistry:
             act_panel_outline.setText("Outline Dock")
             ide._panel_toggle_actions.append(act_panel_outline)
             view.addAction(act_panel_outline)
+
+        if ide.dock_commit_md is not None:
+            act_panel_commit_md = ide.dock_commit_md.toggleViewAction()
+            act_panel_commit_md.setText("Commit Draft Dock")
+            ide._panel_toggle_actions.append(act_panel_commit_md)
+            view.addAction(act_panel_commit_md)
 
         view_editor = view.addMenu("Editor")
 

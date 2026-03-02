@@ -418,6 +418,7 @@ class TerminalWidget(QtWidgets.QWidget):
     
         # Shortcuts
         self._paste_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+V"), self)
+        self._paste_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._paste_shortcut.activated.connect(self._paste_bracketed)
     
         # Mouse / bracketed paste modes

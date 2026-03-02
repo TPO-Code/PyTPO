@@ -98,6 +98,17 @@ class GitWorkflowController:
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
+        initial_commit_message = ""
+        initial_release_message = ""
+        reader = getattr(self.ide, "read_commit_md_messages", None)
+        if callable(reader):
+            try:
+                loaded_commit, loaded_release = reader()
+                initial_commit_message = str(loaded_commit or "")
+                initial_release_message = str(loaded_release or "")
+            except Exception:
+                initial_commit_message = ""
+                initial_release_message = ""
         release_service = GitHubReleaseService(
             git_service=self.git_service,
             github_token_provider=lambda: self.ide._github_auth_store.get(),
@@ -109,11 +120,22 @@ class GitWorkflowController:
             release_service=release_service,
             exclude_untracked_predicate=self._is_path_filtered_in_workspace,
             prefer_push_action=prefer_push_action,
+            initial_commit_message=initial_commit_message,
+            initial_release_message=initial_release_message,
             use_native_chrome=self.use_native_chrome,
             parent=self.ide,
         )
         if dialog.exec() != QDialog.Accepted:
             return
+        writer = getattr(self.ide, "update_commit_md_messages", None)
+        if callable(writer):
+            try:
+                writer(
+                    commit_message=dialog.commit_message_text(),
+                    release_message=dialog.release_message_text(),
+                )
+            except Exception:
+                pass
         if dialog.push_error:
             self.ide.statusBar().showMessage("Commit succeeded locally, but push authentication failed.", 3200)
         elif dialog.release_error:

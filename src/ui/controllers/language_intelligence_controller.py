@@ -167,6 +167,22 @@ class LanguageIntelligenceController:
         required = ("toPlainText", "completion_context", "set_inline_suggestion", "clear_inline_suggestion")
         return all(callable(getattr(widget, name, None)) for name in required)
 
+    def _widget_has_active_selection(self, widget: object) -> bool:
+        cursor_getter = getattr(widget, "textCursor", None)
+        if not callable(cursor_getter):
+            return False
+        try:
+            cursor = cursor_getter()
+        except Exception:
+            return False
+        has_selection = getattr(cursor, "hasSelection", None)
+        if not callable(has_selection):
+            return False
+        try:
+            return bool(has_selection())
+        except Exception:
+            return False
+
     def _current_text_document_widget(self) -> object | None:
         getter = getattr(self.ide, "_current_document_widget", None)
         if callable(getter):
@@ -178,6 +194,10 @@ class LanguageIntelligenceController:
 
     def _request_ai_inline_for_editor(self, ed: object, reason: str = "manual") -> None:
         if not self._is_ai_capable_widget(ed) or not _is_qobject_valid(ed):
+            return
+
+        if reason == "passive" and self._widget_has_active_selection(ed):
+            self.inline_suggestion_controller.cancel_for_editor(self._editor_lookup_id(ed), clear=True)
             return
 
         file_path = str(getattr(ed, "file_path", "") or "").strip()

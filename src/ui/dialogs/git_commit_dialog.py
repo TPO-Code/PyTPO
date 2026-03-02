@@ -65,6 +65,8 @@ class GitCommitDialog(DialogWindow):
         release_service: GitHubReleaseService | None = None,
         exclude_untracked_predicate: Callable[[str], bool] | None = None,
         prefer_push_action: bool = False,
+        initial_commit_message: str = "",
+        initial_release_message: str = "",
         use_native_chrome: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -96,6 +98,8 @@ class GitCommitDialog(DialogWindow):
         self._is_syncing_tree_checks = False
         self._release_build_user_modified = False
         self._updating_release_build_value = False
+        self._initial_commit_message = str(initial_commit_message or "")
+        self._initial_release_message = str(initial_release_message or "")
 
         self._result_pump = QTimer(self)
         self._result_pump.setInterval(40)
@@ -285,6 +289,16 @@ class GitCommitDialog(DialogWindow):
         self.untracked_tree.itemChanged.connect(self._on_item_changed)
 
         self._seed_release_version()
+        if self._initial_commit_message:
+            self.message_edit.setPlainText(self._initial_commit_message)
+        if self._initial_release_message:
+            self.release_notes_edit.setPlainText(self._initial_release_message)
+
+    def commit_message_text(self) -> str:
+        return str(self.message_edit.toPlainText() or "")
+
+    def release_message_text(self) -> str:
+        return str(self.release_notes_edit.toPlainText() or "")
 
     def _load_changes(self) -> None:
         self._set_busy(True)

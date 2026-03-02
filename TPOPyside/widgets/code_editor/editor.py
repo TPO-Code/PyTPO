@@ -85,6 +85,109 @@ from .syntax_highlighters import (
     set_highlighter_for_file as set_editor_highlighter_for_file,
 )
 
+
+def leading_whitespace(line: str) -> str:
+    text = str(line or "")
+    idx = 0
+    while idx < len(text) and text[idx] in (" ", "\t"):
+        idx += 1
+    return text[:idx]
+
+
+def indent_width(ws: str, tab_size: int) -> int:
+    size = max(1, int(tab_size or 4))
+    cols = 0
+    for ch in str(ws or ""):
+        if ch == " ":
+            cols += 1
+        elif ch == "\t":
+            cols += size
+        else:
+            break
+    return cols
+
+
+def common_minimum_indent(lines: list[str], tab_size: int) -> int:
+    minimum: int | None = None
+    for line in lines:
+        text = str(line or "")
+        if not text.strip():
+            continue
+        cols = indent_width(leading_whitespace(text), tab_size)
+        if minimum is None or cols < minimum:
+            minimum = cols
+    return int(minimum or 0)
+
+
+def _strip_leading_indent_columns(line: str, cols_to_strip: int, tab_size: int) -> str:
+    text = str(line or "")
+    if cols_to_strip <= 0 or not text:
+        return text
+    size = max(1, int(tab_size or 4))
+    idx = 0
+    stripped_cols = 0
+    while idx < len(text):
+        ch = text[idx]
+        if ch not in (" ", "\t"):
+            break
+        ch_cols = size if ch == "\t" else 1
+        if stripped_cols + ch_cols > cols_to_strip:
+            break
+        stripped_cols += ch_cols
+        idx += 1
+    return text[idx:]
+
+
+def _split_line_content_and_eol(line_with_ending: str) -> tuple[str, str]:
+    line = str(line_with_ending or "")
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    if line.endswith("\r"):
+        return line[:-1], "\r"
+    return line, ""
+
+
+def strip_common_indent(text: str, tab_size: int) -> str:
+    raw = str(text or "")
+    lines = raw.splitlines(keepends=True)
+    if not lines:
+        return raw
+    contents = [_split_line_content_and_eol(line)[0] for line in lines]
+    min_cols = common_minimum_indent(contents, tab_size)
+    if min_cols <= 0:
+        return raw
+    normalized: list[str] = []
+    for line in lines:
+        content, eol = _split_line_content_and_eol(line)
+        if not content.strip():
+            normalized.append(eol)
+            continue
+        stripped = _strip_leading_indent_columns(content, min_cols, tab_size)
+        normalized.append(stripped + eol)
+    return "".join(normalized)
+
+
+def reindent_block_for_context(text: str, target_indent: str, tab_size: int) -> str:
+    raw = str(text or "")
+    if not raw:
+        return raw
+    stripped = strip_common_indent(raw, tab_size)
+    lines = stripped.splitlines(keepends=True)
+    if not lines:
+        return stripped
+    prefix = str(target_indent or "")
+    reindented: list[str] = []
+    for line in lines:
+        content, eol = _split_line_content_and_eol(line)
+        if not content.strip():
+            reindented.append(eol)
+            continue
+        reindented.append(prefix + content + eol)
+    return "".join(reindented)
+
+
 class CodeEditor(QPlainTextEdit):
     completionRequested = Signal(str)  # reason: manual | auto
     completionAccepted = Signal(str)   # insert_text
@@ -142,6 +245,8 @@ class CodeEditor(QPlainTextEdit):
         self._fold_gutter_width = 14
         self.use_tabs = False
         self.indent_width = 4  # spaces per indent level
+        self.smart_paste_reindent_enabled = True
+        self.smart_paste_on_ctrl_v_for_python = False
         self._lint_diagnostics: list[dict] = []
         self._lint_line_severity: dict[int, str] = {}
         self._lint_selections: list[QTextEdit.ExtraSelection] = []
@@ -427,6 +532,9 @@ class CodeEditor(QPlainTextEdit):
             return True
         if self._event_matches_action_shortcut(event, "general", "action.replace"):
             self.show_replace_bar()
+            return True
+        if self._event_matches_action_shortcut(event, "general", "action.paste_and_reindent"):
+            self.paste_and_reindent()
             return True
         if self._event_matches_action_shortcut(event, "general", "action.trigger_completion"):
             self.request_manual_completion()
@@ -3636,6 +3744,12 @@ class CodeEditor(QPlainTextEdit):
         act_replace.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.replace")))
         menu.addAction(act_replace)
 
+        act_paste_reindent = QAction("Paste and Reindent", menu)
+        act_paste_reindent.setShortcut(
+            self._sequence_to_qkeysequence(self._action_sequence("general", "action.paste_and_reindent"))
+        )
+        menu.addAction(act_paste_reindent)
+
         menu.addSeparator()
 
         act_word_wrap = QAction("Word Wrap", menu)
@@ -3679,6 +3793,9 @@ class CodeEditor(QPlainTextEdit):
             return
         if chosen is act_replace:
             self.show_replace_bar()
+            return
+        if chosen is act_paste_reindent:
+            self.paste_and_reindent()
             return
         if chosen is act_word_wrap:
             enabled = bool(act_word_wrap.isChecked())
@@ -3752,6 +3869,163 @@ class CodeEditor(QPlainTextEdit):
             self.viewport().setCursor(QCursor(Qt.IBeamCursor))
         super().leaveEvent(event)
 
+    def _normalize_paste_text(self, text: str) -> str:
+        return str(text or "").replace("\u2029", "\n").replace("\u2028", "\n")
+
+    @staticmethod
+    def _is_multiline_paste_text(text: str) -> bool:
+        raw = str(text or "")
+        return ("\n" in raw) or ("\r" in raw)
+
+    def _cursor_in_indented_block(self, cursor: QTextCursor) -> bool:
+        line_text = str(cursor.block().text() or "")
+        return indent_width(leading_whitespace(line_text), self._active_indent_width()) > 0
+
+    @staticmethod
+    def _first_meaningful_paste_line(text: str) -> str:
+        for raw in str(text or "").splitlines():
+            line = str(raw or "").strip()
+            if line:
+                return line
+        return ""
+
+    @staticmethod
+    def _looks_like_python_structure_line(line: str) -> bool:
+        probe = str(line or "").strip()
+        if not probe:
+            return False
+        return bool(
+            re.match(
+                r"^(?:@|async\s+def\b|def\b|class\b|if\b|elif\b|else\s*:|for\b|while\b|try\s*:|except\b|finally\s*:|with\b|match\b|case\b)",
+                probe,
+            )
+        )
+
+    def _should_smart_reindent_paste(self, cursor: QTextCursor, text: str, *, force: bool = False) -> bool:
+        if not _coerce_bool(getattr(self, "smart_paste_reindent_enabled", True), default=True):
+            return False
+        if not isinstance(text, str) or not text or not self._is_multiline_paste_text(text):
+            return False
+        if bool(force):
+            return True
+        if not _coerce_bool(getattr(self, "smart_paste_on_ctrl_v_for_python", False), default=False):
+            return False
+        if str(self.language_id() or "").strip().lower() != "python":
+            return False
+        if not (cursor.hasSelection() or self._cursor_in_indented_block(cursor)):
+            return False
+        first_meaningful = self._first_meaningful_paste_line(text)
+        if not self._looks_like_python_structure_line(first_meaningful):
+            return False
+        return True
+
+    def _smart_paste_target_indent(self, cursor: QTextCursor) -> str:
+        if cursor.hasSelection():
+            start = int(cursor.selectionStart())
+            end = int(cursor.selectionEnd())
+            doc = self.document()
+            first_block = doc.findBlock(max(0, start))
+            last_probe = max(start, end - 1) if end > start else start
+            last_block = doc.findBlock(max(0, last_probe))
+            min_indent_cols: int | None = None
+            min_indent_ws = ""
+            block = first_block
+            while block.isValid():
+                text = str(block.text() or "")
+                if text.strip():
+                    ws = leading_whitespace(text)
+                    cols = indent_width(ws, self._active_indent_width())
+                    if min_indent_cols is None or cols < min_indent_cols:
+                        min_indent_cols = cols
+                        min_indent_ws = ws
+                if block == last_block:
+                    break
+                block = block.next()
+            if min_indent_cols is not None:
+                return min_indent_ws
+
+        insert_pos = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+        block = self.document().findBlock(max(0, int(insert_pos)))
+        if not block.isValid():
+            block = cursor.block()
+        return leading_whitespace(str(block.text() or ""))
+
+    def _smart_paste_selection_cursor(self, cursor: QTextCursor) -> QTextCursor:
+        """Normalize selection start for multiline smart paste.
+
+        If selection starts exactly at the first non-whitespace character of a line,
+        expand start to the line start so replacing keeps indentation stable regardless
+        of whether the user included leading whitespace in the selection.
+        """
+        work = QTextCursor(cursor)
+        if not work.hasSelection():
+            return work
+
+        start = int(work.selectionStart())
+        doc = self.document()
+        block = doc.findBlock(max(0, start))
+        if not block.isValid():
+            return work
+
+        block_start = int(block.position())
+        line_text = str(block.text() or "")
+        leading = leading_whitespace(line_text)
+        first_non_ws_pos = block_start + len(leading)
+        if start != first_non_ws_pos:
+            return work
+
+        anchor = int(work.anchor())
+        pos = int(work.position())
+        sel_end = int(work.selectionEnd())
+        if anchor <= pos:
+            work.setPosition(block_start)
+            work.setPosition(sel_end, QTextCursor.KeepAnchor)
+        else:
+            work.setPosition(sel_end)
+            work.setPosition(block_start, QTextCursor.KeepAnchor)
+        return work
+
+    def _paste_reindented_text(self, text: str, cursor: QTextCursor | None = None) -> None:
+        work_cursor = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        work_cursor = self._smart_paste_selection_cursor(work_cursor)
+        tab_size = self._active_indent_width()
+        target_indent = self._smart_paste_target_indent(work_cursor)
+        reindented = reindent_block_for_context(text, target_indent, tab_size)
+        work_cursor.beginEditBlock()
+        try:
+            work_cursor.insertText(reindented)
+            self.setTextCursor(work_cursor)
+        finally:
+            work_cursor.endEditBlock()
+
+    def paste_and_reindent(self) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return
+        mime = clipboard.mimeData()
+        if mime is None or not bool(getattr(mime, "hasText", lambda: False)()):
+            self.paste()
+            return
+        text = self._normalize_paste_text(str(mime.text() or ""))
+        if not self._is_multiline_paste_text(text):
+            self.paste()
+            return
+        cursor = self.textCursor()
+        if not self._should_smart_reindent_paste(cursor, text, force=True):
+            self.paste()
+            return
+        self._paste_reindented_text(text, cursor)
+
+    def insertFromMimeData(self, source) -> None:
+        if source is None or not bool(getattr(source, "hasText", lambda: False)()):
+            super().insertFromMimeData(source)
+            return
+        text = self._normalize_paste_text(str(source.text() or ""))
+        cursor = self.textCursor()
+        if not self._should_smart_reindent_paste(cursor, text, force=False):
+            super().insertFromMimeData(source)
+            return
+        self._paste_reindented_text(text, cursor)
 
     # --------- key handling: pairing + indent logic ---------
 

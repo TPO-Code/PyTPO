@@ -33,6 +33,15 @@ from src.instance_coordinator import ProjectInstanceServer, request_project_acti
 from src.lang_cpp import CppLanguagePack
 from src.lang_cpp.clangd_repair import missing_std_header_from_diagnostic, repair_clangd_includes
 from src.lang_rust import RustLanguagePack
+from src.services.commit_md import (
+    commit_md_path_for_project,
+    ensure_commit_md_exists,
+    get_commit_message_from_commit_md,
+    get_release_message_from_commit_md,
+    load_commit_md_text,
+    update_commit_md_sections,
+    write_commit_md_for_project,
+)
 from src.settings_manager import SettingsManager
 from src.services.document_outline_service import build_document_outline
 from src.services.project_policy_service import ProjectPolicyService
@@ -63,6 +72,7 @@ from src.ui.settings_dialog import SettingsDialog as ScopedSettingsDialog, creat
 from src.ui.editor_workspace import EditorTabs, EditorWidget, EditorWorkspace
 from src.ui.lint_manager import LintManager
 from src.ui.spellcheck_manager import SpellcheckManager
+from src.ui.widgets.code_editor import CodeEditor
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
@@ -376,6 +386,8 @@ class PythonIDE(Window):
         self.dock_usages: QDockWidget | None = None
         self.symbol_outline_panel: SymbolOutlinePanel | None = None
         self.dock_outline: QDockWidget | None = None
+        self.commit_md_editor: CodeEditor | None = None
+        self.dock_commit_md: QDockWidget | None = None
 
         self.lint_manager = LintManager(
             project_root=self.project_root,
@@ -481,6 +493,11 @@ class PythonIDE(Window):
         self._outline_refresh_timer.setSingleShot(True)
         self._outline_refresh_timer.setInterval(220)
         self._outline_refresh_timer.timeout.connect(self._refresh_symbol_outline_panel)
+        self._commit_md_save_timer = QTimer(self)
+        self._commit_md_save_timer.setSingleShot(True)
+        self._commit_md_save_timer.setInterval(350)
+        self._commit_md_save_timer.timeout.connect(self._flush_commit_md_dock_save)
+        self._commit_md_syncing_editor = False
 
         self._startup_done = False
         self._startup_running = False
@@ -614,6 +631,7 @@ class PythonIDE(Window):
         self.version_control_controller = VersionControlController(self, self.git_service, self.tree, parent=self)
         self.version_control_controller.statusChanged.connect(self._on_git_status_changed)
         self.setup_bottom_panels()
+        self.setup_commit_md_dock()
         self._setup_status_bar_widgets()
         self._bind_status_bar_debug_mirror()
         self.setup_menus()
@@ -703,6 +721,7 @@ class PythonIDE(Window):
             (self.dock_problems, Qt.BottomDockWidgetArea),
             (self.dock_usages, Qt.BottomDockWidgetArea),
             (self.dock_outline, Qt.RightDockWidgetArea),
+            (self.dock_commit_md, Qt.RightDockWidgetArea),
         ):
             if dock is None:
                 continue
@@ -726,6 +745,8 @@ class PythonIDE(Window):
             self.dock_usages.hide()
         if self.dock_outline is not None:
             self.dock_outline.hide()
+        if self.dock_commit_md is not None:
+            self.dock_commit_md.show()
 
     def _normalize_editor_docks(self):
         # Compatibility no-op for workspace-based editors.
@@ -1113,6 +1134,112 @@ class PythonIDE(Window):
         self.tabifyDockWidget(self.dock_problems, self.dock_usages)
         self.dock_outline.hide()
         self.dock_debug.show()
+
+    def setup_commit_md_dock(self) -> None:
+        features = (
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        self.dock_commit_md = QDockWidget("Commit Draft", self)
+        self.dock_commit_md.setObjectName("dock_commit_md")
+        self.dock_commit_md.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.dock_commit_md.setFeatures(features)
+        self.dock_commit_md.setMinimumWidth(240)
+
+        editor = CodeEditor(self)
+        editor.setLineWrapMode(CodeEditor.LineWrapMode.WidgetWidth)
+        editor.setPlaceholderText("Project-local draft source: .tide/commit.md")
+        editor.set_editor_font_preferences(
+            family=str(self.font_family or "").strip(),
+            point_size=int(self.font_size),
+        )
+        editor.textChanged.connect(self._on_commit_md_editor_text_changed)
+        self.commit_md_editor = editor
+        self.dock_commit_md.setWidget(editor)
+
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_commit_md)
+        if isinstance(self.dock_outline, QDockWidget):
+            self.tabifyDockWidget(self.dock_outline, self.dock_commit_md)
+        self.dock_commit_md.show()
+        self._load_commit_md_into_dock()
+
+    def _commit_md_file_path(self) -> str:
+        return str(commit_md_path_for_project(self.project_root))
+
+    def _load_commit_md_into_dock(self) -> None:
+        editor = self.commit_md_editor
+        if not isinstance(editor, CodeEditor):
+            return
+        file_path = self._commit_md_file_path()
+        try:
+            ensure_commit_md_exists(self.project_root)
+            text = load_commit_md_text(self.project_root)
+        except Exception:
+            text = ""
+        self._set_commit_md_editor_text(text, file_path=file_path)
+
+    def _set_commit_md_editor_text(self, text: str, *, file_path: str) -> None:
+        editor = self.commit_md_editor
+        if not isinstance(editor, CodeEditor):
+            return
+        current = str(editor.toPlainText() or "")
+        incoming = str(text or "")
+        self._commit_md_syncing_editor = True
+        try:
+            editor.set_file_path(file_path)
+            if current != incoming:
+                editor.setPlainText(incoming)
+            editor.document().setModified(False)
+        finally:
+            self._commit_md_syncing_editor = False
+
+    def _on_commit_md_editor_text_changed(self) -> None:
+        if self._commit_md_syncing_editor:
+            return
+        self._schedule_commit_md_dock_save()
+
+    def _schedule_commit_md_dock_save(self) -> None:
+        self._commit_md_save_timer.start()
+
+    def _flush_commit_md_dock_save(self) -> None:
+        self._commit_md_save_timer.stop()
+        editor = self.commit_md_editor
+        if not isinstance(editor, CodeEditor):
+            return
+        if self._commit_md_syncing_editor:
+            return
+        try:
+            path = ensure_commit_md_exists(self.project_root)
+            write_commit_md_for_project(self.project_root, editor.toPlainText())
+            editor.document().setModified(False)
+            editor.set_file_path(str(path))
+        except Exception:
+            pass
+
+    def read_commit_md_messages(self) -> tuple[str, str]:
+        self._flush_commit_md_dock_save()
+        try:
+            text = load_commit_md_text(self.project_root)
+        except Exception:
+            return "", ""
+        commit_message = get_commit_message_from_commit_md(text) or ""
+        release_message = get_release_message_from_commit_md(text) or ""
+        return commit_message, release_message
+
+    def update_commit_md_messages(self, *, commit_message: str, release_message: str) -> None:
+        self._flush_commit_md_dock_save()
+        try:
+            text = load_commit_md_text(self.project_root)
+            updated = update_commit_md_sections(
+                text,
+                str(commit_message or ""),
+                str(release_message or ""),
+            )
+            write_commit_md_for_project(self.project_root, updated)
+            self._set_commit_md_editor_text(updated, file_path=self._commit_md_file_path())
+        except Exception:
+            pass
 
     def _ensure_debug_dock_visible(self) -> None:
         dock = getattr(self, "dock_debug", None)
@@ -1657,6 +1784,7 @@ class PythonIDE(Window):
             self.dock_problems,
             self.dock_usages,
             self.dock_outline,
+            self.dock_commit_md,
         ]
         return [dock for dock in docks if isinstance(dock, QDockWidget)]
 
@@ -2027,11 +2155,12 @@ class PythonIDE(Window):
         except Exception:
             pass
 
-    def _apply_lint_visual_settings_to_editor(self, ed: EditorWidget):
-        if not isinstance(ed, EditorWidget):
+    def _apply_lint_visual_settings_to_editor(self, ed: object) -> None:
+        setter = getattr(ed, "update_lint_visual_settings", None)
+        if not callable(setter):
             return
         try:
-            ed.update_lint_visual_settings(self._lint_visual_config())
+            setter(self._lint_visual_config())
         except Exception:
             pass
 
@@ -2068,6 +2197,15 @@ class PythonIDE(Window):
                 continue
             try:
                 setter(
+                    family=str(self.font_family or "").strip(),
+                    point_size=int(self.font_size),
+                )
+            except Exception:
+                pass
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, CodeEditor):
+            try:
+                commit_editor.set_editor_font_preferences(
                     family=str(self.font_family or "").strip(),
                     point_size=int(self.font_size),
                 )
@@ -2679,6 +2817,11 @@ class PythonIDE(Window):
         ed = self.current_editor()
         if isinstance(ed, EditorWidget):
             ed.paste()
+
+    def paste_and_reindent_focused_widget(self) -> None:
+        if self._invoke_focus_chain_edit_method("paste_and_reindent"):
+            return
+        self.paste_into_focused_widget()
 
     def trigger_completion(self):
         widget = self._current_document_widget()
@@ -4538,6 +4681,7 @@ class PythonIDE(Window):
         self._apply_editor_background_to_editor(widget)
         self._apply_editor_indent_settings_to_editor(widget)
         self._apply_editor_overview_settings_to_editor(widget)
+        self._apply_lint_visual_settings_to_editor(widget)
         self._apply_spellcheck_visual_settings_to_widget(widget)
         try:
             widget.set_editor_font_preferences(
@@ -5188,7 +5332,6 @@ class PythonIDE(Window):
             parent=self,
         )
         dlg.exec()
-        self._refresh_runtime_settings_from_manager()
         if self.config != before:
             self.statusBar().showMessage("Settings updated.", 1600)
 
@@ -5213,8 +5356,8 @@ class PythonIDE(Window):
         self.theme_name = str(self.settings_manager.get("theme", scope_preference="ide", default="Dark"))
         self.apply_selected_theme()
         self._configure_autosave_timer()
-        self._set_recent_projects(self._recent_projects(), save=True)
         self._refresh_recent_projects_menu()
+        self._refresh_welcome_recent_projects()
 
         desired_chrome = bool(
             self.settings_manager.get(
@@ -5267,6 +5410,7 @@ class PythonIDE(Window):
                 self._apply_editor_background_to_editor(widget)
                 self._apply_editor_indent_settings_to_editor(widget)
                 self._apply_editor_overview_settings_to_editor(widget)
+                self._apply_lint_visual_settings_to_editor(widget)
                 self._apply_spellcheck_visual_settings_to_widget(widget)
                 completion_setter = getattr(widget, "update_completion_ui_settings", None)
                 if callable(completion_setter):
@@ -5373,6 +5517,8 @@ class PythonIDE(Window):
             self.resizeDocks([self.dock_project], [280], Qt.Horizontal)
         if self._is_resizable_docked(self.dock_outline):
             self.resizeDocks([self.dock_outline], [280], Qt.Horizontal)
+        if self._is_resizable_docked(self.dock_commit_md):
+            self.resizeDocks([self.dock_commit_md], [320], Qt.Horizontal)
 
         bottom = [
             d
@@ -5397,6 +5543,8 @@ class PythonIDE(Window):
             event.ignore()
             return
 
+        self._flush_commit_md_dock_save()
+        self._commit_md_save_timer.stop()
         self._project_fs_refresh_timer.stop()
         self._project_fs_watch_sync_timer.stop()
         watcher = self._project_fs_watcher

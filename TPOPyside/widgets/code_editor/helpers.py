@@ -23,6 +23,7 @@ _EDITOR_DEFAULT_KEYBINDINGS: dict[str, dict[str, list[str]]] = {
         "action.extract_variable": ["Ctrl+Alt+V"],
         "action.extract_method": ["Ctrl+Alt+M"],
         "action.trigger_completion": ["Ctrl+Space"],
+        "action.paste_and_reindent": ["Ctrl+Shift+V"],
         "action.ai_inline_assist": ["Alt+\\"],
         "action.ai_inline_assist_alt_space": ["Alt+Space"],
         "action.ai_inline_assist_ctrl_alt_space": ["Ctrl+Alt+Space"],

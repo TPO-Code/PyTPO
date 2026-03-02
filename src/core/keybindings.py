@@ -96,6 +96,7 @@ KEYBINDING_ACTIONS: tuple[KeybindingAction, ...] = (
     KeybindingAction("general", "action.exit", "Exit IDE", ("Ctrl+Q",)),
     KeybindingAction("general", "action.copy", "Copy", ("Ctrl+C",)),
     KeybindingAction("general", "action.paste", "Paste", ("Ctrl+V",)),
+    KeybindingAction("general", "action.paste_and_reindent", "Paste and Reindent", ("Ctrl+Shift+V",)),
     KeybindingAction("general", "action.find", "Find", ("Ctrl+F",)),
     KeybindingAction("general", "action.replace", "Replace", ("Ctrl+H",)),
     KeybindingAction(

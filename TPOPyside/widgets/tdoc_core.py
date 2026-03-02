@@ -17,14 +17,16 @@ from PySide6.QtGui import (
     QKeySequence,
     QShortcut,
     QPainter,
+    QPainterPath,
     QPalette,
+    QPen,
     QPixmap,
     QTextCharFormat,
     QTextCursor,
     QTextImageFormat,
     QTextFormat,
 )
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -61,10 +63,12 @@ FRONTMATTER_KV_PATTERN = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?
 _WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 
 _TDOC_LINT_VISUAL_DEFAULTS = {
+    "mode": "squiggle",
     "error_color": "#E35D6A",
     "warning_color": "#D6A54A",
     "info_color": "#6AA1FF",
     "hint_color": "#8F9AA5",
+    "squiggle_thickness": 2,
     "line_alpha": 64,
 }
 _TDOC_OVERVIEW_MARKER_DEFAULTS = {
@@ -1875,6 +1879,55 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             self._completion_auto_min_chars = 2
 
+    def update_lint_visual_settings(self, lint_visual_cfg: dict | None) -> None:
+        cfg = lint_visual_cfg if isinstance(lint_visual_cfg, dict) else {}
+        merged = dict(_TDOC_LINT_VISUAL_DEFAULTS)
+        for key in (
+            "mode",
+            "error_color",
+            "warning_color",
+            "info_color",
+            "hint_color",
+            "squiggle_thickness",
+            "line_alpha",
+        ):
+            if key in cfg:
+                merged[key] = cfg.get(key)
+
+        mode = str(merged.get("mode") or "squiggle").strip().lower()
+        if mode not in {"squiggle", "line", "both"}:
+            mode = "squiggle"
+        merged["mode"] = mode
+
+        for color_key, fallback in (
+            ("error_color", _TDOC_LINT_VISUAL_DEFAULTS["error_color"]),
+            ("warning_color", _TDOC_LINT_VISUAL_DEFAULTS["warning_color"]),
+            ("info_color", _TDOC_LINT_VISUAL_DEFAULTS["info_color"]),
+            ("hint_color", _TDOC_LINT_VISUAL_DEFAULTS["hint_color"]),
+        ):
+            color = QColor(str(merged.get(color_key) or "").strip())
+            if not color.isValid():
+                color = QColor(str(fallback))
+            merged[color_key] = color.name(QColor.HexRgb) if color.isValid() else str(fallback)
+
+        try:
+            merged["squiggle_thickness"] = max(1, min(6, int(merged.get("squiggle_thickness", 2))))
+        except Exception:
+            merged["squiggle_thickness"] = 2
+        try:
+            merged["line_alpha"] = max(0, min(255, int(merged.get("line_alpha", 64))))
+        except Exception:
+            merged["line_alpha"] = 64
+
+        if merged == self._lint_visual_cfg:
+            return
+
+        self._lint_visual_cfg = merged
+        self._rebuild_lint_selections()
+        self._rebuild_extra_selections()
+        self.viewport().update()
+        self._refresh_overview_marker_area()
+
     def set_editor_font_preferences(self, *, family: str | None = None, point_size: int | None = None) -> None:
         font = self.font()
         if isinstance(family, str) and family.strip():
@@ -2951,7 +3004,26 @@ class TDocEditorWidget(QTextEdit):
             if line <= 0:
                 continue
             sev = str(item.get("severity") or "warning").lower()
-            normalized.append({"line": max(1, line), "severity": sev})
+            row: dict[str, object] = {"line": max(1, line), "severity": sev}
+            try:
+                column = int(item.get("column") or 0)
+            except Exception:
+                column = 0
+            if column > 0:
+                row["column"] = max(1, column)
+            try:
+                end_line = int(item.get("end_line") or 0)
+            except Exception:
+                end_line = 0
+            if end_line > 0:
+                row["end_line"] = max(1, end_line)
+            try:
+                end_column = int(item.get("end_column") or item.get("end_col") or 0)
+            except Exception:
+                end_column = 0
+            if end_column > 0:
+                row["end_column"] = max(1, end_column)
+            normalized.append(row)
             prev = line_severity.get(line)
             if prev is None or self._severity_rank(sev) > self._severity_rank(prev):
                 line_severity[line] = sev
@@ -3023,6 +3095,18 @@ class TDocEditorWidget(QTextEdit):
             return 2
         return 1
 
+    def _document_position_for_line_column(self, line: int, column: int) -> int:
+        block = self.document().findBlockByNumber(max(0, int(line) - 1))
+        if not block.isValid():
+            return -1
+        text = block.text()
+        col0 = max(0, int(column) - 1)
+        col0 = min(col0, len(text))
+        return int(block.position() + col0)
+
+    def _lint_underline_color(self, severity: str) -> QColor:
+        return QColor(self._lint_color_hex_for_severity(severity))
+
     def _lint_line_background_color(self, severity: str) -> QColor:
         color = QColor(self._lint_color_hex_for_severity(severity))
         try:
@@ -3042,20 +3126,136 @@ class TDocEditorWidget(QTextEdit):
             return str(self._lint_visual_cfg.get("hint_color") or _TDOC_LINT_VISUAL_DEFAULTS["hint_color"])
         return str(self._lint_visual_cfg.get("info_color") or _TDOC_LINT_VISUAL_DEFAULTS["info_color"])
 
+    def _lint_visual_mode(self) -> str:
+        mode = str(self._lint_visual_cfg.get("mode") or "squiggle").strip().lower()
+        if mode not in {"squiggle", "line", "both"}:
+            return "squiggle"
+        return mode
+
     def _rebuild_lint_selections(self):
         selections: list[QTextEdit.ExtraSelection] = []
-        for line, severity in sorted(self._lint_line_severity.items()):
-            block = self.document().findBlockByNumber(line - 1)
-            if not block.isValid():
-                continue
-            sel = QTextEdit.ExtraSelection()
-            cursor = QTextCursor(block)
-            cursor.clearSelection()
-            sel.cursor = cursor
-            sel.format.setProperty(QTextFormat.FullWidthSelection, True)
-            sel.format.setBackground(self._lint_line_background_color(severity))
-            selections.append(sel)
+        if self._lint_visual_mode() in {"line", "both"}:
+            for line, severity in sorted(self._lint_line_severity.items()):
+                block = self.document().findBlockByNumber(line - 1)
+                if not block.isValid():
+                    continue
+                sel = QTextEdit.ExtraSelection()
+                cursor = QTextCursor(block)
+                cursor.clearSelection()
+                sel.cursor = cursor
+                sel.format.setProperty(QTextFormat.FullWidthSelection, True)
+                sel.format.setBackground(self._lint_line_background_color(severity))
+                selections.append(sel)
         self._lint_selections = selections
+
+    def _paint_lint_squiggles(self, event) -> None:
+        if self._lint_visual_mode() not in {"squiggle", "both"}:
+            return
+        if not self._lint_diagnostics:
+            return
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setClipRect(event.rect())
+
+        try:
+            thickness = max(1, min(6, int(self._lint_visual_cfg.get("squiggle_thickness", 2))))
+        except Exception:
+            thickness = 2
+        amplitude = 1.4 + (float(thickness) * 0.32)
+        step = 3.8
+
+        for diag in self._lint_diagnostics:
+            if not isinstance(diag, dict):
+                continue
+            severity = str(diag.get("severity") or "warning").lower()
+            pen = QPen(self._lint_underline_color(severity))
+            pen.setWidth(max(1, int(thickness)))
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+
+            try:
+                start_line = max(1, int(diag.get("line") or 1))
+                end_line = max(start_line, int(diag.get("end_line") or start_line))
+            except Exception:
+                continue
+
+            has_column = "column" in diag and diag.get("column") is not None
+            has_end_column = "end_column" in diag and diag.get("end_column") is not None
+            try:
+                start_col = max(1, int(diag.get("column") or 1))
+            except Exception:
+                start_col = 1
+            try:
+                end_col = max(1, int(diag.get("end_column") or (start_col + 1)))
+            except Exception:
+                end_col = start_col + 1
+
+            for line in range(start_line, end_line + 1):
+                block = self.document().findBlockByNumber(line - 1)
+                if not block.isValid():
+                    continue
+                block_cursor = QTextCursor(block)
+                block_rect = self.cursorRect(block_cursor)
+                if block_rect.bottom() < event.rect().top() or block_rect.top() > event.rect().bottom():
+                    continue
+
+                block_text = str(block.text() or "")
+                block_len = len(block_text)
+                if not has_column:
+                    stripped = block_text.lstrip(" \t")
+                    seg_start_col = (len(block_text) - len(stripped)) + 1
+                    seg_end_col = block_len + 1
+                else:
+                    seg_start_col = start_col if line == start_line else 1
+                    if line == end_line:
+                        if has_end_column:
+                            seg_end_col = end_col
+                        else:
+                            seg_end_col = start_col + 1
+                    else:
+                        seg_end_col = block_len + 1
+                seg_start_col = max(1, min(seg_start_col, block_len + 1))
+                seg_end_col = max(seg_start_col + 1, min(seg_end_col, block_len + 1))
+
+                start_pos = self._document_position_for_line_column(line, seg_start_col)
+                end_pos = self._document_position_for_line_column(line, seg_end_col)
+                if start_pos < 0 or end_pos < 0:
+                    continue
+
+                start_cursor = QTextCursor(self.document())
+                start_cursor.setPosition(start_pos)
+                end_cursor = QTextCursor(self.document())
+                end_cursor.setPosition(end_pos)
+                start_rect = self.cursorRect(start_cursor)
+                end_rect = self.cursorRect(end_cursor)
+                x1 = float(start_rect.left())
+                x2 = float(end_rect.left())
+                if x2 <= x1:
+                    x2 = x1 + float(max(4, self.fontMetrics().horizontalAdvance(" ")))
+                y = float(start_rect.bottom() - 1)
+                self._draw_wave_segment(painter, x1, x2, y, amplitude=amplitude, step=step)
+
+        painter.end()
+
+    @staticmethod
+    def _draw_wave_segment(painter: QPainter, x1: float, x2: float, y: float, *, amplitude: float, step: float) -> None:
+        if x2 <= x1:
+            return
+        path = QPainterPath(QPointF(x1, y))
+        x = float(x1)
+        up = True
+        while x < x2:
+            nx = min(x2, x + step)
+            mid = (x + nx) / 2.0
+            if up:
+                path.quadTo(QPointF(mid, y - amplitude), QPointF(nx, y))
+            else:
+                path.quadTo(QPointF(mid, y + amplitude), QPointF(nx, y))
+            up = not up
+            x = nx
+        painter.drawPath(path)
 
     def _rebuild_spellcheck_selections(self) -> None:
         enabled = bool(self._spellcheck_visual_cfg.get("enabled", False))
@@ -3416,6 +3616,7 @@ class TDocEditorWidget(QTextEdit):
         self._paint_editor_background_layer(background_painter, event.rect())
         background_painter.end()
         super().paintEvent(event)
+        self._paint_lint_squiggles(event)
         self._paint_inline_suggestion()
 
     def focusOutEvent(self, event):
