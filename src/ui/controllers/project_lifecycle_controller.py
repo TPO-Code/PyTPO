@@ -167,8 +167,9 @@ class ProjectLifecycleController:
             path = self._document_widget_path(widget)
             if not path:
                 continue
-            if isinstance(widget, EditorWidget):
-                doc_key = self._doc_key_for_editor(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                doc_key = self._doc_key_for_editor(code_editor)
             else:
                 doc_key = self._canonical_path(path)
             if doc_key in seen_docs:
@@ -364,8 +365,9 @@ class ProjectLifecycleController:
             file_path = self._document_widget_path(widget)
             if not file_path:
                 continue
-            if isinstance(widget, EditorWidget):
-                key = self._doc_key_for_editor(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                key = self._doc_key_for_editor(code_editor)
             else:
                 key = self._canonical_path(file_path)
             if key in seen_keys:
@@ -404,9 +406,10 @@ class ProjectLifecycleController:
                 widget = tabs.widget(0)
                 tabs.removeTab(0)
                 widget.hide()
-                if isinstance(widget, EditorWidget):
-                    doc_key = self._doc_key_for_editor(widget)
-                    self.editor_workspace.release_document_view(widget, doc_key)
+                code_editor = self._editor_from_document_widget(widget)
+                if isinstance(code_editor, EditorWidget):
+                    doc_key = self._doc_key_for_editor(code_editor)
+                    self.editor_workspace.release_document_view(code_editor, doc_key)
                 widget.deleteLater()
             owner = getattr(tabs, "owner_window", None)
             if owner is not None:

@@ -67,8 +67,9 @@ class WorkspaceController(QObject):
             path = self._document_widget_path(widget)
             if not path:
                 continue
-            if isinstance(widget, EditorWidget):
-                doc_key = self._doc_key_for_editor(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                doc_key = self._doc_key_for_editor(code_editor)
             else:
                 doc_key = self._canonical_path(path)
             if doc_key in seen_docs:
@@ -105,9 +106,9 @@ class WorkspaceController(QObject):
             cpath = self._canonical_path(path)
             refresh_dirs.add(os.path.dirname(cpath))
             self._note_editor_saved(widget, source="autosave")
-            if isinstance(widget, EditorWidget):
-                self._attach_editor_lint_hooks(widget)
-                self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+            if isinstance(code_editor, EditorWidget):
+                self._attach_editor_lint_hooks(code_editor)
+                self._request_lint_for_editor(code_editor, reason="save", include_source_if_modified=False)
             elif self._is_tdoc_related_path(cpath):
                 self._schedule_tdoc_validation(cpath, delay_ms=0)
 
@@ -123,19 +124,20 @@ class WorkspaceController(QObject):
         if not path:
             return
         saved_path = self._canonical_path(path)
-        if isinstance(ed, EditorWidget):
+        code_editor = self._editor_from_document_widget(ed)
+        if isinstance(code_editor, EditorWidget):
             cpp_pack = getattr(self.ide, "cpp_language_pack", None)
             on_saved = getattr(cpp_pack, "on_document_saved", None)
             if callable(on_saved):
                 try:
-                    on_saved(file_path=saved_path, source_text=ed.toPlainText())
+                    on_saved(file_path=saved_path, source_text=code_editor.toPlainText())
                 except Exception:
                     pass
             rust_pack = getattr(self.ide, "rust_language_pack", None)
             rust_on_saved = getattr(rust_pack, "on_document_saved", None)
             if callable(rust_on_saved):
                 try:
-                    rust_on_saved(file_path=saved_path, source_text=ed.toPlainText())
+                    rust_on_saved(file_path=saved_path, source_text=code_editor.toPlainText())
                 except Exception:
                     pass
         elif self._is_tdoc_related_path(saved_path):
@@ -261,8 +263,9 @@ class WorkspaceController(QObject):
                 doc.setModified(False)
             except Exception:
                 pass
-            if isinstance(widget, EditorWidget):
-                self._refresh_editor_title(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                self._refresh_editor_title(code_editor)
             change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
             notifier = getattr(change_highlights, "notify_file_reloaded", None)
             if callable(notifier):
@@ -274,18 +277,19 @@ class WorkspaceController(QObject):
                 self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
             return
 
-        if isinstance(widget, EditorWidget):
-            cursor = widget.textCursor()
-            v_scroll = widget.verticalScrollBar().value()
-            h_scroll = widget.horizontalScrollBar().value()
-            widget.setPlainText(disk_text)
-            widget.document().setModified(False)
-            widget.setTextCursor(cursor)
-            widget.verticalScrollBar().setValue(v_scroll)
-            widget.horizontalScrollBar().setValue(h_scroll)
-            self._refresh_editor_title(widget)
-            self._attach_editor_lint_hooks(widget)
-            self._request_lint_for_editor(widget, reason="open", include_source_if_modified=False)
+        code_editor = self._editor_from_document_widget(widget)
+        if isinstance(code_editor, EditorWidget):
+            cursor = code_editor.textCursor()
+            v_scroll = code_editor.verticalScrollBar().value()
+            h_scroll = code_editor.horizontalScrollBar().value()
+            code_editor.setPlainText(disk_text)
+            code_editor.document().setModified(False)
+            code_editor.setTextCursor(cursor)
+            code_editor.verticalScrollBar().setValue(v_scroll)
+            code_editor.horizontalScrollBar().setValue(h_scroll)
+            self._refresh_editor_title(code_editor)
+            self._attach_editor_lint_hooks(code_editor)
+            self._request_lint_for_editor(code_editor, reason="open", include_source_if_modified=False)
         else:
             loader = getattr(widget, "load_file", None)
             if callable(loader):

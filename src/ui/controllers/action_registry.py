@@ -292,6 +292,14 @@ class ActionRegistry:
             ide._panel_toggle_actions.append(act_panel_commit_md)
             view.addAction(act_panel_commit_md)
 
+        view.addSeparator()
+        act_markdown_preview = QAction("Markdown Live Preview", ide)
+        act_markdown_preview.setCheckable(True)
+        act_markdown_preview.setChecked(True)
+        act_markdown_preview.toggled.connect(ide.set_active_markdown_preview_visible)
+        view.addAction(act_markdown_preview)
+        ide._act_toggle_markdown_preview = act_markdown_preview
+
         view_editor = view.addMenu("Editor")
 
         act_split_right = QAction("Split Right", ide)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import enum
+import json
 import markdown
 import re
 from pathlib import Path
@@ -76,6 +77,10 @@ class MarkdownViewerWidget(QWidget):
         self._pending_search: bool = False
         self._is_dark_theme: bool = True
         self._pending_anchor: str = ""
+        self._shell_ready: bool = False
+        self._shell_loading: bool = False
+        self._pending_md_html: str = ""
+        self._pending_base_url: QUrl = QUrl()
 
         # explicit head flags (default blank header)
         self._head_flags: MDHeadFlags = MDHeadFlags.none
@@ -357,13 +362,7 @@ class MarkdownViewerWidget(QWidget):
     # ---------- rendering ----------
     def setMarkdown(self, text: str, base_url: QUrl | None = None):
         self.raw_markdown_text = text or ""
-
-        if base_url is None:
-            base_url = QUrl()
-        elif base_url.isLocalFile():
-            s = base_url.toString()
-            if not s.endswith("/"):
-                base_url = QUrl(s + "/")
+        base_url = self._normalize_base_url(base_url)
 
         md = markdown.Markdown(
             extensions=[
@@ -399,11 +398,59 @@ class MarkdownViewerWidget(QWidget):
             self._toc_items.clear()
 
         self._rebuild_toc_widget()
+        self._queue_markdown_html_render(md_html, base_url=base_url)
+        self._last_query, self._hit_count, self._hit_index = "", 0, -1
+        self._pending_search = False
+        self.searchResultsChanged.emit("", 0)
+        self.currentHitChanged.emit(-1, 0)
 
-        html = f"""<!DOCTYPE html>
+    def _normalize_base_url(self, base_url: QUrl | None) -> QUrl:
+        if base_url is None:
+            return QUrl()
+        if base_url.isLocalFile():
+            text = base_url.toString()
+            if text and not text.endswith("/"):
+                return QUrl(text + "/")
+        return QUrl(base_url)
+
+    def _queue_markdown_html_render(self, md_html: str, *, base_url: QUrl) -> None:
+        self._pending_md_html = str(md_html or "")
+        self._pending_base_url = self._normalize_base_url(base_url)
+        if not self._shell_ready:
+            self._ensure_shell_loaded(self._pending_base_url)
+            return
+        self._render_pending_markdown_payload()
+
+    def _ensure_shell_loaded(self, base_url: QUrl) -> None:
+        if self._shell_ready or self._shell_loading:
+            return
+        self._shell_loading = True
+        self.web_view.setHtml(self._shell_document_html(), baseUrl=self._normalize_base_url(base_url))
+
+    def _render_pending_markdown_payload(self) -> None:
+        if not self._shell_ready:
+            return
+        md_html = str(self._pending_md_html or "")
+        base_href = self._normalize_base_url(self._pending_base_url).toString()
+        self._pending_md_html = ""
+        self._pending_base_url = QUrl()
+
+        js = (
+            f"MV_setBaseHref({json.dumps(base_href)});"
+            f"MV_setMarkdownHtml({json.dumps(md_html)});"
+        )
+        self.web_view.page().runJavaScript(js)
+        if self._pending_anchor:
+            anchor = self._pending_anchor
+            self._pending_anchor = ""
+            self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(anchor)});")
+
+    def _shell_document_html(self) -> str:
+        return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
+<base id="mv-base" href="">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
@@ -417,92 +464,120 @@ class MarkdownViewerWidget(QWidget):
 </style>
 </head>
 <body>
-<main id="md-root">{md_html}</main>
+<main id="md-root"></main>
 <script>
-var jsBridge;
-new QWebChannel(qt.webChannelTransport, (channel) => {{ jsBridge = channel.objects.jsBridge; }});
+{self._shell_script()}
+</script>
+</body>
+</html>
+"""
 
-function initializeMermaid() {{
-  try {{
+    def _shell_script(self) -> str:
+        return """
+var jsBridge = null;
+new QWebChannel(qt.webChannelTransport, (channel) => { jsBridge = channel.objects.jsBridge; });
+
+function initializeMermaid(root = document) {
+  try {
     const isLight = document.body.classList.contains('light-theme');
-    mermaid.initialize({{ startOnLoad:false, theme: isLight ? 'default' : 'dark', securityLevel: 'loose' }});
-    mermaid.run({{ nodes: document.querySelectorAll('pre.mermaid') }});
-  }} catch(e) {{ console.error('Mermaid error', e); }}
-}}
-function renderArithmatexWithKaTeX(root = document.body) {{
+    mermaid.initialize({ startOnLoad:false, theme: isLight ? 'default' : 'dark', securityLevel: 'loose' });
+    const scope = (root && root.querySelectorAll) ? root : document;
+    mermaid.run({ nodes: scope.querySelectorAll('pre.mermaid') });
+  } catch(e) { console.error('Mermaid error', e); }
+}
+
+function renderArithmatexWithKaTeX(root = document.body) {
   const nodes = root.querySelectorAll('span.arithmatex, div.arithmatex');
-  nodes.forEach(el => {{
+  nodes.forEach(el => {
     let tex = (el.textContent || '').trim();
     let display = el.tagName.toLowerCase() === 'div';
-    if (tex.startsWith('\\\\(') && tex.endsWith('\\\\)')) {{ tex = tex.slice(2,-2); }}
-    else if (tex.startsWith('$$') && tex.endsWith('$$')) {{ tex = tex.slice(2,-2); }}
-    else if (tex.startsWith('\\\\[') && tex.endsWith('\\\\]')) {{ tex = tex.slice(2,-2); display = true; }}
-    try {{ katex.render(tex, el, {{ displayMode: display, throwOnError: false }}); }}
-    catch (e) {{ console.error('KaTeX render error:', e); }}
-  }});
-}}
-document.addEventListener('DOMContentLoaded', () => {{ initializeMermaid(); renderArithmatexWithKaTeX(); }});
+    if (tex.startsWith('\\\\(') && tex.endsWith('\\\\)')) { tex = tex.slice(2,-2); }
+    else if (tex.startsWith('$$') && tex.endsWith('$$')) { tex = tex.slice(2,-2); }
+    else if (tex.startsWith('\\\\[') && tex.endsWith('\\\\]')) { tex = tex.slice(2,-2); display = true; }
+    try { katex.render(tex, el, { displayMode: display, throwOnError: false }); }
+    catch (e) { console.error('KaTeX render error:', e); }
+  });
+}
 
-// Scroll to heading id (used by native Qt TOC)
-window.MV_scrollToAnchor = function(anchor) {{
-  if (!anchor) return false;
-  const el = document.getElementById(anchor);
-  if (!el) return false;
-  el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
-  return true;
-}}
-
-// Code blocks: title + copy
-document.addEventListener('DOMContentLoaded', () => {{
-  document.querySelectorAll('div.codehilite').forEach((block) => {{
+function setupCodeBlocks(root = document) {
+  const scope = (root && root.querySelectorAll) ? root : document;
+  scope.querySelectorAll('div.codehilite').forEach((block) => {
+    if (block.dataset.mvEnhanced === '1') return;
+    block.dataset.mvEnhanced = '1';
     const preTag = block.querySelector('pre');
     let language = 'code';
-    if (preTag && preTag.className) {{
+    if (preTag && preTag.className) {
       const langClass = Array.from(preTag.classList).find(c => !['highlight'].includes(c));
       if (langClass) language = langClass;
-    }}
+    }
     const titleBar = document.createElement('div'); titleBar.className = 'code-title';
-    titleBar.innerHTML = `<span>${{language}}</span><button class="copy-btn">Copy</button>`;
+    titleBar.innerHTML = `<span>${language}</span><button class="copy-btn">Copy</button>`;
     block.insertBefore(titleBar, block.firstChild);
 
     const contentWrapper = document.createElement('div'); contentWrapper.className = 'code-content';
     const table = block.querySelector('table');
-    if (table) {{
+    if (table) {
       const innerDiv = document.createElement('div');
       innerDiv.appendChild(table);
       contentWrapper.appendChild(innerDiv);
       block.appendChild(contentWrapper);
-    }}
+    }
 
-    titleBar.addEventListener('click', (e) => {{
+    titleBar.addEventListener('click', (e) => {
       if (e.target.tagName !== 'BUTTON') block.classList.toggle('code-collapsed');
-    }});
-    titleBar.querySelector('.copy-btn').addEventListener('click', (e) => {{
+    });
+    titleBar.querySelector('.copy-btn').addEventListener('click', (e) => {
       e.stopPropagation();
       const codeCell = block.querySelector('td.code');
       const codeToCopy = codeCell ? codeCell.innerText.trimEnd() : '';
-      if (jsBridge) {{
+      if (jsBridge) {
         jsBridge.copyToClipboard(codeToCopy);
         e.target.innerText = 'Copied!';
         setTimeout(() => e.target.innerText = 'Copy', 1600);
-      }}
-    }});
-  }});
-}});
+      }
+    });
+  });
+}
+
+window.MV_setBaseHref = function(href) {
+  const base = document.getElementById('mv-base');
+  if (!base) return false;
+  base.setAttribute('href', href || '');
+  return true;
+}
+
+window.MV_setMarkdownHtml = function(html) {
+  const root = document.getElementById('md-root');
+  if (!root) return false;
+  root.innerHTML = html || '';
+  setupCodeBlocks(root);
+  initializeMermaid(root);
+  renderArithmatexWithKaTeX(root);
+  return true;
+}
+
+// Scroll to heading id (used by native Qt TOC)
+window.MV_scrollToAnchor = function(anchor) {
+  if (!anchor) return false;
+  const el = document.getElementById(anchor);
+  if (!el) return false;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return true;
+}
 
 // Search helpers (DOM-level)
-(function(){{
-  window.MV_clearMarks = function() {{
-    document.querySelectorAll('mark.mdhit').forEach(m => {{
+(function(){
+  window.MV_clearMarks = function() {
+    document.querySelectorAll('mark.mdhit').forEach(m => {
       const parent = m.parentNode;
       while (m.firstChild) parent.insertBefore(m.firstChild, m);
       parent.removeChild(m);
       parent.normalize();
-    }});
+    });
     document.querySelectorAll('mark.mdhit.current').forEach(m => m.classList.remove('current'));
-  }}
+  }
 
-  window.MV_findAll = function(q) {{
+  window.MV_findAll = function(q) {
     MV_clearMarks();
     if (!q || !q.trim()) return 0;
 
@@ -511,17 +586,16 @@ document.addEventListener('DOMContentLoaded', () => {{
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
     const textNodes = [];
     let n;
-    while ((n = walker.nextNode())) {{
-      // avoid script/style/etc
+    while ((n = walker.nextNode())) {
       const p = n.parentNode;
       if (!p) continue;
       const tag = (p.nodeName || '').toLowerCase();
       if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'mark') continue;
       textNodes.push(n);
-    }}
+    }
 
     let hits = 0;
-    textNodes.forEach(node => {{
+    textNodes.forEach(node => {
       const t = node.nodeValue || '';
       if (!t.trim()) return;
 
@@ -529,7 +603,7 @@ document.addEventListener('DOMContentLoaded', () => {{
       let idx = -1;
       const frag = document.createDocumentFragment();
 
-      while ((idx = t.toLowerCase().indexOf(ql, i)) !== -1) {{
+      while ((idx = t.toLowerCase().indexOf(ql, i)) !== -1) {
         const before = t.slice(i, idx);
         if (before) frag.appendChild(document.createTextNode(before));
 
@@ -541,47 +615,43 @@ document.addEventListener('DOMContentLoaded', () => {{
 
         i = idx + q.length;
         hits++;
-      }}
+      }
 
-      if (frag.childNodes.length) {{
+      if (frag.childNodes.length) {
         const after = t.slice(i);
         if (after) frag.appendChild(document.createTextNode(after));
         node.parentNode.replaceChild(frag, node);
-      }}
-    }});
+      }
+    });
 
     return hits;
-  }}
+  }
 
-  window.MV_scrollToHit = function(index) {{
-    const el = document.querySelector(`mark.mdhit[data-hit-index="${{index}}"]`);
+  window.MV_scrollToHit = function(index) {
+    const el = document.querySelector(`mark.mdhit[data-hit-index="${index}"]`);
     if (!el) return false;
-    el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     document.querySelectorAll('mark.mdhit.current').forEach(m => m.classList.remove('current'));
     el.classList.add('current');
     return true;
-  }}
-}})();
-</script>
-</body>
-</html>
+  }
+})();
 """
-        self.web_view.setHtml(html, baseUrl=base_url)
-        self._last_query, self._hit_count, self._hit_index = "", 0, -1
-        self._pending_search = False
-        self.searchResultsChanged.emit("", 0)
-        self.currentHitChanged.emit(-1, 0)
 
     def clear(self):
         self.setMarkdown("")
 
     def _on_load_finished(self, ok: bool):
-        if ok:
-            self._apply_theme_tokens()
-            if self._pending_anchor:
-                anchor = self._pending_anchor
-                self._pending_anchor = ""
-                self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(anchor)});")
+        self._shell_loading = False
+        self._shell_ready = bool(ok)
+        if not ok:
+            return
+        self._apply_theme_tokens()
+        self._render_pending_markdown_payload()
+        if self._pending_anchor:
+            anchor = self._pending_anchor
+            self._pending_anchor = ""
+            self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(anchor)});")
 
     # ---------- TOC helpers ----------
     def _collect_toc_tokens(self, token: dict, level: int):
@@ -638,7 +708,14 @@ document.addEventListener('DOMContentLoaded', () => {{
         if not target:
             return
         self._pending_anchor = target
-        self.web_view.page().runJavaScript(f"MV_scrollToAnchor({self._repr_js(target)});")
+        self.web_view.page().runJavaScript(
+            f"MV_scrollToAnchor({self._repr_js(target)});",
+            lambda ok: self._clear_pending_anchor_if_scrolled(ok, target),
+        )
+
+    def _clear_pending_anchor_if_scrolled(self, ok: object, target: str) -> None:
+        if bool(ok) and self._pending_anchor == target:
+            self._pending_anchor = ""
 
     @Slot()
     def zoom_in(self):

@@ -77,6 +77,7 @@ from src.ui.spellcheck_manager import SpellcheckManager
 from src.ui.widgets.code_editor import CodeEditor
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.image_viewer import ImageViewerWidget
+from src.ui.widgets.markdown_editor_tab import MarkdownEditorTab
 from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
@@ -527,6 +528,7 @@ class PythonIDE(Window):
         self._act_rename_symbol: QAction | None = None
         self._act_extract_variable: QAction | None = None
         self._act_extract_method: QAction | None = None
+        self._act_toggle_markdown_preview: QAction | None = None
         self._run_python_config_menu: QMenu | None = None
         self._run_python_config_action_group: QActionGroup | None = None
         self._run_cargo_config_menu: QMenu | None = None
@@ -1839,6 +1841,32 @@ class PythonIDE(Window):
         self._outline_last_editor_id = editor_id
         self._outline_last_revision = revision
 
+    @staticmethod
+    def _is_markdown_file_path(path: str | None) -> bool:
+        text = str(path or "").strip().lower()
+        return bool(text) and text.endswith((".md", ".markdown"))
+
+    def _active_markdown_editor_tab(self) -> MarkdownEditorTab | None:
+        current = self._current_document_widget()
+        return current if isinstance(current, MarkdownEditorTab) else None
+
+    def set_active_markdown_preview_visible(self, visible: bool) -> None:
+        tab = self._active_markdown_editor_tab()
+        if not isinstance(tab, MarkdownEditorTab):
+            self._refresh_runtime_action_states()
+            return
+        tab.set_preview_visible(bool(visible))
+        self._refresh_runtime_action_states()
+
+    def toggle_active_markdown_preview(self) -> None:
+        tab = self._active_markdown_editor_tab()
+        if not isinstance(tab, MarkdownEditorTab):
+            self.statusBar().showMessage("Markdown preview is only available on Markdown tabs.", 1800)
+            self._refresh_runtime_action_states()
+            return
+        tab.set_preview_visible(not tab.is_preview_visible())
+        self._refresh_runtime_action_states()
+
     def _on_outline_symbol_activated(self, file_path: str, line: int, column: int) -> None:
         cpath = self._canonical_path(file_path) if str(file_path or "").strip() else ""
         line_num = max(1, int(line or 1))
@@ -2057,6 +2085,13 @@ class PythonIDE(Window):
             self._act_extract_variable.setEnabled(can_extract_variable)
         if self._act_extract_method is not None:
             self._act_extract_method.setEnabled(can_extract_method)
+        if self._act_toggle_markdown_preview is not None:
+            markdown_tab = self._active_markdown_editor_tab()
+            is_markdown_active = isinstance(markdown_tab, MarkdownEditorTab)
+            self._act_toggle_markdown_preview.setEnabled(is_markdown_active)
+            self._act_toggle_markdown_preview.setChecked(
+                bool(markdown_tab.is_preview_visible()) if is_markdown_active else False
+            )
 
         if self._toolbar_run_btn is not None:
             can_toolbar_run = bool(
@@ -3423,18 +3458,19 @@ class PythonIDE(Window):
 
         line_num = max(1, int(line or 1))
         col_num = max(1, int(col or 1))
-        if isinstance(widget, EditorWidget):
-            block = widget.document().findBlockByNumber(line_num - 1)
+        code_editor = self._editor_from_document_widget(widget)
+        if isinstance(code_editor, EditorWidget):
+            block = code_editor.document().findBlockByNumber(line_num - 1)
             if not block.isValid():
-                block = widget.document().lastBlock()
+                block = code_editor.document().lastBlock()
             cursor = QTextCursor(block)
             cursor.movePosition(
                 QTextCursor.MoveOperation.Right,
                 QTextCursor.MoveMode.MoveAnchor,
                 col_num - 1,
             )
-            widget.setTextCursor(cursor)
-            widget.centerCursor()
+            code_editor.setTextCursor(cursor)
+            code_editor.centerCursor()
         elif isinstance(widget, TDocDocumentWidget):
             widget.jump_to_line(line_num, col_num)
         else:
@@ -3597,7 +3633,7 @@ class PythonIDE(Window):
             self.statusBar().showMessage(f"TDOC validation completed for {os.path.basename(cpath)}", 1800)
             return
 
-        ed = widget if isinstance(widget, EditorWidget) else None
+        ed = self._editor_from_document_widget(widget)
         if not isinstance(ed, EditorWidget):
             self.statusBar().showMessage("Linting is available for Python and TDOC files.", 2200)
             return
@@ -4273,6 +4309,17 @@ class PythonIDE(Window):
         # CodeEditor stores path in `_file_path` and does not expose `file_path`.
         return str(getattr(widget, "_file_path", "") or "").strip()
 
+    def _editor_from_document_widget(self, widget: object) -> EditorWidget | None:
+        resolver = getattr(self.editor_workspace, "editor_from_document_widget", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(widget)
+            except Exception:
+                resolved = None
+            if isinstance(resolved, EditorWidget):
+                return resolved
+        return widget if isinstance(widget, EditorWidget) else None
+
     def _iter_open_document_widgets(self) -> list[QWidget]:
         return self.editor_workspace.all_document_widgets()
 
@@ -4343,16 +4390,26 @@ class PythonIDE(Window):
             return
         for tabs in self.editor_workspace.all_tabs():
             idx = tabs.indexOf(widget)
-            if idx < 0:
+            if idx >= 0:
+                tabs.setCurrentIndex(idx)
+                tabs.widget(idx).setFocus()
+                return
+            target_editor = self._editor_from_document_widget(widget)
+            if not isinstance(target_editor, EditorWidget):
                 continue
-            tabs.setCurrentIndex(idx)
-            widget.setFocus()
-            return
+            for candidate_idx in range(tabs.count()):
+                candidate_widget = tabs.widget(candidate_idx)
+                candidate_editor = self._editor_from_document_widget(candidate_widget)
+                if candidate_editor is not target_editor:
+                    continue
+                tabs.setCurrentIndex(candidate_idx)
+                candidate_widget.setFocus()
+                return
 
     def _find_open_editor_for_path(self, canonical_path: str) -> EditorWidget | None:
         target = self._canonical_path(canonical_path)
         found = self._find_open_document_for_path(target)
-        return found if isinstance(found, EditorWidget) else None
+        return self._editor_from_document_widget(found)
 
     def _focus_editor(self, ed: EditorWidget):
         self._focus_document_widget(ed)
@@ -4548,12 +4605,15 @@ class PythonIDE(Window):
         opened = self._find_open_document_for_path(target_path)
         if isinstance(opened, TDocDocumentWidget) and jump_line:
             opened.jump_to_line(jump_line, 1)
-        elif isinstance(opened, EditorWidget) and jump_line:
-            block = opened.document().findBlockByNumber(max(0, int(jump_line) - 1))
+        else:
+            opened_editor = self._editor_from_document_widget(opened)
+            if not isinstance(opened_editor, EditorWidget) or not jump_line:
+                return
+            block = opened_editor.document().findBlockByNumber(max(0, int(jump_line) - 1))
             if block.isValid():
                 cursor = QTextCursor(block)
-                opened.setTextCursor(cursor)
-                opened.centerCursor()
+                opened_editor.setTextCursor(cursor)
+                opened_editor.centerCursor()
 
     def _on_tdoc_symbol_link_requested(self, widget_ref, symbol: str) -> None:
         widget = widget_ref() if callable(widget_ref) else widget_ref
@@ -5074,25 +5134,29 @@ class PythonIDE(Window):
 
     def _refresh_editor_title(self, ed: EditorWidget):
         target_key = self._doc_key_for_editor(ed)
-        for candidate in self.editor_workspace.all_editors():
-            if self._doc_key_for_editor(candidate) != target_key:
-                continue
-            for tabs in self.editor_workspace.all_tabs():
-                idx = tabs.indexOf(candidate)
-                if idx >= 0:
-                    tabs._refresh_tab_title(candidate)
+        for tabs in self.editor_workspace.all_tabs():
+            for idx in range(tabs.count()):
+                widget = tabs.widget(idx)
+                candidate = self._editor_from_document_widget(widget)
+                if not isinstance(candidate, EditorWidget):
+                    continue
+                if self._doc_key_for_editor(candidate) != target_key:
+                    continue
+                tabs._refresh_tab_title(widget)
 
     def _update_open_editors_for_move(self, old_path: str, new_path: str):
         old_c = self._canonical_path(old_path)
         new_c = self._canonical_path(new_path)
         moved_editors: list[EditorWidget] = []
         processed_code_docs: set[str] = set()
+        moved_editor_ids: set[int] = set()
         service = getattr(self, "editor_change_highlight_service", None)
         path_notifier = getattr(service, "notify_file_path_changed", None)
 
         for widget in self._iter_open_document_widgets():
-            if isinstance(widget, EditorWidget):
-                doc_key = self._doc_key_for_editor(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                doc_key = self._doc_key_for_editor(code_editor)
                 if doc_key in processed_code_docs:
                     continue
                 processed_code_docs.add(doc_key)
@@ -5112,25 +5176,27 @@ class PythonIDE(Window):
             else:
                 continue
 
-            if isinstance(widget, EditorWidget):
-                widget.file_path = relocated
-                widget.set_file_path(relocated)
-                self._refresh_editor_title(widget)
-                moved_editors.append(widget)
-                if callable(path_notifier):
-                    path_notifier(src, relocated)
-            elif hasattr(widget, "set_file_path"):
+            if isinstance(code_editor, EditorWidget):
+                code_editor.file_path = relocated
+            if widget is not code_editor and hasattr(widget, "set_file_path"):
                 try:
                     widget.set_file_path(relocated)
                 except Exception:
                     pass
-                if callable(path_notifier):
-                    path_notifier(src, relocated)
+            if isinstance(code_editor, EditorWidget):
+                self._refresh_editor_title(code_editor)
+                editor_id = int(id(code_editor))
+                if editor_id not in moved_editor_ids:
+                    moved_editor_ids.add(editor_id)
+                    moved_editors.append(code_editor)
+            else:
                 for tabs in self.editor_workspace.all_tabs():
                     idx = tabs.indexOf(widget)
                     if idx >= 0:
                         tabs._refresh_tab_title(widget)
                         break
+            if callable(path_notifier):
+                path_notifier(src, relocated)
 
         self.lint_manager.clear_paths_under(old_c)
         self._clear_tdoc_diagnostics_for_path(old_c)
@@ -5146,8 +5212,9 @@ class PythonIDE(Window):
         seen_code_doc_keys: set[str] = set()
 
         for widget in self._iter_open_document_widgets():
-            if isinstance(widget, EditorWidget):
-                doc_key = self._doc_key_for_editor(widget)
+            code_editor = self._editor_from_document_widget(widget)
+            if isinstance(code_editor, EditorWidget):
+                doc_key = self._doc_key_for_editor(code_editor)
                 if doc_key in seen_code_doc_keys:
                     continue
                 seen_code_doc_keys.add(doc_key)
@@ -5168,8 +5235,9 @@ class PythonIDE(Window):
                     continue
                 tabs.removeTab(idx)
                 widget.hide()
-                if isinstance(widget, EditorWidget):
-                    self.editor_workspace.release_document_view(widget, self._doc_key_for_editor(widget))
+                code_editor = self._editor_from_document_widget(widget)
+                if isinstance(code_editor, EditorWidget):
+                    self.editor_workspace.release_document_view(code_editor, self._doc_key_for_editor(code_editor))
                 widget.deleteLater()
             owner = getattr(tabs, "owner_window", None)
             if owner is not None and tabs.count() == 0:
@@ -5274,6 +5342,59 @@ class PythonIDE(Window):
     def _to_repo_rel_paths(self, repo_root: str, paths: list[str]) -> list[str]:
         return self.git_workflow_controller._to_repo_rel_paths(repo_root, paths)
 
+    def _configure_opened_code_editor(self, ed: EditorWidget, *, cpath: str) -> bool:
+        if not isinstance(ed, EditorWidget):
+            return False
+        if not ed.file_path:
+            return False
+        ed.file_path = cpath
+        try:
+            ed.configure_keybindings(self._keybindings_config())
+        except Exception:
+            pass
+        self._assign_dock_identity(ed)
+        return True
+
+    def _wrap_editor_in_markdown_tab(self, ed: EditorWidget) -> MarkdownEditorTab | None:
+        if not isinstance(ed, EditorWidget):
+            return None
+        parent = ed.parentWidget()
+        while parent is not None:
+            if isinstance(parent, MarkdownEditorTab):
+                return parent
+            parent = parent.parentWidget()
+
+        host_tabs = None
+        host_index = -1
+        for tabs in self.editor_workspace.all_tabs():
+            idx = tabs.indexOf(ed)
+            if idx < 0:
+                continue
+            host_tabs = tabs
+            host_index = idx
+            break
+        if host_tabs is None or host_index < 0:
+            return None
+
+        pinned = bool(getattr(ed, "_tab_pinned", False))
+        host_tabs.removeTab(host_index)
+        insert_at = max(0, min(host_index, host_tabs.count()))
+
+        wrapper = MarkdownEditorTab(editor=ed, parent=host_tabs)
+        ed.show()
+        host_tabs.insertTab(insert_at, wrapper, "")
+        host_tabs._connect_widget_document_signal(wrapper)
+        if pinned:
+            setattr(wrapper, "_tab_pinned", True)
+        host_tabs._refresh_tab_title(wrapper)
+        host_tabs._reflow_pinned_tabs()
+        host_tabs.setCurrentWidget(wrapper)
+        wrapper.setFocus()
+        notify = getattr(self.editor_workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+        return wrapper
+
     def _open_text_editor_tab(self, cpath: str, *, show_errors: bool) -> EditorWidget | None:
         opened = self.editor_workspace.open_editor(
             os.path.basename(cpath),
@@ -5284,15 +5405,24 @@ class PythonIDE(Window):
         )
         if not isinstance(opened, EditorWidget):
             return None
-        if not opened.file_path:
+        if not self._configure_opened_code_editor(opened, cpath=cpath):
             return None
-        opened.file_path = cpath
-        try:
-            opened.configure_keybindings(self._keybindings_config())
-        except Exception:
-            pass
-        self._assign_dock_identity(opened)
         return opened
+
+    def _open_markdown_editor_tab(self, cpath: str, *, show_errors: bool) -> MarkdownEditorTab | None:
+        opened = self.editor_workspace.open_editor(
+            os.path.basename(cpath),
+            cpath,
+            font_size=self.font_size,
+            font_family=self.font_family,
+            show_errors=show_errors,
+        )
+        if not isinstance(opened, EditorWidget):
+            return None
+        if not self._configure_opened_code_editor(opened, cpath=cpath):
+            return None
+        wrapper = self._wrap_editor_in_markdown_tab(opened)
+        return wrapper if isinstance(wrapper, MarkdownEditorTab) else None
 
     def _open_image_viewer_tab(self, cpath: str, *, show_errors: bool) -> ImageViewerWidget | None:
         viewer = ImageViewerWidget(parent=self.editor_workspace)
@@ -5325,8 +5455,9 @@ class PythonIDE(Window):
         existing = self._find_open_document_for_path(cpath)
         if existing:
             self._track_widget_change_highlights(existing)
-            if isinstance(existing, EditorWidget):
-                self._attach_editor_lint_hooks(existing)
+            existing_editor = self._editor_from_document_widget(existing)
+            if isinstance(existing_editor, EditorWidget):
+                self._attach_editor_lint_hooks(existing_editor)
             self._schedule_symbol_outline_refresh(immediate=True)
             self._focus_document_widget(existing)
             if self._is_tdoc_related_path(cpath):
@@ -5350,7 +5481,10 @@ class PythonIDE(Window):
         if kind is FileOpenKind.IMAGE:
             opened = self._open_image_viewer_tab(cpath, show_errors=show_errors)
         elif kind is FileOpenKind.TEXT:
-            opened = self._open_text_editor_tab(cpath, show_errors=show_errors)
+            if self._is_markdown_file_path(cpath):
+                opened = self._open_markdown_editor_tab(cpath, show_errors=show_errors)
+            else:
+                opened = self._open_text_editor_tab(cpath, show_errors=show_errors)
         else:
             if show_errors:
                 QMessageBox.information(
@@ -5364,8 +5498,9 @@ class PythonIDE(Window):
             return None
 
         self._track_widget_change_highlights(opened)
-        if isinstance(opened, EditorWidget):
-            self._attach_editor_lint_hooks(opened)
+        opened_editor = self._editor_from_document_widget(opened)
+        if isinstance(opened_editor, EditorWidget):
+            self._attach_editor_lint_hooks(opened_editor)
         self._schedule_symbol_outline_refresh(immediate=True)
         if self._is_tdoc_related_path(cpath):
             self._schedule_tdoc_validation(cpath, delay_ms=0)
@@ -5399,10 +5534,11 @@ class PythonIDE(Window):
 
         cpath = self._canonical_path(path)
         self._note_editor_saved(widget, source="manual save")
-        if isinstance(widget, EditorWidget):
-            self._assign_dock_identity(widget)
-            self._attach_editor_lint_hooks(widget)
-            self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+        code_editor = self._editor_from_document_widget(widget)
+        if isinstance(code_editor, EditorWidget):
+            self._assign_dock_identity(code_editor)
+            self._attach_editor_lint_hooks(code_editor)
+            self._request_lint_for_editor(code_editor, reason="save", include_source_if_modified=False)
         if self._is_tdoc_related_path(cpath):
             self._schedule_tdoc_validation(cpath, delay_ms=0)
         self.refresh_subtree(os.path.dirname(cpath))
@@ -5426,8 +5562,9 @@ class PythonIDE(Window):
         old_path = self._canonical_path(self._document_widget_path(widget)) if self._document_widget_path(widget) else None
         new_path = self._canonical_path(path)
 
-        if isinstance(widget, EditorWidget):
-            widget.file_path = new_path
+        code_editor = self._editor_from_document_widget(widget)
+        if isinstance(code_editor, EditorWidget):
+            code_editor.file_path = new_path
         elif hasattr(widget, "set_file_path"):
             try:
                 widget.set_file_path(new_path)
@@ -5449,12 +5586,12 @@ class PythonIDE(Window):
             return
 
         self._note_editor_saved(widget, source="save as")
-        if isinstance(widget, EditorWidget):
-            self._assign_dock_identity(widget)
+        if isinstance(code_editor, EditorWidget):
+            self._assign_dock_identity(code_editor)
             if old_path and old_path != new_path:
                 self.lint_manager.clear_file(old_path)
-            self._attach_editor_lint_hooks(widget)
-            self._request_lint_for_editor(widget, reason="save", include_source_if_modified=False)
+            self._attach_editor_lint_hooks(code_editor)
+            self._request_lint_for_editor(code_editor, reason="save", include_source_if_modified=False)
         elif old_path and old_path != new_path:
             self._clear_tdoc_diagnostics_for_path(old_path)
         if old_path:
