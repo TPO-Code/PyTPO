@@ -1093,6 +1093,20 @@ class SettingsManager:
             editor_cfg["indent_width"] = max(1, min(8, int(editor_cfg.get("indent_width", 4))))
         except Exception:
             editor_cfg["indent_width"] = 4
+        try:
+            editor_cfg["max_occurrence_highlights"] = max(
+                0,
+                min(20000, int(editor_cfg.get("max_occurrence_highlights", 3000))),
+            )
+        except Exception:
+            editor_cfg["max_occurrence_highlights"] = 3000
+        try:
+            editor_cfg["occurrence_highlight_alpha"] = max(
+                0,
+                min(255, int(editor_cfg.get("occurrence_highlight_alpha", 88))),
+            )
+        except Exception:
+            editor_cfg["occurrence_highlight_alpha"] = 88
         raw_wrap_types = editor_cfg.get("word_wrap_enabled_file_types")
         clean_wrap_types: list[str] = []
         seen_wrap_types: set[str] = set()

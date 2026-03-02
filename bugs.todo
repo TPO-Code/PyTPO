@@ -23,18 +23,13 @@ Improvements:
 
 Bugs:
 
-    [ ] when search/replace is visible, hitting enter in the editor goes to the next result.
-        # this should only happen if the filter text box is in focus
-        
-    [ ] find in files will not go to the result if the file containing the result is already open
-        # if the file is already open, navigate to that editor and place the cursor where it belongs
-    
+
     [ ] when hitting enter form the end of folded code we have an issue where  the result is near the top of the folded code under the visible text and not at the end as expected
-        # This does make sense because the cursor is immediately after that text
+        # This does make sense because the cursor is immediately after that text but it is not the desired behaviour
 
     [ ] AI assist setting keep getting reset with no obvious reason
         # This results in having to re enter the model address and having to re enable AI assist
-    [ ] Project explorer is auto focusing on selected items when the item goes out of view when moving the vertical scroll keeping the selected item in view. this is not desired
+        
     
 Compleated:
 

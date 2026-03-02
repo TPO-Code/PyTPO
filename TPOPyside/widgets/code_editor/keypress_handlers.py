@@ -11,7 +11,7 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit
 
 if TYPE_CHECKING:
-    from TPOPyside.widgets.code_editor import CodeEditor
+    from .editor import CodeEditor
 
 # Language-id registry used by language-specific action dispatch.
 # Add entries here to enable language-level behavior without changing event code.

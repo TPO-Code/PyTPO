@@ -5,8 +5,6 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-
-
 from src.ui.python_ide import PythonIDE, request_project_activation
 from src.settings_manager import SettingsManager
 def _split_startup_args(argv: list[str]) -> tuple[list[str], bool]:

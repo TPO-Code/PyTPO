@@ -5,7 +5,7 @@ import shutil
 from typing import Callable, Optional, Any, Dict, List, cast
 
 from PySide6.QtCore import (
-    Qt, QAbstractItemModel, QModelIndex, QMimeData, QPoint, Signal, QObject, QItemSelectionModel
+    Qt, QAbstractItemModel, QModelIndex, QMimeData, QPoint, Signal, QObject, QItemSelectionModel, QItemSelection
 )
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
@@ -617,6 +617,8 @@ class FileSystemTreeWidget(QTreeView):
         self._mouse_press_modifiers: Qt.KeyboardModifiers = Qt.KeyboardModifier.NoModifier
         self._mouse_drag_started = False
         self._mouse_drag_distance = max(8, int(QApplication.startDragDistance()))
+        self._selection_anchor_index: QModelIndex = QModelIndex()
+        self._consume_next_left_release = False
 
     def root_path(self) -> str:
         return self._model.root_path()
@@ -667,25 +669,41 @@ class FileSystemTreeWidget(QTreeView):
         return self._model.path_from_index(index)
 
     def refresh_project(self, include_excluded: bool = False):
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        vpos = int(vbar.value()) if vbar is not None else 0
+        hpos = int(hbar.value()) if hbar is not None else 0
         expanded_paths = self._collect_expanded_paths()
-        selected = self.selected_path()
+        selected_paths = self.selected_paths()
+        current = self.path_from_index(self.currentIndex())
         self._model.refresh_tree(include_excluded=include_excluded)
         self._restore_expanded_paths(expanded_paths)
-        if selected:
-            self.select_path(selected)
+        self._restore_selected_paths(selected_paths, current_path=current)
+        if vbar is not None:
+            vbar.setValue(max(vbar.minimum(), min(vbar.maximum(), vpos)))
+        if hbar is not None:
+            hbar.setValue(max(hbar.minimum(), min(hbar.maximum(), hpos)))
 
     def refresh_subtree(self, path: str, include_excluded: Optional[bool] = None):
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        vpos = int(vbar.value()) if vbar is not None else 0
+        hpos = int(hbar.value()) if hbar is not None else 0
         expanded_paths = self._collect_expanded_paths()
-        selected = self.selected_path()
+        selected_paths = self.selected_paths()
+        current = self.path_from_index(self.currentIndex())
         self._model.refresh_subtree(path, include_excluded=include_excluded)
         self._restore_expanded_paths(expanded_paths)
-        if selected:
-            self.select_path(selected)
+        self._restore_selected_paths(selected_paths, current_path=current)
+        if vbar is not None:
+            vbar.setValue(max(vbar.minimum(), min(vbar.maximum(), vpos)))
+        if hbar is not None:
+            hbar.setValue(max(hbar.minimum(), min(hbar.maximum(), hpos)))
 
     def expanded_paths(self) -> set[str]:
         return self._collect_expanded_paths()
 
-    def select_path(self, path: str):
+    def select_path(self, path: str, *, scroll_into_view: bool = True):
         if not path:
             return
         if not self._model.ensure_path_visible(path):
@@ -705,10 +723,17 @@ class FileSystemTreeWidget(QTreeView):
                 self.expand(pidx)
 
         self.setCurrentIndex(index)
-        self.scrollTo(index)
+        if scroll_into_view:
+            self.scrollTo(index)
 
     def contextMenuEvent(self, event):
         index = self.indexAt(event.pos())
+        if not index.isValid():
+            selection_model = self.selectionModel()
+            if selection_model is not None:
+                selection_model.clearSelection()
+                selection_model.setCurrentIndex(QModelIndex(), QItemSelectionModel.SelectionFlag.NoUpdate)
+            self._selection_anchor_index = QModelIndex()
         path = self._model.path_from_index(index) if index.isValid() else None
         self.pathContextMenuRequested.emit(path, event.globalPos())
         event.accept()
@@ -742,15 +767,39 @@ class FileSystemTreeWidget(QTreeView):
             self._mouse_press_modifiers = event.modifiers()
             self._mouse_drag_started = False
 
-            no_selection_mods = not bool(
-                event.modifiers()
-                & (
-                    Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.ShiftModifier
-                    | Qt.KeyboardModifier.AltModifier
-                    | Qt.KeyboardModifier.MetaModifier
-                )
+            selection_mods = event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
             )
+            no_selection_mods = not bool(
+                selection_mods
+            )
+            if no_selection_mods and index.isValid():
+                self._selection_anchor_index = QModelIndex(index)
+
+            shift_only = bool(selection_mods & Qt.KeyboardModifier.ShiftModifier) and not bool(
+                selection_mods & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+            )
+            if shift_only and index.isValid():
+                selection_model = self.selectionModel()
+                if selection_model is not None:
+                    anchor = self._selection_anchor_index
+                    if not anchor.isValid():
+                        anchor = self.currentIndex()
+                    if not anchor.isValid() or anchor.model() is not self.model():
+                        anchor = QModelIndex(index)
+
+                    flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+                    if not bool(selection_mods & Qt.KeyboardModifier.ControlModifier):
+                        flags |= QItemSelectionModel.SelectionFlag.Clear
+                    selection_model.select(QItemSelection(anchor, index), flags)
+                    selection_model.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                    self._consume_next_left_release = True
+                    event.accept()
+                    return
+
             if no_selection_mods and index.isValid():
                 selection_model = self.selectionModel()
                 if selection_model is not None and not selection_model.isSelected(index):
@@ -815,6 +864,12 @@ class FileSystemTreeWidget(QTreeView):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._consume_next_left_release and event.button() == Qt.MouseButton.LeftButton:
+            self._consume_next_left_release = False
+            self._reset_mouse_drag_tracking()
+            event.accept()
+            return
+        self._consume_next_left_release = False
         super().mouseReleaseEvent(event)
         self._reset_mouse_drag_tracking()
 
@@ -889,6 +944,49 @@ class FileSystemTreeWidget(QTreeView):
             idx = self._model.index_from_path(path)
             if idx.isValid():
                 self.expand(idx)
+
+    def _restore_selected_paths(self, paths: List[str], *, current_path: Optional[str] = None) -> None:
+        if not paths:
+            return
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        restored_indexes: list[QModelIndex] = []
+        seen: set[str] = set()
+        for path in paths:
+            cpath = self._model._canonical(path)
+            if cpath in seen:
+                continue
+            seen.add(cpath)
+            if not self._model.ensure_path_visible(cpath):
+                continue
+            idx = self._model.index_from_path(cpath)
+            if idx.isValid():
+                restored_indexes.append(idx)
+
+        if not restored_indexes:
+            return
+
+        selection_model.clearSelection()
+        for idx in restored_indexes:
+            selection_model.select(
+                idx,
+                QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+            )
+
+        current_index = QModelIndex()
+        if isinstance(current_path, str) and current_path:
+            ccurrent = self._model._canonical(current_path)
+            if self._model.ensure_path_visible(ccurrent):
+                idx = self._model.index_from_path(ccurrent)
+                if idx.isValid():
+                    current_index = idx
+        if not current_index.isValid():
+            current_index = restored_indexes[0]
+
+        selection_model.setCurrentIndex(current_index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self._selection_anchor_index = QModelIndex(current_index)
 
 
 # --- 5. Demo Application ---

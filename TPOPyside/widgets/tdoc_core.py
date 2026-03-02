@@ -73,6 +73,8 @@ _TDOC_OVERVIEW_MARKER_DEFAULTS = {
     "search_active_color": "#D6A853",
     "occurrence_color": "#66A86A",
     "max_occurrence_matches": 12000,
+    "max_occurrence_highlights": 3000,
+    "occurrence_highlight_alpha": 88,
 }
 _TDOC_IMAGE_SUFFIXES = {
     ".png",
@@ -1619,6 +1621,7 @@ class TDocEditorWidget(QTextEdit):
         self._overview_active_search_lines: set[int] = set()
         self._overview_occurrence_lines: set[int] = set()
         self._overview_occurrence_term = ""
+        self._occurrence_highlight_selections: list[QTextEdit.ExtraSelection] = []
 
         self._search_bar = _TDocSearchBar(self)
         self._search_bar.hide()
@@ -2117,10 +2120,73 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             return 10
 
-    def set_overview_markers_enabled(self, enabled: bool) -> None:
-        self._overview_cfg["enabled"] = bool(enabled)
+    def update_overview_marker_settings(self, overview_cfg: dict | None) -> None:
+        cfg = overview_cfg if isinstance(overview_cfg, dict) else {}
+        merged = dict(_TDOC_OVERVIEW_MARKER_DEFAULTS)
+        for key in (
+            "enabled",
+            "width",
+            "search_color",
+            "search_active_color",
+            "occurrence_color",
+            "max_occurrence_matches",
+            "max_occurrence_highlights",
+            "occurrence_highlight_alpha",
+        ):
+            if key in cfg:
+                merged[key] = cfg.get(key)
+
+        merged["enabled"] = _coerce_bool(merged.get("enabled", True), default=True)
+        try:
+            merged["width"] = max(6, min(24, int(merged.get("width", 10))))
+        except Exception:
+            merged["width"] = 10
+
+        for color_key, fallback in (
+            ("search_color", _TDOC_OVERVIEW_MARKER_DEFAULTS["search_color"]),
+            ("search_active_color", _TDOC_OVERVIEW_MARKER_DEFAULTS["search_active_color"]),
+            ("occurrence_color", _TDOC_OVERVIEW_MARKER_DEFAULTS["occurrence_color"]),
+        ):
+            color = QColor(str(merged.get(color_key) or "").strip())
+            if not color.isValid():
+                color = QColor(str(fallback))
+            merged[color_key] = color.name(QColor.HexRgb) if color.isValid() else str(fallback)
+
+        try:
+            merged["max_occurrence_matches"] = max(1000, min(200000, int(merged.get("max_occurrence_matches", 12000))))
+        except Exception:
+            merged["max_occurrence_matches"] = 12000
+        try:
+            merged["max_occurrence_highlights"] = max(
+                0,
+                min(20000, int(merged.get("max_occurrence_highlights", 3000))),
+            )
+        except Exception:
+            merged["max_occurrence_highlights"] = 3000
+        try:
+            merged["occurrence_highlight_alpha"] = max(
+                0,
+                min(255, int(merged.get("occurrence_highlight_alpha", 88))),
+            )
+        except Exception:
+            merged["occurrence_highlight_alpha"] = 88
+
+        if merged == self._overview_cfg:
+            return
+
+        self._overview_cfg = merged
         self._apply_viewport_margins()
-        self._refresh_overview_marker_area()
+        if not bool(merged.get("enabled", True)):
+            self._overview_occurrence_term = ""
+            self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
+            self._refresh_overview_marker_area()
+            return
+        self._refresh_occurrence_markers()
+
+    def set_overview_markers_enabled(self, enabled: bool) -> None:
+        self.update_overview_marker_settings({"enabled": bool(enabled)})
 
     def _apply_viewport_margins(self):
         top_margin = self._search_top_margin()
@@ -2238,6 +2304,8 @@ class TDocEditorWidget(QTextEdit):
         if not term or not pattern:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
@@ -2245,6 +2313,8 @@ class TDocEditorWidget(QTextEdit):
         if not source:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
@@ -2258,10 +2328,26 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
+        try:
+            max_highlights = max(0, int(self._overview_cfg.get("max_occurrence_highlights", 3000)))
+        except Exception:
+            max_highlights = 3000
+        highlight_color = QColor(str(self._overview_cfg.get("occurrence_color", "#66A86A")))
+        if not highlight_color.isValid():
+            highlight_color = QColor("#66A86A")
+        try:
+            highlight_alpha = int(self._overview_cfg.get("occurrence_highlight_alpha", 88))
+        except Exception:
+            highlight_alpha = 88
+        highlight_color.setAlpha(max(16, min(255, highlight_alpha)))
+
         lines: set[int] = set()
+        highlights: list[QTextEdit.ExtraSelection] = []
         count = 0
         for match in regex.finditer(source):
             start = int(match.start())
@@ -2269,24 +2355,33 @@ class TDocEditorWidget(QTextEdit):
             if end <= start:
                 continue
             lines.update(self._line_numbers_for_span(start, end))
+            if len(highlights) < max_highlights:
+                sel = QTextEdit.ExtraSelection()
+                cur = QTextCursor(self.document())
+                cur.setPosition(start)
+                cur.setPosition(end, QTextCursor.KeepAnchor)
+                sel.cursor = cur
+                sel.format.setBackground(highlight_color)
+                highlights.append(sel)
             count += 1
             if count >= max_matches:
                 break
 
         self._overview_occurrence_term = term
         self._overview_occurrence_lines = lines
+        self._occurrence_highlight_selections = highlights
+        self._rebuild_extra_selections()
         self._refresh_overview_marker_area()
 
     def _occurrence_pattern_from_cursor(self) -> tuple[str, str, int]:
         cur = self.textCursor()
         selected = str(cur.selectedText() or "").replace("\u2029", "\n")
         if selected and "\n" not in selected:
-            token = selected
-            if len(token) < 2:
+            if len(selected) < 2:
                 return "", "", 0
-            if re.match(r"^[A-Za-z_]\w*$", token):
-                return token, rf"\b{re.escape(token)}\b", 0
-            return token, re.escape(token), 0
+            # Explicit text selection should match the exact selected substring
+            # (including partial identifier selections like "fil" in "filtered").
+            return selected, re.escape(selected), 0
 
         token = self._identifier_token_under_cursor(cur)
         if len(token) < 2:
@@ -2676,6 +2771,7 @@ class TDocEditorWidget(QTextEdit):
 
     def _rebuild_extra_selections(self):
         extra_selections = list(self._lint_selections)
+        extra_selections.extend(self._occurrence_highlight_selections)
         extra_selections.extend(self._search_highlight_selections)
         if self._search_active_selection is not None:
             extra_selections.append(self._search_active_selection)

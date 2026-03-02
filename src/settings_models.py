@@ -236,6 +236,8 @@ class IdeEditorSettings(TypedDict, total=False):
     background_tint_strength: int
     use_tabs: bool
     indent_width: int
+    max_occurrence_highlights: int
+    occurrence_highlight_alpha: int
     word_wrap_enabled_file_types: list[str]
 
 
@@ -419,6 +421,8 @@ def default_ide_settings() -> IdeSettings:
             "background_tint_strength": 0,
             "use_tabs": False,
             "indent_width": 4,
+            "max_occurrence_highlights": 3000,
+            "occurrence_highlight_alpha": 88,
             "word_wrap_enabled_file_types": [],
         },
         "file_dialog": {

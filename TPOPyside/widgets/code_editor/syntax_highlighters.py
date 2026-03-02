@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtGui import QBrush, QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QTextBlockUserData
 
-from TPOPyside.widgets.keypress_handlers import get_language_id
+from .keypress_handlers import get_language_id
 
 if TYPE_CHECKING:
-    from TPOPyside.widgets.code_editor import CodeEditor
+    from .editor import CodeEditor
 
 _COLOR_PATTERN = re.compile(r"#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b")
 

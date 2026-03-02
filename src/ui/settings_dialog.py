@@ -2431,6 +2431,31 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                             ),
                         ],
                     ),
+                    SchemaSection(
+                        title="Occurrence Highlights",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-max-occurrence-highlights",
+                                key="editor.max_occurrence_highlights",
+                                label="Max Occurrence Highlights",
+                                type="spin",
+                                scope="ide",
+                                min=0,
+                                max=20000,
+                                description="Cap on in-editor occurrence highlight ranges for the symbol/selection under cursor.",
+                            ),
+                            SchemaField(
+                                id="ide-editor-occurrence-highlight-alpha",
+                                key="editor.occurrence_highlight_alpha",
+                                label="Occurrence Highlight Opacity",
+                                type="spin",
+                                scope="ide",
+                                min=0,
+                                max=255,
+                                description="Alpha channel for occurrence highlight fill color.",
+                            ),
+                        ],
+                    ),
                 ],
             ),
             SchemaPage(

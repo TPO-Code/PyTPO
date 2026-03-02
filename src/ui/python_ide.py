@@ -2088,6 +2088,16 @@ class PythonIDE(Window):
         cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
         return cfg if isinstance(cfg, dict) else {}
 
+    def _editor_overview_config(self) -> dict:
+        cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
+        if not isinstance(cfg, dict):
+            return {}
+        out: dict[str, object] = {}
+        for key in ("max_occurrence_highlights", "occurrence_highlight_alpha"):
+            if key in cfg:
+                out[key] = cfg.get(key)
+        return out
+
     @staticmethod
     def _coerce_bool_setting(value: object, *, default: bool = False) -> bool:
         if isinstance(value, bool):
@@ -2239,12 +2249,22 @@ class PythonIDE(Window):
         except Exception:
             pass
 
+    def _apply_editor_overview_settings_to_editor(self, ed: object) -> None:
+        setter = getattr(ed, "update_overview_marker_settings", None)
+        if not callable(setter):
+            return
+        try:
+            setter(self._editor_overview_config())
+        except Exception:
+            pass
+
     def _attach_all_editor_lint_hooks(self):
         self.diagnostics_controller._attach_all_editor_lint_hooks()
 
     def _attach_editor_lint_hooks(self, ed: EditorWidget):
         self.diagnostics_controller._attach_editor_lint_hooks(ed)
         self._apply_editor_indent_settings_to_editor(ed)
+        self._apply_editor_overview_settings_to_editor(ed)
         self._apply_word_wrap_to_editor(ed)
         self._attach_editor_cpp_hooks(ed)
         self._attach_editor_rust_hooks(ed)
@@ -4347,6 +4367,7 @@ class PythonIDE(Window):
             return None
         self._apply_editor_background_to_editor(widget)
         self._apply_editor_indent_settings_to_editor(widget)
+        self._apply_editor_overview_settings_to_editor(widget)
         try:
             widget.set_editor_font_preferences(
                 family=str(self.font_family or "").strip(),
@@ -5046,6 +5067,7 @@ class PythonIDE(Window):
         for ed in self.editor_workspace.all_editors():
             self._apply_editor_background_to_editor(ed)
             self._apply_editor_indent_settings_to_editor(ed)
+            self._apply_editor_overview_settings_to_editor(ed)
             self._apply_completion_ui_settings_to_editor(ed)
             self._apply_lint_visual_settings_to_editor(ed)
             self._attach_editor_cpp_hooks(ed)
@@ -5056,6 +5078,7 @@ class PythonIDE(Window):
             if isinstance(widget, TDocDocumentWidget):
                 self._apply_editor_background_to_editor(widget)
                 self._apply_editor_indent_settings_to_editor(widget)
+                self._apply_editor_overview_settings_to_editor(widget)
                 completion_setter = getattr(widget, "update_completion_ui_settings", None)
                 if callable(completion_setter):
                     try:

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from TPOPyside.widgets.code_editor import CodeEditor
+from src.ui.widgets.code_editor import CodeEditor
 
 
 class DropZone(Enum):

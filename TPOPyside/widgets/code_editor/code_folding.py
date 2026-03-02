@@ -10,7 +10,7 @@ import tokenize
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from TPOPyside.widgets.code_editor import CodeEditor
+    from .editor import CodeEditor
 
 FoldRegion = tuple[int, int]
 FoldProvider = Callable[[str], list[FoldRegion]]

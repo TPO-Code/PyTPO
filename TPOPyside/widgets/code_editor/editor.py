@@ -1,694 +1,89 @@
 from __future__ import annotations
 
-import ast
 import builtins as py_builtins
 from collections import OrderedDict
 import concurrent.futures
-import html
 import inspect
 import os
-import re
-import textwrap
 from pathlib import Path
+import re
 from typing import Callable, Mapping
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, Signal, QTimer, QRectF
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import (
     QAction,
+    QBrush,
     QColor,
+    QCursor,
     QFont,
+    QFontMetricsF,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
-    QPolygon,
     QPainter,
+    QPainterPath,
     QPalette,
+    QPen,
     QPixmap,
+    QPolygon,
     QShortcut,
     QTextCursor,
-    QTextFormat, QBrush, QFontMetricsF, QPen, QCursor, QPainterPath,
+    QTextFormat,
 )
-from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QDialog, QLabel, QTextEdit, QHBoxLayout, QStyle, QStyleOptionViewItem, QStyledItemDelegate, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
+    QTextEdit,
+    QToolTip,
+    QWidget,
+)
 
 from TPOPyside.dialogs.color_picker_dialog import ColorPickerDialog
-from TPOPyside.widgets.code_folding import get_fold_provider, update_folding as update_editor_folding
-from TPOPyside.widgets.keypress_handlers import (
+
+from .code_folding import get_fold_provider, update_folding as update_editor_folding
+from .components import (
+    LineNumberArea,
+    OverviewMarkerArea,
+    _CompletionItemDelegate,
+    _EditorSearchBar,
+)
+from .helpers import (
+    _COLOR_PATTERN,
+    _COMPLETION_DOC_MISSING,
+    _COMPLETION_ITEM_ROLE,
+    _COMPLETION_KIND_COLOR_FALLBACKS,
+    _COMPLETION_ROW_META_ROLE,
+    _COMPLETION_UI_DEFAULTS,
+    _EDITOR_DEFAULT_KEYBINDINGS,
+    _HOVER_SIGNATURE_DELAY_MS,
+    _LINT_VISUAL_DEFAULTS,
+    _OVERVIEW_MARKER_DEFAULTS,
+    _TOOLTIP_QSS,
+    _TOOLTIP_STYLE_MARKER,
+    _build_signature_tooltip_html,
+    _coerce_bool,
+    _collect_source_signatures,
+    _compute_completion_doc_preview,
+    _first_nonempty_line,
+    _kind_group,
+    _normalize_signature_text,
+    _signature_for_label,
+)
+from .keypress_handlers import (
     dispatch_key_press as dispatch_language_key_press,
     dispatch_mouse_press as dispatch_language_mouse_press,
     get_language_id,
     is_todo_checkbox_at_pos,
-    toggle_cpp_comment_selection,
     toggle_python_comment_selection,
 )
-from TPOPyside.widgets.syntax_highlighters import (
+from .syntax_highlighters import (
     ensure_highlighter as ensure_editor_highlighter,
     set_highlighter_for_file as set_editor_highlighter_for_file,
 )
 
-_COLOR_PATTERN = re.compile(r"#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b")
-
-_EDITOR_DEFAULT_KEYBINDINGS: dict[str, dict[str, list[str]]] = {
-    "general": {
-        "action.find": ["Ctrl+F"],
-        "action.replace": ["Ctrl+H"],
-        "action.go_to_definition": ["F12"],
-        "action.find_usages": ["Shift+F12"],
-        "action.rename_symbol": ["F2"],
-        "action.extract_variable": ["Ctrl+Alt+V"],
-        "action.extract_method": ["Ctrl+Alt+M"],
-        "action.trigger_completion": ["Ctrl+Space"],
-        "action.ai_inline_assist": ["Alt+\\"],
-        "action.ai_inline_assist_alt_space": ["Alt+Space"],
-        "action.ai_inline_assist_ctrl_alt_space": ["Ctrl+Alt+Space"],
-    },
-    "python": {
-        "action.python_comment_toggle": ["Ctrl+/"],
-    },
-    "cpp": {
-        "action.cpp_comment_toggle": ["Shift+/"],
-    },
-}
-
-
-_COMPLETION_ITEM_ROLE = int(Qt.UserRole)
-_COMPLETION_ROW_META_ROLE = int(Qt.UserRole) + 1
-_COMPLETION_DOC_MISSING = object()
-
-_COMPLETION_UI_DEFAULTS = {
-    "show_signatures": True,
-    "show_right_label": True,
-    "show_doc_tooltip": True,
-    "doc_tooltip_delay_ms": 180,
-}
-_LINT_VISUAL_DEFAULTS = {
-    "mode": "squiggle",
-    "error_color": "#E35D6A",
-    "warning_color": "#D6A54A",
-    "info_color": "#6AA1FF",
-    "hint_color": "#8F9AA5",
-    "squiggle_thickness": 2,
-    "line_alpha": 64,
-}
-_OVERVIEW_MARKER_DEFAULTS = {
-    "enabled": True,
-    "width": 10,
-    "search_color": "#4A8FD8",
-    "search_active_color": "#D6A853",
-    "occurrence_color": "#66A86A",
-    "max_occurrence_matches": 12000,
-}
-_HOVER_SIGNATURE_DELAY_MS = 180
-_SIGNATURE_WRAP_WIDTH = 88
-_TOOLTIP_STYLE_MARKER = "/* pytpo-dark-tooltip */"
-_TOOLTIP_QSS = f"""
-{_TOOLTIP_STYLE_MARKER}
-QToolTip {{
-    background-color: #2f2f2f;
-    color: #e8e8e8;
-    border: 1px solid #4a4a4a;
-    padding: 6px;
-}}
-"""
-
-_COMPLETION_KIND_COLOR_FALLBACKS = {
-    "ai": QColor("#FFB86C"),
-    "class": QColor("#4FC1FF"),
-    "function": QColor("#DCDCAA"),
-    "variable": QColor("#9CDCFE"),
-    "module": QColor("#4EC9B0"),
-    "keyword": QColor("#C586C0"),
-    "default": QColor("#D4D4D4"),
-}
-
-
-
-def _first_nonempty_line(text: str) -> str:
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        if line:
-            return line
-    return ""
-
-
-def _coerce_bool(value: object, *, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value or "").strip().lower()
-    if text in {"1", "true", "yes", "on", "y"}:
-        return True
-    if text in {"0", "false", "no", "off", "n", ""}:
-        return False
-    return bool(default)
-
-
-def _is_signature_like(text: str, label: str) -> bool:
-    line = str(text or "").strip()
-    if not line:
-        return False
-    if line.startswith("def ") or line.startswith("class "):
-        return True
-    label = str(label or "").strip()
-    if label and re.search(rf"\b{re.escape(label)}\s*\(", line):
-        return True
-    return bool(re.match(r"^[A-Za-z_]\w*\s*\([^)]*\)\s*(->.*)?$", line))
-
-
-def _clean_signature_whitespace(sig: str) -> str:
-    out = re.sub(r"\s+", " ", str(sig or "")).strip()
-    out = out.replace("( ", "(").replace(" )", ")")
-    out = out.replace(" ,", ",")
-    return out
-
-
-def _normalize_signature_text(signature: str, label: str = "") -> str:
-    text = _clean_signature_whitespace(signature)
-    if not text:
-        return ""
-
-    m = re.match(r"^<\s*Signature\s*:?\s*(.*?)\s*(?:\?>|>)\s*$", text, re.IGNORECASE)
-    if m:
-        text = _clean_signature_whitespace(m.group(1))
-
-    if text.lower().startswith("signature:"):
-        text = _clean_signature_whitespace(text.split(":", 1)[1])
-
-    if label:
-        raw = text.strip()
-        if raw.startswith("("):
-            text = f"{label}{raw}"
-
-    return _clean_signature_whitespace(text)
-
-
-def _wrap_signature_text(signature: str, width: int = _SIGNATURE_WRAP_WIDTH) -> str:
-    sig = _clean_signature_whitespace(signature)
-    if not sig:
-        return ""
-    sig = re.sub(r",\s*", ", ", sig)
-    if len(sig) <= width:
-        return sig
-    wrapped = textwrap.wrap(
-        sig,
-        width=width,
-        break_long_words=False,
-        break_on_hyphens=False,
-        subsequent_indent="    ",
-    )
-    return "\n".join(wrapped) if wrapped else sig
-
-
-def _build_signature_tooltip_html(
-        *,
-        signature: str,
-        label: str,
-        documentation: str = "",
-        owner: str = "",
-) -> str:
-    sig = _normalize_signature_text(signature, label)
-    if not sig:
-        return ""
-
-    if not sig.startswith("def "):
-        sig = f"def {sig}"
-    sig = _wrap_signature_text(sig)
-
-    owner_line = str(owner or "").strip()
-    doc = _build_doc_preview_text(documentation, label)
-
-    parts: list[str] = [
-        "<div style='max-width:620px; white-space:pre-wrap; line-height:1.35;'>",
-    ]
-    if owner_line:
-        parts.append(
-            f"<div style='color:#7faeff; margin-bottom:5px;'>{html.escape(owner_line)}</div>"
-        )
-    parts.append(
-        f"<div style='font-family:\"Cascadia Code\",\"Consolas\",monospace; color:#e6e6e6;'>{html.escape(sig)}</div>"
-    )
-    if doc:
-        parts.append(
-            f"<div style='margin-top:6px; color:#cfd7e6;'>{html.escape(doc)}</div>"
-        )
-    parts.append("</div>")
-    return "".join(parts)
-
-
-def _extract_compact_signature(label: str, detail: str) -> str:
-    line = _first_nonempty_line(detail)
-    if not line:
-        return ""
-    probe = _normalize_signature_text(line, label).strip()
-
-    for prefix in ("def ", "async def ", "function ", "class "):
-        if probe.startswith(prefix):
-            probe = probe[len(prefix):].strip()
-            break
-
-    label = str(label or "").strip()
-    if label:
-        m = re.search(rf"\b{re.escape(label)}\s*\((?:[^()]|\([^)]*\))*\)", probe)
-        if m:
-            return _clean_signature_whitespace(m.group(0))
-
-    m = re.search(r"[A-Za-z_]\w*\s*\((?:[^()]|\([^)]*\))*\)", probe)
-    if not m:
-        return ""
-    return _clean_signature_whitespace(m.group(0))
-
-
-def _kind_group(kind: str) -> str:
-    k = str(kind or "").strip().lower()
-    if k in {"ai"}:
-        return "ai"
-    if k in {"class", "type"}:
-        return "class"
-    if k in {"function", "method"}:
-        return "function"
-    if k in {"param", "parameter", "statement", "name", "instance", "attribute", "property", "variable"}:
-        return "variable"
-    if k in {"module", "path", "package"}:
-        return "module"
-    if k in {"keyword"}:
-        return "keyword"
-    return "default"
-
-
-def _build_doc_preview_text(raw_doc: str, label: str = "") -> str:
-    text = str(raw_doc or "").strip()
-    if not text:
-        return ""
-
-    meaningful: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if re.fullmatch(r"[-=~`#*]{3,}", line):
-            continue
-        meaningful.append(line)
-
-    if not meaningful:
-        return ""
-
-    first = meaningful[0]
-    if _is_signature_like(first, label):
-        meaningful = meaningful[1:]
-        if not meaningful:
-            return ""
-        first = meaningful[0]
-
-    first_wrapped = textwrap.wrap(first, width=90) or [first]
-    first_line = first_wrapped[0]
-
-    second_line = ""
-    if len(first_wrapped) > 1:
-        second_line = first_wrapped[1]
-    elif len(meaningful) > 1:
-        wrapped_second = textwrap.wrap(meaningful[1], width=90)
-        if wrapped_second:
-            second_line = wrapped_second[0]
-
-    if second_line:
-        return f"{first_line}\n{second_line}"
-    return first_line
-
-
-def _compute_completion_doc_preview(item: dict, source_text: str) -> str:
-    label = str(item.get("label") or item.get("insert_text") or "")
-
-    for key in ("doc", "docstring", "documentation"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            preview = _build_doc_preview_text(value, label)
-            if preview:
-                return preview
-
-    detail = str(item.get("detail") or "")
-    if "\n" in detail:
-        preview = _build_doc_preview_text(detail, label)
-        if preview:
-            return preview
-
-    if source_text and label:
-        try:
-            tree = ast.parse(source_text)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == label:
-                    doc = ast.get_docstring(node, clean=True) or ""
-                    preview = _build_doc_preview_text(doc, label)
-                    if preview:
-                        return preview
-                    break
-        except Exception:
-            pass
-
-    scope = str(item.get("source_scope") or "").strip().lower()
-    if scope == "builtins" and hasattr(py_builtins, label):
-        try:
-            doc = inspect.getdoc(getattr(py_builtins, label)) or ""
-            preview = _build_doc_preview_text(doc, label)
-            if preview:
-                return preview
-        except Exception:
-            pass
-
-    return ""
-
-
-def _expr_to_text(expr: ast.AST | None) -> str:
-    if expr is None:
-        return ""
-    try:
-        return str(ast.unparse(expr)).strip()
-    except Exception:
-        return "..."
-
-
-def _format_ast_callable_signature(
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
-        *,
-        omit_first_self: bool = False,
-) -> str:
-    parts: list[str] = []
-
-    posonly = list(node.args.posonlyargs or [])
-    regular = list(node.args.args or [])
-    if omit_first_self:
-        if regular and regular[0].arg in {"self", "cls"}:
-            regular = regular[1:]
-        elif posonly and posonly[0].arg in {"self", "cls"}:
-            posonly = posonly[1:]
-
-    positional = posonly + regular
-    defaults = list(node.args.defaults or [])
-    default_start = len(positional) - len(defaults)
-
-    for idx, arg in enumerate(positional):
-        token = arg.arg
-        ann = _expr_to_text(arg.annotation)
-        if ann:
-            token = f"{token}: {ann}"
-        if idx >= default_start:
-            token = f"{token}={_expr_to_text(defaults[idx - default_start])}"
-        parts.append(token)
-        if posonly and idx == len(posonly) - 1:
-            parts.append("/")
-
-    if node.args.vararg is not None:
-        var_token = f"*{node.args.vararg.arg}"
-        var_ann = _expr_to_text(node.args.vararg.annotation)
-        if var_ann:
-            var_token = f"{var_token}: {var_ann}"
-        parts.append(var_token)
-    elif node.args.kwonlyargs:
-        parts.append("*")
-
-    kw_defaults = list(node.args.kw_defaults or [])
-    for idx, arg in enumerate(node.args.kwonlyargs or []):
-        token = arg.arg
-        ann = _expr_to_text(arg.annotation)
-        if ann:
-            token = f"{token}: {ann}"
-        if idx < len(kw_defaults) and kw_defaults[idx] is not None:
-            token = f"{token}={_expr_to_text(kw_defaults[idx])}"
-        parts.append(token)
-
-    if node.args.kwarg is not None:
-        kw_token = f"**{node.args.kwarg.arg}"
-        kw_ann = _expr_to_text(node.args.kwarg.annotation)
-        if kw_ann:
-            kw_token = f"{kw_token}: {kw_ann}"
-        parts.append(kw_token)
-
-    return f"({', '.join(parts)})"
-
-
-def _collect_source_signatures(source_text: str) -> dict[str, str]:
-    if not source_text:
-        return {}
-    try:
-        tree = ast.parse(source_text)
-    except Exception:
-        return {}
-
-    out: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out.setdefault(node.name, f"{node.name}{_format_ast_callable_signature(node)}")
-        elif isinstance(node, ast.ClassDef):
-            init_fn: ast.FunctionDef | ast.AsyncFunctionDef | None = None
-            for sub in node.body:
-                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    method_sig = f"{sub.name}{_format_ast_callable_signature(sub, omit_first_self=True)}"
-                    out.setdefault(sub.name, method_sig)
-                    if sub.name == "__init__":
-                        init_fn = sub
-            if init_fn is not None:
-                out.setdefault(node.name, f"{node.name}{_format_ast_callable_signature(init_fn, omit_first_self=True)}")
-            else:
-                out.setdefault(node.name, f"{node.name}()")
-    return out
-
-
-def _signature_for_label(label: str, source_text: str) -> str:
-    name = str(label or "").strip()
-    if not name:
-        return ""
-
-    source_index = _collect_source_signatures(source_text)
-    sig = source_index.get(name)
-    if sig:
-        return _normalize_signature_text(sig, name)
-
-    if hasattr(py_builtins, name):
-        try:
-            obj = getattr(py_builtins, name)
-            if callable(obj):
-                return _normalize_signature_text(f"{name}{inspect.signature(obj)}", name)
-        except Exception:
-            pass
-    return ""
-
-
-class _CompletionItemDelegate(QStyledItemDelegate):
-    def __init__(self, editor: "CodeEditor"):
-        super().__init__(editor)
-        self._editor = editor
-
-    def sizeHint(self, option, index):
-        base = super().sizeHint(option, index)
-        row_h = max(base.height(), self._editor.fontMetrics().height() + 8)
-        return QSize(base.width(), row_h)
-
-    def paint(self, painter, option, index):
-        meta = index.data(_COMPLETION_ROW_META_ROLE)
-        if not isinstance(meta, dict):
-            super().paint(painter, option, index)
-            return
-
-        style = option.widget.style() if option.widget is not None else QApplication.style()
-        style_opt = QStyleOptionViewItem(option)
-        style_opt.text = ""
-        style.drawControl(QStyle.CE_ItemViewItem, style_opt, painter, option.widget)
-
-        rect = option.rect.adjusted(8, 0, -8, 0)
-        if rect.width() <= 0:
-            return
-
-        primary = str(meta.get("primary") or "")
-        right = str(meta.get("right") or "")
-        kind = str(meta.get("kind_group") or "default")
-
-        fm = option.fontMetrics
-        selected = bool(option.state & QStyle.State_Selected)
-
-        right_width = 0
-        if right:
-            right_width = min(max(36, fm.horizontalAdvance(right) + 8), int(rect.width() * 0.42))
-
-        right_rect = QRect(rect.right() - right_width + 1, rect.top(), right_width, rect.height())
-        main_rect = QRect(rect.left(), rect.top(), max(0, rect.width() - right_width - 10), rect.height())
-
-        painter.save()
-        if right and right_rect.width() > 0:
-            right_pen = (
-                option.palette.color(QPalette.HighlightedText)
-                if selected
-                else option.palette.color(QPalette.PlaceholderText)
-            )
-            painter.setPen(right_pen)
-            painter.drawText(
-                right_rect.adjusted(0, 0, -2, 0),
-                Qt.AlignRight | Qt.AlignVCenter,
-                fm.elidedText(right, Qt.ElideRight, right_rect.width()),
-            )
-
-        painter.setPen(self._editor._completion_kind_color(kind, option.palette, selected))
-        painter.drawText(
-            main_rect,
-            Qt.AlignLeft | Qt.AlignVCenter,
-            fm.elidedText(primary, Qt.ElideRight, main_rect.width()),
-        )
-        painter.restore()
-
-
-class _EditorSearchBar(QFrame):
-    def __init__(self, editor: "CodeEditor"):
-        super().__init__(editor)
-        self._editor = editor
-        self._replace_visible = False
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setObjectName("editorSearchBar")
-        self.setStyleSheet(
-            """
-            QFrame#editorSearchBar {
-                background: #252526;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-            }
-            QLineEdit, QPushButton, QCheckBox {
-                font-size: 10pt;
-            }
-            QLineEdit {
-                min-height: 24px;
-                padding: 2px 6px;
-                border: 1px solid #4a4a4a;
-                background: #1e1e1e;
-            }
-            QPushButton {
-                min-height: 24px;
-                padding: 0 8px;
-            }
-            QCheckBox {
-                spacing: 4px;
-            }
-            """
-        )
-
-        self.find_edit = QLineEdit(self)
-        self.find_edit.setPlaceholderText("Find")
-        self.find_edit.installEventFilter(self)
-
-        self.replace_edit = QLineEdit(self)
-        self.replace_edit.setPlaceholderText("Replace")
-        self.replace_edit.installEventFilter(self)
-
-        self.prev_btn = QPushButton("Prev", self)
-        self.next_btn = QPushButton("Next", self)
-        self.replace_btn = QPushButton("Replace", self)
-        self.replace_all_btn = QPushButton("Replace All", self)
-        self.case_box = QCheckBox("Case", self)
-        self.word_box = QCheckBox("Word", self)
-        self.regex_box = QCheckBox("Regex", self)
-        self.selection_box = QCheckBox("Selection", self)
-        self.count_lbl = QLabel("0 / 0", self)
-        self.close_btn = QPushButton("X", self)
-        self.close_btn.setFixedWidth(24)
-
-        self.prev_btn.clicked.connect(self._editor.search_previous)
-        self.next_btn.clicked.connect(self._editor.search_next)
-        self.replace_btn.clicked.connect(self._editor.replace_current_or_next)
-        self.replace_all_btn.clicked.connect(self._editor.replace_all_matches)
-        self.close_btn.clicked.connect(self._editor.hide_search_bar)
-
-        self.find_edit.textChanged.connect(self._editor._on_search_query_changed)
-        self.replace_edit.textChanged.connect(self._editor._on_replace_query_changed)
-        self.case_box.toggled.connect(self._editor._on_search_option_changed)
-        self.word_box.toggled.connect(self._editor._on_search_option_changed)
-        self.regex_box.toggled.connect(self._editor._on_search_option_changed)
-        self.selection_box.toggled.connect(self._editor._on_search_option_changed)
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(6)
-        lay.addWidget(self.find_edit, 2)
-        lay.addWidget(self.replace_edit, 2)
-        lay.addWidget(self.prev_btn)
-        lay.addWidget(self.next_btn)
-        lay.addWidget(self.replace_btn)
-        lay.addWidget(self.replace_all_btn)
-        lay.addWidget(self.case_box)
-        lay.addWidget(self.word_box)
-        lay.addWidget(self.regex_box)
-        lay.addWidget(self.selection_box)
-        lay.addWidget(self.count_lbl)
-        lay.addWidget(self.close_btn)
-        self.set_replace_visible(False)
-
-    def set_replace_visible(self, visible: bool):
-        self._replace_visible = bool(visible)
-        self.replace_edit.setVisible(self._replace_visible)
-        self.replace_btn.setVisible(self._replace_visible)
-        self.replace_all_btn.setVisible(self._replace_visible)
-        self.adjustSize()
-
-    def is_replace_visible(self) -> bool:
-        return self._replace_visible
-
-    def set_count_text(self, text: str):
-        self.count_lbl.setText(str(text or "0 / 0"))
-
-    def set_in_selection_checked(self, checked: bool):
-        blocker = self.selection_box.blockSignals(True)
-        self.selection_box.setChecked(bool(checked))
-        self.selection_box.blockSignals(blocker)
-
-    def focus_find(self):
-        self.find_edit.setFocus()
-        self.find_edit.selectAll()
-
-    def eventFilter(self, watched, event):
-        if watched in {self.find_edit, self.replace_edit} and event.type() == QEvent.KeyPress:
-            key = event.key()
-            if key in (Qt.Key_Return, Qt.Key_Enter):
-                if event.modifiers() & Qt.ShiftModifier:
-                    self._editor.search_previous()
-                else:
-                    self._editor.search_next()
-                return True
-            if key == Qt.Key_Escape:
-                self._editor.hide_search_bar()
-                return True
-        return super().eventFilter(watched, event)
-
-
-# ---------------- Code Editor with line numbers ----------------
-
-class LineNumberArea(QWidget):
-    def __init__(self, editor: 'CodeEditor'):
-        super().__init__(editor)
-        self.codeEditor = editor
-    def sizeHint(self):
-        return QSize(self.codeEditor.lineNumberAreaWidth(), 0)
-    def paintEvent(self, event):
-        self.codeEditor.lineNumberAreaPaintEvent(event)
-    def mousePressEvent(self, event):
-        self.codeEditor.lineNumberAreaMousePressEvent(event)
-    def mouseDoubleClickEvent(self, event):
-        self.codeEditor.lineNumberAreaMousePressEvent(event)
-
-
-class OverviewMarkerArea(QWidget):
-    def __init__(self, editor: "CodeEditor"):
-        super().__init__(editor)
-        self.codeEditor = editor
-
-    def sizeHint(self):
-        return QSize(self.codeEditor.overviewMarkerAreaWidth(), 0)
-
-    def paintEvent(self, event):
-        self.codeEditor.overviewMarkerAreaPaintEvent(event)
-
-    def mousePressEvent(self, event):
-        self.codeEditor.overviewMarkerAreaMousePressEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        self.codeEditor.overviewMarkerAreaMousePressEvent(event)
-
-
-# -----------------
 class CodeEditor(QPlainTextEdit):
     completionRequested = Signal(str)  # reason: manual | auto
     completionAccepted = Signal(str)   # insert_text
@@ -757,6 +152,7 @@ class CodeEditor(QPlainTextEdit):
         self._overview_active_search_lines: set[int] = set()
         self._overview_occurrence_lines: set[int] = set()
         self._overview_occurrence_term = ""
+        self._occurrence_highlight_selections: list[QTextEdit.ExtraSelection] = []
         self._completion_items: list[dict] = []
         self._completion_filtered_items: list[dict] = []
         self._completion_recency: dict[str, int] = {}
@@ -1262,6 +658,83 @@ class CodeEditor(QPlainTextEdit):
         finally:
             self._fold_selection_adjusting = False
 
+    def _cursor_after_fold_for_enter(self, cursor: QTextCursor) -> QTextCursor:
+        if cursor.hasSelection() or not self._folded_starts:
+            return cursor
+        block = cursor.block()
+        if not block.isValid():
+            return cursor
+        start_block_no = int(block.blockNumber())
+        if start_block_no not in self._folded_starts:
+            return cursor
+
+        # Only remap when Enter is pressed from the visible end of a collapsed header line.
+        header_end_pos = int(block.position()) + len(block.text())
+        if int(cursor.position()) < header_end_pos:
+            return cursor
+
+        end_block_no = self._fold_ranges.get(start_block_no)
+        if end_block_no is None or int(end_block_no) <= start_block_no:
+            return cursor
+        end_block = self.document().findBlockByNumber(int(end_block_no))
+        if not end_block.isValid():
+            return cursor
+
+        next_block = end_block.next()
+        if next_block.isValid():
+            target_pos = int(next_block.position())
+        else:
+            target_pos = int(end_block.position()) + len(end_block.text())
+
+        if target_pos == int(cursor.position()):
+            return cursor
+
+        moved = QTextCursor(self.document())
+        moved.setPosition(max(0, target_pos))
+        self.setTextCursor(moved)
+        return moved
+
+    def _folded_starts_ending_before_block(self, block_number: int) -> list[int]:
+        if not self._folded_starts:
+            return []
+        target_end = int(block_number) - 1
+        if target_end < 0:
+            return []
+        matches: list[int] = []
+        for start_block_no in sorted(self._folded_starts):
+            end_block_no = self._fold_ranges.get(int(start_block_no))
+            if end_block_no is None:
+                continue
+            if int(end_block_no) == target_end:
+                matches.append(int(start_block_no))
+        return matches
+
+    def _expand_fold_boundary_before_cursor_on_backspace(self, cursor: QTextCursor) -> bool:
+        if cursor.hasSelection() or not self._folded_starts:
+            return False
+        block = cursor.block()
+        if not block.isValid():
+            return False
+        if int(cursor.position()) != int(block.position()):
+            return False
+
+        block_no = int(block.blockNumber())
+        folded_starts = self._folded_starts_ending_before_block(block_no)
+        if not folded_starts:
+            return False
+
+        for start_block_no in folded_starts:
+            self._folded_starts.discard(int(start_block_no))
+        self._apply_fold_visibility()
+
+        restored = QTextCursor(self.document())
+        try:
+            restored.setPosition(int(cursor.position()))
+        except Exception:
+            restored.movePosition(QTextCursor.End)
+        self.setTextCursor(restored)
+        return True
+
     def _block_number_at_y(self, y_pos: int) -> int:
         block = self.firstVisibleBlock()
         top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
@@ -1346,6 +819,73 @@ class CodeEditor(QPlainTextEdit):
         self._rebuild_extra_selections()
         self.viewport().update()
         self._refresh_overview_marker_area()
+
+    def update_overview_marker_settings(self, overview_cfg: dict):
+        cfg = overview_cfg if isinstance(overview_cfg, dict) else {}
+        merged = dict(_OVERVIEW_MARKER_DEFAULTS)
+        for key in (
+            "enabled",
+            "width",
+            "search_color",
+            "search_active_color",
+            "occurrence_color",
+            "max_occurrence_matches",
+            "max_occurrence_highlights",
+            "occurrence_highlight_alpha",
+        ):
+            if key in cfg:
+                merged[key] = cfg.get(key)
+
+        merged["enabled"] = _coerce_bool(merged.get("enabled", True), default=True)
+        try:
+            merged["width"] = max(6, min(24, int(merged.get("width", 10))))
+        except Exception:
+            merged["width"] = 10
+        merged["search_color"] = self._valid_lint_color_hex(
+            merged.get("search_color"),
+            _OVERVIEW_MARKER_DEFAULTS["search_color"],
+        )
+        merged["search_active_color"] = self._valid_lint_color_hex(
+            merged.get("search_active_color"),
+            _OVERVIEW_MARKER_DEFAULTS["search_active_color"],
+        )
+        merged["occurrence_color"] = self._valid_lint_color_hex(
+            merged.get("occurrence_color"),
+            _OVERVIEW_MARKER_DEFAULTS["occurrence_color"],
+        )
+        try:
+            merged["max_occurrence_matches"] = max(1000, min(200000, int(merged.get("max_occurrence_matches", 12000))))
+        except Exception:
+            merged["max_occurrence_matches"] = 12000
+        try:
+            merged["max_occurrence_highlights"] = max(
+                0,
+                min(20000, int(merged.get("max_occurrence_highlights", 3000))),
+            )
+        except Exception:
+            merged["max_occurrence_highlights"] = 3000
+        try:
+            merged["occurrence_highlight_alpha"] = max(
+                0,
+                min(255, int(merged.get("occurrence_highlight_alpha", 88))),
+            )
+        except Exception:
+            merged["occurrence_highlight_alpha"] = 88
+
+        if merged == self._overview_cfg:
+            return
+
+        self._overview_cfg = merged
+        self._apply_viewport_margins()
+        if not bool(merged.get("enabled", True)):
+            self._overview_occurrence_term = ""
+            self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
+            self._refresh_overview_marker_area()
+            return
+
+        self._refresh_occurrence_markers()
 
     @staticmethod
     def _valid_lint_color_hex(value: object, fallback: str) -> str:
@@ -1846,6 +1386,8 @@ class CodeEditor(QPlainTextEdit):
         if not term or not pattern:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
@@ -1853,6 +1395,8 @@ class CodeEditor(QPlainTextEdit):
         if not source:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
@@ -1866,10 +1410,26 @@ class CodeEditor(QPlainTextEdit):
         except Exception:
             self._overview_occurrence_term = ""
             self._overview_occurrence_lines = set()
+            self._occurrence_highlight_selections = []
+            self._rebuild_extra_selections()
             self._refresh_overview_marker_area()
             return
 
+        try:
+            max_highlights = max(0, int(self._overview_cfg.get("max_occurrence_highlights", 3000)))
+        except Exception:
+            max_highlights = 3000
+        highlight_color = QColor(str(self._overview_cfg.get("occurrence_color", "#66A86A")))
+        if not highlight_color.isValid():
+            highlight_color = QColor("#66A86A")
+        try:
+            highlight_alpha = int(self._overview_cfg.get("occurrence_highlight_alpha", 88))
+        except Exception:
+            highlight_alpha = 88
+        highlight_color.setAlpha(max(16, min(255, highlight_alpha)))
+
         lines: set[int] = set()
+        highlights: list[QTextEdit.ExtraSelection] = []
         count = 0
         for match in regex.finditer(source):
             start = int(match.start())
@@ -1877,24 +1437,33 @@ class CodeEditor(QPlainTextEdit):
             if end <= start:
                 continue
             lines.update(self._line_numbers_for_span(start, end))
+            if len(highlights) < max_highlights:
+                sel = QTextEdit.ExtraSelection()
+                cur = QTextCursor(self.document())
+                cur.setPosition(start)
+                cur.setPosition(end, QTextCursor.KeepAnchor)
+                sel.cursor = cur
+                sel.format.setBackground(highlight_color)
+                highlights.append(sel)
             count += 1
             if count >= max_matches:
                 break
 
         self._overview_occurrence_term = term
         self._overview_occurrence_lines = lines
+        self._occurrence_highlight_selections = highlights
+        self._rebuild_extra_selections()
         self._refresh_overview_marker_area()
 
     def _occurrence_pattern_from_cursor(self) -> tuple[str, str, int]:
         cur = self.textCursor()
         selected = str(cur.selectedText() or "").replace("\u2029", "\n")
         if selected and "\n" not in selected:
-            token = selected
-            if len(token) < 2:
+            if len(selected) < 2:
                 return "", "", 0
-            if re.match(r"^[A-Za-z_]\w*$", token):
-                return token, rf"\b{re.escape(token)}\b", 0
-            return token, re.escape(token), 0
+            # Explicit text selection should match the exact selected substring
+            # (including partial identifier selections like "fil" in "filtered").
+            return selected, re.escape(selected), 0
 
         token = self._identifier_token_under_cursor(cur)
         if len(token) < 2:
@@ -2628,37 +2197,17 @@ class CodeEditor(QPlainTextEdit):
         normalized: list[dict] = []
         line_severity: dict[int, str] = {}
         for item in diagnostics or []:
-            if not isinstance(item, dict):
+            norm = self._normalize_lint_diagnostic_item(item)
+            if not isinstance(norm, dict):
                 continue
-            try:
-                line = int(item.get("line") or 0)
-                col = int(item.get("column") or 1)
-            except Exception:
+            normalized.append(norm)
+            line_no = int(norm.get("line") or 0)
+            if line_no <= 0:
                 continue
-            if line <= 0:
-                continue
-            sev = str(item.get("severity") or "warning").lower()
-            try:
-                end_line = int(item.get("end_line") or line)
-            except Exception:
-                end_line = line
-            try:
-                end_col = int(item.get("end_column") or item.get("end_col") or (col + 1))
-            except Exception:
-                end_col = col + 1
-
-            normalized.append(
-                {
-                    "line": max(1, line),
-                    "column": max(1, col),
-                    "end_line": max(1, end_line),
-                    "end_column": max(1, end_col),
-                    "severity": sev,
-                }
-            )
-            prev = line_severity.get(line)
+            sev = str(norm.get("severity") or "warning").lower()
+            prev = line_severity.get(line_no)
             if prev is None or self._severity_rank(sev) > self._severity_rank(prev):
-                line_severity[line] = sev
+                line_severity[line_no] = sev
 
         self._lint_diagnostics = normalized
         self._lint_line_severity = line_severity
@@ -2666,6 +2215,33 @@ class CodeEditor(QPlainTextEdit):
         self._rebuild_extra_selections()
         self.viewport().update()
         self._refresh_overview_marker_area()
+
+    def _normalize_lint_diagnostic_item(self, item: object) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        try:
+            line = int(item.get("line") or 0)
+            col = int(item.get("column") or 1)
+        except Exception:
+            return None
+        if line <= 0:
+            return None
+        sev = str(item.get("severity") or "warning").strip().lower()
+        try:
+            end_line = int(item.get("end_line") or line)
+        except Exception:
+            end_line = line
+        try:
+            end_col = int(item.get("end_column") or (col + 1))
+        except Exception:
+            end_col = col + 1
+        return {
+            "line": max(1, line),
+            "column": max(1, col),
+            "end_line": max(1, end_line),
+            "end_column": max(1, end_col),
+            "severity": sev,
+        }
 
     def clear_lint_diagnostics(self):
         self._lint_diagnostics = []
@@ -2850,6 +2426,7 @@ class CodeEditor(QPlainTextEdit):
 
     def _rebuild_extra_selections(self):
         extraSelections = list(self._lint_selections)
+        extraSelections.extend(self._occurrence_highlight_selections)
         extraSelections.extend(self._search_highlight_selections)
         if self._search_active_selection is not None:
             extraSelections.append(self._search_active_selection)
@@ -3444,13 +3021,7 @@ class CodeEditor(QPlainTextEdit):
             return
 
         documentation = str(payload.get("documentation") or "")
-        full_name = str(payload.get("full_name") or "").strip()
-        module_name = str(payload.get("module_name") or "").strip()
-        owner = full_name or ""
-        if not owner and module_name:
-            owner = f"{module_name}.{label}"
-        elif not owner:
-            owner = str(payload.get("source") or "")
+        owner = self._signature_owner_from_lookup_payload(payload, label)
 
         tooltip_html = _build_signature_tooltip_html(
             signature=signature,
@@ -3472,6 +3043,15 @@ class CodeEditor(QPlainTextEdit):
             and not self.is_completion_popup_visible()
         ):
             QToolTip.showText(self._hover_signature_pending_pos, tooltip_html, self)
+
+    def _signature_owner_from_lookup_payload(self, payload: dict, label: str) -> str:
+        owner = str(payload.get("owner") or "").strip()
+        if owner:
+            return owner
+        module_name = str(payload.get("module_name") or "").strip()
+        if module_name:
+            return f"{module_name}.{label}"
+        return str(payload.get("source") or "")
 
     def _position_completion_popup(self):
         cursor_rect = self.cursorRect()
@@ -3499,9 +3079,7 @@ class CodeEditor(QPlainTextEdit):
         label = str(item.get("label") or item.get("insert_text") or "")
         if not prefix:
             return True
-        low = label.lower()
-        p = prefix.lower()
-        return low.startswith(p) or p in low
+        return label.lower().startswith(prefix.lower())
 
     def _current_completion_prefix(self) -> str:
         start, end = self._current_prefix_bounds()
@@ -3572,44 +3150,25 @@ class CodeEditor(QPlainTextEdit):
         return _normalize_signature_text(f"{label}()", label)
 
     def _derive_completion_right_label(self, item: dict) -> str:
+        """Backward-compatible alias for right-label policy hook."""
+        return self._completion_right_label_for_item(item)
+
+    def _completion_right_label_for_item(self, item: dict) -> str:
         for key in ("source_label", "type_label", "owner", "module"):
             value = str(item.get(key) or "").strip()
             if value:
                 return value[:28]
-
-        detail = str(item.get("detail") or "").strip()
         source = str(item.get("source") or "").strip()
-        scope = str(item.get("source_scope") or "").strip().lower()
-        kind = str(item.get("kind") or "").strip().lower()
-
-        module_m = re.search(r"\bmodule\s+([A-Za-z_][\w\.]*)", detail)
-        if module_m:
-            return module_m.group(1)[:28]
-        class_m = re.search(r"\bclass\s+([A-Za-z_]\w*)", detail)
-        if class_m:
-            return class_m.group(1)[:28]
-        from_m = re.search(r"\bfrom\s+([A-Za-z_][\w\.]*)", detail)
-        if from_m:
-            return from_m.group(1)[:28]
-        arrow_m = re.search(r"->\s*([A-Za-z_][\w\.\[\], ]*)$", detail)
-        if arrow_m:
-            return arrow_m.group(1).strip()[:28]
-
-        if scope == "builtins":
-            return "builtins"
-        if scope == "interpreter_modules":
-            return "stdlib"
-        if scope == "project":
-            return "project"
-        if scope == "current_file":
-            return "file"
-        if source and source.lower() not in {"fallback", "jedi"}:
-            return source[:28]
         if source:
             return source[:28]
-        if kind == "keyword":
-            return "keyword"
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind:
+            return kind[:28]
         return ""
+
+    def _completion_primary_text_for_item(self, item: dict, *, label: str, detail: str) -> str:
+        _ = (item, detail)
+        return str(label or "")
 
     def _completion_row_meta(self, item: dict) -> dict:
         key = self._completion_cache_key(item)
@@ -3622,15 +3181,11 @@ class CodeEditor(QPlainTextEdit):
         kind = str(item.get("kind") or "")
         detail = str(item.get("detail") or "")
 
-        primary = label
-        if bool(self._completion_ui_cfg.get("show_signatures", True)) and self._is_callable_item(item):
-            sig = _extract_compact_signature(label, detail)
-            primary = sig if sig else self._best_effort_callable_signature(item, label)
-            primary = _normalize_signature_text(primary, label) or primary
+        primary = self._completion_primary_text_for_item(item, label=label, detail=detail)
 
         right = ""
         if bool(self._completion_ui_cfg.get("show_right_label", True)):
-            right = self._derive_completion_right_label(item)
+            right = self._completion_right_label_for_item(item)
 
         meta = {
             "primary": primary or label,
@@ -3641,15 +3196,10 @@ class CodeEditor(QPlainTextEdit):
         return meta
 
     def _completion_ui_sort_key(self, item: dict, prefix: str, base_index: int) -> tuple[int, int]:
+        _ = prefix
         if bool(item.get("is_ai_suggestion")):
             return -1, base_index
-        label = str(item.get("label") or item.get("insert_text") or "")
-        demote = 0
-        if label.startswith("__") and label.endswith("__") and not prefix.startswith("_"):
-            demote = 2
-        elif label.startswith("_") and prefix == "":
-            demote = 1
-        return demote, base_index
+        return 0, base_index
 
     def _rebuild_completion_popup(self):
         prefix = self._current_completion_prefix()
@@ -3764,6 +3314,18 @@ class CodeEditor(QPlainTextEdit):
         self.setTextCursor(cursor)
         return new_text
 
+    def _resolve_completion_insert_text(
+            self,
+            *,
+            item: dict,
+            insert_text: str,
+            label: str,
+            prefix_text: str,
+            source_text: str,
+    ) -> str:
+        """Hook for host applications to adjust completion insertion semantics."""
+        return str(insert_text or "")
+
     def _insert_completion(self, item: dict) -> str:
         is_ai_suggestion = bool(item.get("is_ai_suggestion"))
         raw_insert = str(item.get("insert_text") or item.get("label") or "")
@@ -3807,15 +3369,15 @@ class CodeEditor(QPlainTextEdit):
         start, end = self._current_prefix_bounds()
         prefix_text = source[start:end]
 
-        # Jedi returns suffix text in `insert_text` for many cases (e.g. "pr" -> "int").
-        # Expand to the full label when suffix semantics are detected.
-        if (not is_ai_suggestion) and label and prefix_text:
-            pfx_low = prefix_text.lower()
-            lbl_low = label.lower()
-            if lbl_low.startswith(pfx_low):
-                suffix = label[len(prefix_text):]
-                if insert_text.lower() == suffix.lower():
-                    insert_text = label
+        insert_text = self._resolve_completion_insert_text(
+            item=item,
+            insert_text=insert_text,
+            label=label,
+            prefix_text=prefix_text,
+            source_text=source,
+        )
+        if not insert_text.strip():
+            return ""
 
         right = source[end:]
         suffix = []
@@ -4167,7 +3729,7 @@ class CodeEditor(QPlainTextEdit):
             return
 
         if self._search_bar.isVisible():
-            if key in (Qt.Key_Return, Qt.Key_Enter):
+            if key in (Qt.Key_Return, Qt.Key_Enter) and self._search_bar.find_edit.hasFocus():
                 if mods & Qt.ShiftModifier:
                     self.search_previous()
                 else:
@@ -4244,6 +3806,9 @@ class CodeEditor(QPlainTextEdit):
         # ---------- bracket-aware backspace ----------
         if key == Qt.Key_Backspace and not (mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
             cursor = self.textCursor()
+            if self._expand_fold_boundary_before_cursor_on_backspace(cursor):
+                event.accept()
+                return
             if not cursor.hasSelection():
                 left = self._line_before_cursor()
                 right = self._line_after_cursor()
@@ -4305,6 +3870,7 @@ class CodeEditor(QPlainTextEdit):
         # ---------- Enter / Return: auto-indent + python dedent ----------
         if key in (Qt.Key_Return, Qt.Key_Enter):
             cursor = self.textCursor()
+            cursor = self._cursor_after_fold_for_enter(cursor)
 
             before = self._line_before_cursor()
             after = self._line_after_cursor()
@@ -4534,3 +4100,6 @@ class CodeEditor(QPlainTextEdit):
 
 def set_highlighter_for_file(editor: QPlainTextEdit, file_path: str):
     set_editor_highlighter_for_file(editor, file_path)
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]
