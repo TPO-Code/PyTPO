@@ -1,0 +1,703 @@
+# Midnight Forge (.qsst)
+# Structured source theme compiled to QSS at runtime.
+# Keep semantic tokens stable; prefer adjusting tokens over one-off rule values.
+
+name = "Midnight Forge"
+format = "qsst-v1"
+
+# -------------------------------------------------------------------
+# Core semantic tokens
+# -------------------------------------------------------------------
+[colors]
+# Primary text hierarchy
+text_primary = "#d4dbe6"
+text_emphasis = "#dbe3ef"
+text_title = "#e3e9f2"
+text_muted = "#aeb6c2"
+text_disabled = "#7f8897"
+text_inverse = "#ffffff"
+text_tooltip = "#e7edf6"
+text_tab_selected = "#e6edf8"
+text_tab_hover = "#c9d2df"
+text_tree_hover = "#e3eaf7"
+text_groupbox_title = "#d8e1ee"
+text_titlebar_control = "#7d8fa5"
+text_titlebar_tool = "#c2cfdf"
+text_titlebar_tool_disabled = "#556070"
+transparent= "#00000000"
+
+# Layered background surfaces
+bg_root = "#1e1e1e"
+bg_surface = "#252526"
+bg_surface_alt = "#2d2d30"
+bg_panel = "#202124"
+bg_soft = "#2b2b2f"
+bg_soft_hover = "#33353a"
+bg_splitter = "#2a2d31"
+bg_splitter_hover = "#3d4654"
+bg_tab_pane = "rgb(0, 0, 0)"
+bg_button_disabled = "#2a2a2b"
+bg_titlebar_gradient_top = "#12121b"
+bg_titlebar_gradient_bottom = "#1E1E2C"
+
+# Border system
+border_subtle = "#3a3d41"
+border_control = "#45494f"
+border_input = "#3f4349"
+border_input_focus = "#4f8cff"
+border_checkbox = "#616975"
+border_checkbox_checked = "#79a9ff"
+border_tooltip = "#3e4451"
+
+# Accent family
+accent = "#4f8cff"
+accent_soft = "#6eaef2"
+accent_primary_button = "#0e639c"
+accent_primary_button_border = "#1177bb"
+accent_selection_bg = "#264f78"
+accent_selection_text = "#f2f6fc"
+
+# Interactive states
+hover_button_bg = "#37373d"
+hover_button_border = "#5b6470"
+pressed_button_bg = "#2a2a2e"
+
+# Scrollbar colors
+scroll_track = "#1f1f20"
+scroll_handle = "#4a4f58"
+scroll_handle_hover = "#5a6270"
+
+# Terminal palette
+bg_terminal = "#000000"
+bg_terminal_toolbar_shell = "#181818"
+terminal_text = "#C18C00"
+terminal_border = "#2a3340"
+terminal_selection_bg = "#2a415d"
+terminal_cursor = "#9ec7ff"
+terminal_link = "#78a9ff"
+terminal_toolbar_fg = "#cfd8e4"
+terminal_toolbar_bg = "#1B1B1B"
+terminal_toolbar_border = "#354152"
+terminal_toolbar_hover_bg = "#273443"
+terminal_toolbar_hover_border = "#4a5d75"
+terminal_toolbar_pressed_bg = "#1c2530"
+terminal_run_bg = "#2b3a4b"
+terminal_run_border = "#4a6380"
+terminal_menu_bg = "#1a2029"
+terminal_menu_fg = "#d4deea"
+terminal_menu_border = "#2f3a4a"
+
+# Role-specific titlebar states
+role_close_hover_bg = "rgba(232, 17, 35, 0.85)"
+role_close_hover_border = "rgba(255, 255, 255, 0.08)"
+role_close_pressed_bg = "rgba(198, 15, 31, 0.95)"
+
+titlebar_button_hover_bg = "rgba(100, 130, 170, 0.15)"
+titlebar_button_hover_border = "rgba(100, 130, 170, 0.25)"
+titlebar_button_pressed_bg = "rgba(100, 130, 170, 0.25)"
+
+# -------------------------------------------------------------------
+# Shared metrics and spacing
+# -------------------------------------------------------------------
+[metrics]
+# Radius scale
+radius_titlebar = "9px"
+radius_button = "5px"
+radius_control = "4px"
+radius_tab = "7px"
+radius_scroll = "6px"
+radius_large = "10px"
+radius_medium = "8px"
+radius_small = "5px"
+radius_chip = "6px"
+
+border_width = "1px"
+splitter_size = "4px"
+terminal_font_size = "8pt"
+font_weight_semibold = 600
+font_weight_bold = 700
+top_strip_height = "32px"
+combo_dropdown_width = "22px"
+scrollbar_thickness = "12px"
+scrollbar_line_extent = "0px"
+checkbox_indicator_size = "16px"
+titlebar_tool_min_height = "0px"
+menu_indicator_right = "6px"
+settings_title_size = "21px"
+settings_page_title_size = "18px"
+settings_meta_size = "12px"
+settings_button_min_height = "30px"
+terminal_separator_width = "1px"
+tree_selected_decoration = 0
+tab_pane_top_offset = "-1px"
+
+[spacing]
+# Shared spacing primitives
+button_padding = "7px 12px"
+input_padding = "1px 1px"
+menu_item_padding = "6px 12px"
+menu_bar_item_padding = "5px 10px"
+checkbox_spacing = "8px"
+scrollbar_margin = "2px"
+scroll_handle_min = "24px"
+tab_padding = "6px 12px"
+tab_margin_right = "2px"
+tooltip_padding = "6px"
+menu_padding = "4px"
+titlebar_button_padding = "4px"
+titlebar_tool_padding = "0px"
+tree_padding = "4px"
+tree_item_padding = "6px 8px"
+tree_item_margin = "1px 0"
+groupbox_margin_top = "4px"
+groupbox_padding = "2px"
+groupbox_title_left = "10px"
+groupbox_title_padding = "0 5px"
+terminal_toolbar_spacing = "2px"
+terminal_toolbar_padding = "3px"
+terminal_toolbar_separator_margin = "3px 6px"
+terminal_toolbar_button_padding = "4px 8px"
+
+# -------------------------------------------------------------------
+# Optional component-level mappings
+# -------------------------------------------------------------------
+[components.tabs]
+tab_pane_border_width = "1px"
+tab_pane_border_color = "${colors.border_subtle}"
+tab_pane_background = "${colors.bg_tab_pane}"
+tab_pane_top_offset = "${metrics.tab_pane_top_offset}"
+
+tab_button_background = "${colors.transparent}"
+tab_button_text = "${colors.text_muted}"
+tab_button_border_width = "0px"
+tab_button_border_color = "${colors.border_subtle}"
+tab_button_border_bottom = "none"
+tab_button_padding = "${spacing.tab_padding}"
+tab_button_margin_right = "${spacing.tab_margin_right}"
+tab_button_radius_top_left = "0px"
+tab_button_radius_top_right = "0px"
+
+tab_selected_background = "${colors.bg_soft}"
+tab_selected_text = "${colors.text_tab_selected}"
+tab_selected_border_color = "${colors.accent}"
+
+tab_hover_background = "${colors.bg_soft_hover}"
+tab_hover_text = "${colors.text_tab_hover}"
+
+[components.window]
+# Main window surfaces
+root_background = "transparent"
+titlebar_background = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 ${colors.bg_titlebar_gradient_top}, stop:1 ${colors.bg_titlebar_gradient_bottom})"
+top_strip_background = "rgb(39, 128, 43)"
+content_background = "rgb(119, 6, 6)"
+
+# Run split-button dropdown segment (right-side arrow block)
+run_menu_button_background = "${colors.transparent}"
+run_menu_button_hover_background = "${colors.transparent}"
+run_menu_button_pressed_background = "#18222e"
+run_menu_button_border_left_width = "0px"
+run_menu_button_border_left = "#334458"
+run_menu_button_width = "14px"
+
+[components.settings]
+# Settings panel surfaces/text
+panel_background = "${colors.bg_surface}"
+panel_border = "#3b3f45"
+settings_title = "#f1f5fc"
+page_title = "#e7edf7"
+page_scope = "#8ea0b8"
+section_text = "#aab6c8"
+status_text = "#b8c3d4"
+
+# Color picker swatch sizing in Settings UI
+# Set both to the same value (for example "22px") for square swatches.
+color_swatch_width = "20px"
+color_swatch_height = "20px"
+
+[components.terminal]
+font_family = '"Consolas"'
+
+# -------------------------------------------------------------------
+# Rule output (ordered)
+# -------------------------------------------------------------------
+# Each [[rules]] block emits one QSS selector block.
+# Ordering matters exactly like normal QSS.
+
+# --- Global surfaces and selection ---
+[[rules]]
+comment = "Global palette"
+selector = "QWidget"
+properties.color = "${colors.text_primary}"
+properties.background = "${colors.bg_root}"
+properties.selection-background-color = "${colors.accent_selection_bg}"
+properties.selection-color = "${colors.accent_selection_text}"
+
+[[rules]]
+selector = "QToolTip"
+properties.background = "${colors.bg_surface}"
+properties.color = "${colors.text_tooltip}"
+properties.border = "${metrics.border_width} solid ${colors.border_tooltip}"
+properties.padding = "${spacing.tooltip_padding}"
+
+# --- Menus and status surfaces ---
+[[rules]]
+comment = "Menus and status"
+selector = "QMenuBar"
+properties.background = "${colors.bg_surface_alt}"
+properties.color = "${colors.text_primary}"
+properties.border-bottom = "${metrics.border_width} solid ${colors.border_subtle}"
+
+[[rules]]
+selector = "QMenuBar::item"
+properties.background = "transparent"
+properties.padding = "${spacing.menu_bar_item_padding}"
+properties.border-radius = "${metrics.radius_chip}"
+
+[[rules]]
+selector = "QMenuBar::item:selected"
+properties.background = "${colors.border_subtle}"
+
+[[rules]]
+selector = "QMenu"
+properties.background = "${colors.bg_surface}"
+properties.color = "${colors.text_primary}"
+properties.border = "${metrics.border_width} solid ${colors.border_subtle}"
+properties.padding = "${spacing.menu_padding}"
+
+[[rules]]
+selector = "QMenu::item"
+properties.padding = "${spacing.menu_item_padding}"
+properties.border-radius = "${metrics.radius_chip}"
+
+[[rules]]
+selector = "QMenu::item:selected"
+properties.background = "${colors.hover_button_bg}"
+
+[[rules]]
+selector = "QStatusBar"
+properties.background = "${colors.bg_surface}"
+properties.color = "${colors.text_muted}"
+properties.border-top = "${metrics.border_width} solid ${colors.border_subtle}"
+
+# --- Window shell / titlebar chrome ---
+[[rules]]
+comment = "Custom window shell"
+selector = "#WindowRoot"
+properties.background = "${components.window.root_background}"
+
+[[rules]]
+selector = "#TitleBar"
+properties.background = "${components.window.titlebar_background}"
+properties.border-top-left-radius = "${metrics.radius_titlebar}"
+properties.border-top-right-radius = "${metrics.radius_titlebar}"
+
+[[rules]]
+selector = "#TopStrip"
+properties.background = "${components.window.top_strip_background}"
+properties.min-height = "${metrics.top_strip_height}"
+properties.max-height = "${metrics.top_strip_height}"
+
+[[rules]]
+selector = "#ContentHost"
+properties.background = "${components.window.content_background}"
+properties.border-bottom-left-radius = "${metrics.radius_titlebar}"
+properties.border-bottom-right-radius = "${metrics.radius_titlebar}"
+
+[[rules]]
+selector = "#WindowTitleLabel"
+properties.color = "${colors.text_title}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+
+[[rules]]
+selector = "QToolButton#TitleBarControlButton"
+properties.color = "${colors.text_titlebar_control}"
+properties.background = "transparent"
+properties.border = "${metrics.border_width} solid transparent"
+properties.border-radius = "${metrics.radius_tab}"
+properties.padding = "${spacing.titlebar_button_padding}"
+
+[[rules]]
+selector = "QToolButton#TitleBarControlButton:hover"
+properties.background = "${colors.titlebar_button_hover_bg}"
+properties.border-color = "${colors.titlebar_button_hover_border}"
+
+[[rules]]
+selector = "QToolButton#TitleBarControlButton:pressed"
+properties.background = "${colors.titlebar_button_pressed_bg}"
+
+[[rules]]
+selector = 'QToolButton#TitleBarControlButton[role="close"]:hover'
+properties.background = "${colors.role_close_hover_bg}"
+properties.border-color = "${colors.role_close_hover_border}"
+properties.color = "${colors.text_inverse}"
+
+[[rules]]
+selector = 'QToolButton#TitleBarControlButton[role="close"]:pressed'
+properties.background = "${colors.role_close_pressed_bg}"
+
+[[rules]]
+selector = "#TitleBarToolsHost"
+properties.background = "transparent"
+
+[[rules]]
+selector = "QToolButton#TitleBarToolButton"
+properties.color = "${colors.text_titlebar_tool}"
+properties.background = "transparent"
+properties.border = "${metrics.border_width} solid transparent"
+properties.border-radius = "${metrics.radius_tab}"
+properties.padding = "${spacing.titlebar_tool_padding}"
+properties.min-height = "${metrics.titlebar_tool_min_height}"
+
+[[rules]]
+selector = "QToolButton#TitleBarToolButton:hover"
+properties.background = "${colors.titlebar_button_hover_bg}"
+properties.border-color = "${colors.titlebar_button_hover_border}"
+
+[[rules]]
+selector = "QToolButton#TitleBarToolButton:pressed"
+properties.background = "${colors.titlebar_button_pressed_bg}"
+
+[[rules]]
+selector = "QToolButton#TitleBarToolButton:disabled"
+properties.color = "${colors.text_titlebar_tool_disabled}"
+
+[[rules]]
+selector = "QToolButton#TitleBarToolButton::menu-indicator"
+properties.subcontrol-origin = "padding"
+properties.subcontrol-position = "right center"
+properties.right = "${metrics.menu_indicator_right}"
+
+[[rules]]
+selector = 'QToolButton#TitleBarToolButton[kind="run"]::menu-button'
+properties.background = "${components.window.run_menu_button_background}"
+properties.border-left = "${components.window.run_menu_button_border_left_width} solid ${components.window.run_menu_button_border_left}"
+properties.width = "${components.window.run_menu_button_width}"
+
+[[rules]]
+selector = 'QToolButton#TitleBarToolButton[kind="run"]::menu-button:hover'
+properties.background = "${components.window.run_menu_button_hover_background}"
+
+[[rules]]
+selector = 'QToolButton#TitleBarToolButton[kind="run"]::menu-button:pressed'
+properties.background = "${components.window.run_menu_button_pressed_background}"
+
+# --- Shared controls and focus states ---
+[[rules]]
+comment = "Shared controls"
+selector = "QPushButton"
+properties.background = "${colors.bg_surface_alt}"
+properties.color = "${colors.text_emphasis}"
+properties.border = "${metrics.border_width} solid ${colors.border_control}"
+properties.border-radius = "${metrics.radius_button}"
+properties.padding = "${spacing.button_padding}"
+
+[[rules]]
+selector = "QPushButton:hover"
+properties.background = "${colors.hover_button_bg}"
+properties.border-color = "${colors.hover_button_border}"
+
+[[rules]]
+selector = "QPushButton:pressed"
+properties.background = "${colors.pressed_button_bg}"
+
+[[rules]]
+selector = "QPushButton:disabled"
+properties.color = "${colors.text_disabled}"
+properties.background = "${colors.bg_button_disabled}"
+properties.border-color = "${colors.border_subtle}"
+
+[[rules]]
+selector = "QLineEdit, QComboBox, QSpinBox, QTextEdit, QPlainTextEdit, QListWidget, QTreeWidget"
+properties.background = "${colors.bg_surface}"
+properties.color = "${colors.text_emphasis}"
+properties.border = "${metrics.border_width} solid ${colors.border_input}"
+properties.border-radius = "${metrics.radius_control}"
+properties.padding = "${spacing.input_padding}"
+
+[[rules]]
+selector = "QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTreeWidget:focus"
+properties.border-color = "${colors.border_input_focus}"
+
+[[rules]]
+selector = "QComboBox::drop-down"
+properties.border = "none"
+properties.width = "${metrics.combo_dropdown_width}"
+
+# --- Scrollbars ---
+[[rules]]
+comment = "Scrollbars"
+selector = "QScrollBar:vertical"
+properties.background = "${colors.scroll_track}"
+properties.width = "${metrics.scrollbar_thickness}"
+properties.margin = "${spacing.scrollbar_margin}"
+properties.border-radius = "${metrics.radius_scroll}"
+
+[[rules]]
+selector = "QScrollBar::handle:vertical"
+properties.background = "${colors.scroll_handle}"
+properties.min-height = "${spacing.scroll_handle_min}"
+properties.border-radius = "${metrics.radius_scroll}"
+
+[[rules]]
+selector = "QScrollBar::handle:vertical:hover"
+properties.background = "${colors.scroll_handle_hover}"
+
+[[rules]]
+selector = "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical"
+properties.height = "${metrics.scrollbar_line_extent}"
+
+[[rules]]
+selector = "QScrollBar:horizontal"
+properties.background = "${colors.scroll_track}"
+properties.height = "${metrics.scrollbar_thickness}"
+properties.margin = "${spacing.scrollbar_margin}"
+properties.border-radius = "${metrics.radius_scroll}"
+
+[[rules]]
+selector = "QScrollBar::handle:horizontal"
+properties.background = "${colors.scroll_handle}"
+properties.min-width = "${spacing.scroll_handle_min}"
+properties.border-radius = "${metrics.radius_scroll}"
+
+[[rules]]
+selector = "QScrollBar::handle:horizontal:hover"
+properties.background = "${colors.scroll_handle_hover}"
+
+[[rules]]
+selector = "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal"
+properties.width = "${metrics.scrollbar_line_extent}"
+
+# --- Checkbox controls ---
+[[rules]]
+comment = "Checkboxes"
+selector = "QCheckBox"
+properties.spacing = "${spacing.checkbox_spacing}"
+
+[[rules]]
+selector = "QCheckBox::indicator"
+properties.width = "${metrics.checkbox_indicator_size}"
+properties.height = "${metrics.checkbox_indicator_size}"
+properties.border = "${metrics.border_width} solid ${colors.border_checkbox}"
+properties.border-radius = "${metrics.radius_control}"
+properties.background = "${colors.bg_surface}"
+
+[[rules]]
+selector = "QCheckBox::indicator:checked"
+properties.background = "${colors.accent}"
+properties.border-color = "${colors.border_checkbox_checked}"
+
+# --- Editor/panel tabs ---
+[[rules]]
+comment = "Tabs"
+selector = "QTabWidget::pane"
+properties.border = "${components.tabs.tab_pane_border_width} solid ${components.tabs.tab_pane_border_color}"
+properties.background = "${components.tabs.tab_pane_background}"
+properties.top = "${components.tabs.tab_pane_top_offset}"
+
+[[rules]]
+selector = "QTabBar::tab"
+properties.background = "${components.tabs.tab_button_background}"
+properties.color = "${components.tabs.tab_button_text}"
+properties.border = "${components.tabs.tab_button_border_width} solid ${components.tabs.tab_button_border_color}"
+properties.border-bottom = "${components.tabs.tab_button_border_bottom}"
+properties.padding = "${components.tabs.tab_button_padding}"
+properties.margin-right = "${components.tabs.tab_button_margin_right}"
+properties.border-top-left-radius = "${components.tabs.tab_button_radius_top_left}"
+properties.border-top-right-radius = "${components.tabs.tab_button_radius_top_right}"
+
+[[rules]]
+selector = "QTabBar::tab:selected"
+properties.background = "${components.tabs.tab_selected_background}"
+properties.color = "${components.tabs.tab_selected_text}"
+properties.border-color = "${components.tabs.tab_selected_border_color}"
+
+[[rules]]
+selector = "QTabBar::tab:hover:!selected"
+properties.background = "${components.tabs.tab_hover_background}"
+properties.color = "${components.tabs.tab_hover_text}"
+
+[[rules]]
+comment = "Splitters"
+selector = "QSplitter::handle"
+properties.background = "${colors.bg_splitter}"
+
+[[rules]]
+selector = "QSplitter::handle:horizontal"
+properties.width = "${metrics.splitter_size}"
+
+[[rules]]
+selector = "QSplitter::handle:vertical"
+properties.height = "${metrics.splitter_size}"
+
+[[rules]]
+selector = "QSplitter::handle:hover"
+properties.background = "${colors.bg_splitter_hover}"
+
+# --- Settings dialog subtree ---
+[[rules]]
+comment = "Settings dialog"
+selector = "QDialog#SettingsDialog"
+properties.background = "${colors.bg_root}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QFrame#LeftFrame, QDialog#SettingsDialog QFrame#RightFrame"
+properties.background = "${components.settings.panel_background}"
+properties.border = "${metrics.border_width} solid ${components.settings.panel_border}"
+properties.border-radius = "${metrics.radius_large}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QLabel#SettingsTitle"
+properties.font-size = "${metrics.settings_title_size}"
+properties.font-weight = "${metrics.font_weight_bold}"
+properties.color = "${components.settings.settings_title}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QLabel#PageTitle"
+properties.font-size = "${metrics.settings_page_title_size}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+properties.color = "${components.settings.page_title}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QLabel#PageScope"
+properties.color = "${components.settings.page_scope}"
+properties.font-size = "${metrics.settings_meta_size}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QLabel#PageDesc, QDialog#SettingsDialog QLabel#SectionDesc"
+properties.color = "${components.settings.section_text}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QLabel#SettingsStatus"
+properties.color = "${components.settings.status_text}"
+properties.font-size = "${metrics.settings_meta_size}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget"
+properties.background = "${colors.bg_panel}"
+properties.border = "${metrics.border_width} solid ${colors.border_subtle}"
+properties.border-radius = "${metrics.radius_medium}"
+properties.padding = "${spacing.tree_padding}"
+properties.outline = "none"
+properties.show-decoration-selected = "${metrics.tree_selected_decoration}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget::item"
+properties.padding = "${spacing.tree_item_padding}"
+properties.margin = "${spacing.tree_item_margin}"
+properties.border-radius = "0"
+properties.border = "none"
+properties.outline = "none"
+properties.background = "transparent"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget::item:hover"
+properties.background = "transparent"
+properties.color = "${colors.text_tree_hover}"
+properties.border = "none"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget::item:selected"
+properties.background = "transparent"
+properties.color = "${colors.accent_soft}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+properties.border = "none"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget::branch"
+properties.background = "transparent"
+properties.border = "none"
+properties.image = "none"
+properties.border-image = "none"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QTreeWidget::branch:hover, QDialog#SettingsDialog QTreeWidget::branch:selected"
+properties.background = "transparent"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QGroupBox"
+properties.border = "${metrics.border_width} solid ${colors.border_subtle}"
+properties.border-radius = "${metrics.radius_small}"
+properties.margin-top = "${spacing.groupbox_margin_top}"
+properties.padding = "${spacing.groupbox_padding}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+properties.color = "${colors.text_groupbox_title}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QGroupBox::title"
+properties.subcontrol-origin = "margin"
+properties.left = "${spacing.groupbox_title_left}"
+properties.padding = "${spacing.groupbox_title_padding}"
+properties.color = "${colors.text_groupbox_title}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QScrollArea"
+properties.border = "none"
+properties.background = "transparent"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QPushButton"
+properties.min-height = "${metrics.settings_button_min_height}"
+
+[[rules]]
+selector = "QDialog#SettingsDialog QPushButton:default"
+properties.background = "${colors.accent_primary_button}"
+properties.border-color = "${colors.accent_primary_button_border}"
+properties.color = "${colors.text_inverse}"
+
+# --- Terminal surfaces ---
+[[rules]]
+comment = "Terminal"
+selector = "QWidget[surface=\"terminal\"]"
+properties.background = "${colors.bg_terminal}"
+properties.color = "${colors.terminal_text}"
+properties.border = "${metrics.border_width} solid ${colors.terminal_border}"
+properties.font-family = "${components.terminal.font_family}"
+properties.font-size = "${metrics.terminal_font_size}"
+properties.selection-background-color = "${colors.terminal_selection_bg}"
+properties.selection-color = "${colors.text_inverse}"
+properties.qproperty-cursorColor = "${colors.terminal_cursor}"
+properties.qproperty-linkColor = "${colors.terminal_link}"
+
+[[rules]]
+selector = "QToolBar[surface=\"terminal-toolbar\"]"
+properties.background = "${colors.bg_terminal_toolbar_shell}"
+properties.border = "none"
+properties.border-bottom = "${metrics.border_width} solid ${colors.terminal_border}"
+properties.spacing = "${spacing.terminal_toolbar_spacing}"
+properties.padding = "${spacing.terminal_toolbar_padding}"
+
+[[rules]]
+selector = "QToolBar[surface=\"terminal-toolbar\"]::separator"
+properties.width = "${metrics.terminal_separator_width}"
+properties.background = "${colors.terminal_border}"
+properties.margin = "${spacing.terminal_toolbar_separator_margin}"
+
+[[rules]]
+selector = "QToolBar[surface=\"terminal-toolbar\"] QToolButton"
+properties.color = "${colors.terminal_toolbar_fg}"
+properties.background = "${colors.terminal_toolbar_bg}"
+properties.border = "${metrics.border_width} solid ${colors.terminal_toolbar_border}"
+properties.border-radius = "${metrics.radius_chip}"
+properties.padding = "${spacing.terminal_toolbar_button_padding}"
+
+[[rules]]
+selector = "QToolBar[surface=\"terminal-toolbar\"] QToolButton:hover"
+properties.background = "${colors.terminal_toolbar_hover_bg}"
+properties.border-color = "${colors.terminal_toolbar_hover_border}"
+
+[[rules]]
+selector = "QToolBar[surface=\"terminal-toolbar\"] QToolButton:pressed"
+properties.background = "${colors.terminal_toolbar_pressed_bg}"
+
+[[rules]]
+selector = "QToolButton[surface=\"terminal-run-button\"]"
+properties.background = "${colors.terminal_run_bg}"
+properties.border-color = "${colors.terminal_run_border}"
+properties.font-weight = "${metrics.font_weight_semibold}"
+
+[[rules]]
+selector = "QMenu[surface=\"terminal-run-menu\"]"
+properties.background = "${colors.terminal_menu_bg}"
+properties.color = "${colors.terminal_menu_fg}"
+properties.border = "${metrics.border_width} solid ${colors.terminal_menu_border}"
