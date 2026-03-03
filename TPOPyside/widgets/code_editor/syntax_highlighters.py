@@ -506,6 +506,85 @@ class JsonHighlighter(QSyntaxHighlighter):
         hide_hash_for_colors(self, text)
 
 
+class TomlHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.rules: list[tuple[re.Pattern, QTextCharFormat]] = []
+
+        key = QTextCharFormat()
+        key.setForeground(QColor("#9CDCFE"))
+        self.rules.extend(
+            [
+                (re.compile(r"^\s*[A-Za-z0-9_.-]+\s*(?=\=)"), key),
+                (re.compile(r'^\s*"[^"\\]*(?:\\.[^"\\]*)*"\s*(?=\=)'), key),
+                (re.compile(r"^\s*'[^'\\]*(?:\\.[^'\\]*)*'\s*(?=\=)"), key),
+            ]
+        )
+
+        table = QTextCharFormat()
+        table.setForeground(QColor("#4EC9B0"))
+        table.setFontWeight(QFont.Bold)
+        self.rules.extend(
+            [
+                (re.compile(r"\[\[[^\]]+\]\]"), table),
+                (re.compile(r"\[[^\]]+\]"), table),
+            ]
+        )
+
+        string = QTextCharFormat()
+        string.setForeground(QColor("#CE9178"))
+        self.rules.extend(
+            [
+                (re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), string),
+                (re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'"), string),
+            ]
+        )
+
+        number = QTextCharFormat()
+        number.setForeground(QColor("#B5CEA8"))
+        self.rules.extend(
+            [
+                (re.compile(r"\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b"), number),
+            ]
+        )
+
+        literal = QTextCharFormat()
+        literal.setForeground(QColor("#569Cff"))
+        literal.setFontWeight(QFont.Bold)
+        self.rules.extend(
+            [
+                (re.compile(r"\b(?:true|false)\b"), literal),
+            ]
+        )
+
+        date = QTextCharFormat()
+        date.setForeground(QColor("#DCDCAA"))
+        self.rules.extend(
+            [
+                (
+                    re.compile(
+                        r"\b\d{4}-\d{2}-\d{2}"
+                        r"(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)?"
+                        r"(?:[Zz]|[+-]\d{2}:\d{2})?\b"
+                    ),
+                    date,
+                )
+            ]
+        )
+
+        comment = QTextCharFormat()
+        comment.setForeground(QColor("#6A9955"))
+        comment.setFontItalic(True)
+        self.rules.append((re.compile(r"#[^\n]*"), comment))
+
+    def highlightBlock(self, text):
+        for pat, fmt in self.rules:
+            for m in pat.finditer(text):
+                self.setFormat(m.start(), m.end() - m.start(), fmt)
+        hide_hash_for_colors(self, text)
+
+
 class RustHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -827,6 +906,8 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             "css": "css",
             "scss": "scss",
             "less": "less",
+            "toml": "toml",
+            "qsst": "toml",
             "sh": "shell",
             "bash": "shell",
             "zsh": "shell",
@@ -1217,6 +1298,7 @@ LANGUAGE_HIGHLIGHTER_MAP: dict[str, type[QSyntaxHighlighter]] = {
     "css": CssHighlighter,
     "scss": CssHighlighter,
     "less": CssHighlighter,
+    "toml": TomlHighlighter,
     "shell": BashHighlighter,
     "make": CppHighlighter,
     "todo": TodoHighlighter,
@@ -1291,6 +1373,7 @@ __all__ = [
     "PhpHighlighter",
     "CppHighlighter",
     "JsonHighlighter",
+    "TomlHighlighter",
     "RustHighlighter",
     "CssHighlighter",
     "BashHighlighter",

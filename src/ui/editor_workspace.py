@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import weakref
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -671,10 +672,7 @@ class EditorTabs(QTabWidget):
         doc = _widget_document(widget)
         if doc is None:
             return
-        try:
-            doc.modificationChanged.disconnect(self._on_document_modification_changed)
-        except Exception:
-            pass
+        self._disconnect_document_modification_signal(doc)
         try:
             doc.modificationChanged.connect(self._on_document_modification_changed)
         except Exception:
@@ -686,8 +684,14 @@ class EditorTabs(QTabWidget):
         doc = _widget_document(widget)
         if doc is None:
             return
+        self._disconnect_document_modification_signal(doc)
+
+    def _disconnect_document_modification_signal(self, doc: QTextDocument) -> None:
         try:
-            doc.modificationChanged.disconnect(self._on_document_modification_changed)
+            # Qt may emit a RuntimeWarning when disconnecting a non-connected slot.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                doc.modificationChanged.disconnect(self._on_document_modification_changed)
         except Exception:
             pass
 

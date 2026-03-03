@@ -275,6 +275,7 @@ class PythonIDE(Window):
     NO_PROJECT_INSTANCE_ID = "__no_project__"
     THEMES_DIRNAME = "themes"
     THEME_EXTENSION = ".qss"
+    THEME_EXTENSIONS = (".qsst", ".qss")
     PYTHON_SOURCE_SUFFIXES = (".py", ".pyw", ".pyi")
     FONT_SIZE_MIN = 6
     FONT_SIZE_MAX = 48
@@ -3083,6 +3084,19 @@ class PythonIDE(Window):
             widget = widget.parentWidget()
         return False
 
+    def _focused_terminal_widget(self) -> TerminalWidget | None:
+        widget = QApplication.focusWidget()
+        visited: set[int] = set()
+        while isinstance(widget, QWidget):
+            wid = id(widget)
+            if wid in visited:
+                break
+            visited.add(wid)
+            if isinstance(widget, TerminalWidget):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
     def copy_focused_widget(self) -> None:
         if self._is_project_tree_focus_context():
             self._copy_tree_selection()
@@ -3094,6 +3108,19 @@ class PythonIDE(Window):
             ed.copy()
 
     def paste_into_focused_widget(self) -> None:
+        terminal = self._focused_terminal_widget()
+        if isinstance(terminal, TerminalWidget):
+            mods = QApplication.keyboardModifiers()
+            ctrl_only = bool(mods & Qt.ControlModifier) and not bool(
+                mods & (Qt.ShiftModifier | Qt.AltModifier | Qt.MetaModifier)
+            )
+            if ctrl_only:
+                terminal.send_ctrl_v_literal()
+                return
+            if self._invoke_focus_chain_edit_method("paste"):
+                return
+            terminal.paste()
+            return
         if self._is_project_tree_focus_context():
             self._paste_tree_into_selection()
             return
@@ -3104,6 +3131,10 @@ class PythonIDE(Window):
             ed.paste()
 
     def paste_and_reindent_focused_widget(self) -> None:
+        terminal = self._focused_terminal_widget()
+        if isinstance(terminal, TerminalWidget):
+            terminal.paste()
+            return
         if self._invoke_focus_chain_edit_method("paste_and_reindent"):
             return
         self.paste_into_focused_widget()
@@ -6093,6 +6124,11 @@ class PythonIDE(Window):
             self.save_session_to_config()
         self._persist_window_and_dock_layout()
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            # Ensure the process exits when the main IDE window is closed,
+            # even if auxiliary top-level widgets remain alive.
+            QTimer.singleShot(0, app.quit)
 
     def _project_display_name(self) -> str:
         if self.no_project_mode:

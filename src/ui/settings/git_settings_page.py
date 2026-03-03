@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from TPOPyside.dialogs.color_picker_dialog import ColorPickerDialog
 from src.settings_models import SettingsScope
+from src.ui.theme_runtime import apply_settings_color_swatch_size
 
 
 class GitSettingsPage(QWidget):
@@ -86,7 +87,7 @@ class GitSettingsPage(QWidget):
     @staticmethod
     def _build_color_swatch() -> QPushButton:
         swatch = QPushButton("")
-        swatch.setFixedSize(34, 20)
+        apply_settings_color_swatch_size(swatch)
         swatch.setCursor(Qt.PointingHandCursor)
         swatch.setToolTip("Pick color")
         return swatch
@@ -105,11 +106,27 @@ class GitSettingsPage(QWidget):
         color = QColor(str(edit.text() or "").strip())
         if color.isValid():
             button.setStyleSheet(
-                f"QPushButton {{ background-color: {color.name(QColor.HexRgb)}; border: 1px solid #6a6a6a; border-radius: 3px; }}"
+                "QPushButton { "
+                f"background-color: {color.name(QColor.HexRgb)}; "
+                "border: 1px solid #6a6a6a; "
+                "border-radius: 3px; "
+                "min-height: 0px; "
+                "min-width: 0px; "
+                "padding: 0px; "
+                "}"
             )
             button.setText("")
             return
-        button.setStyleSheet("QPushButton { background-color: #2f2f2f; border: 1px solid #6a6a6a; border-radius: 3px; }")
+        button.setStyleSheet(
+            "QPushButton { "
+            "background-color: #2f2f2f; "
+            "border: 1px solid #6a6a6a; "
+            "border-radius: 3px; "
+            "min-height: 0px; "
+            "min-width: 0px; "
+            "padding: 0px; "
+            "}"
+        )
         button.setText("?")
 
     def _pick_color(self, edit: QLineEdit) -> None:

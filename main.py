@@ -1,5 +1,7 @@
 import sys
 import os
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
@@ -7,6 +9,52 @@ from PySide6.QtWidgets import QApplication
 
 from src.ui.python_ide import PythonIDE, request_project_activation
 from src.settings_manager import SettingsManager
+
+
+def _linger_non_daemon_threads(
+    *,
+    grace_seconds: float = 1.4,
+    join_slice_seconds: float = 0.06,
+) -> list[str]:
+    """Wait briefly for non-daemon workers; return lingering thread names."""
+    main_thread = threading.main_thread()
+
+    def _active() -> list[threading.Thread]:
+        out: list[threading.Thread] = []
+        for thread in threading.enumerate():
+            if thread is main_thread:
+                continue
+            if not thread.is_alive():
+                continue
+            if bool(getattr(thread, "daemon", False)):
+                continue
+            out.append(thread)
+        return out
+
+    deadline = time.monotonic() + max(0.0, float(grace_seconds))
+    while True:
+        active = _active()
+        if not active:
+            return []
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        remaining = max(0.0, deadline - now)
+        slice_s = min(max(0.005, float(join_slice_seconds)), remaining)
+        for thread in active:
+            try:
+                thread.join(timeout=slice_s)
+            except Exception:
+                continue
+
+    still_active = _active()
+    names: list[str] = []
+    for thread in still_active:
+        name = str(getattr(thread, "name", "") or "").strip()
+        names.append(name or f"Thread-{id(thread)}")
+    return names
+
+
 def _split_startup_args(argv: list[str]) -> tuple[list[str], bool]:
     filtered: list[str] = []
     force_no_project = False
@@ -97,4 +145,19 @@ if __name__ == "__main__":
     ide = PythonIDE()
     ide.apply_selected_theme()
     ide.show()
-    sys.exit(app.exec())
+    exit_code = int(app.exec())
+    lingering = _linger_non_daemon_threads()
+    if lingering:
+        preview = ", ".join(lingering[:8])
+        if len(lingering) > 8:
+            preview += ", ..."
+        try:
+            print(
+                f"[PyTPO] Forcing process exit due to lingering worker threads: {preview}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+        os._exit(exit_code)
+    sys.exit(exit_code)

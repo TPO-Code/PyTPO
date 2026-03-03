@@ -26,6 +26,10 @@ except Exception:
 
 _IDENTIFIER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CPP_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl"}
+_QSST_TOKEN_REF_RE = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
+_QSST_TABLE_RE = re.compile(r"^\s*\[([A-Za-z0-9_.-]+)\]\s*$")
+_QSST_ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([A-Za-z0-9_.-]+)\]\]\s*$")
+_QSST_KEY_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=.*)$")
 
 
 class LanguageIntelligenceController:
@@ -460,8 +464,13 @@ class LanguageIntelligenceController:
             return
 
         language_id = str(self._editor_language_id(ed) or "").strip().lower()
-        if language_id not in {"python", "c", "cpp", "rust"}:
-            self.statusBar().showMessage("Rename is currently available for Python, C/C++, and Rust files.", 2600)
+        file_path = str(ed.file_path or "").strip()
+        is_qsst = file_path.lower().endswith(".qsst")
+        if language_id not in {"python", "c", "cpp", "rust"} and not is_qsst:
+            self.statusBar().showMessage(
+                "Rename is currently available for Python, C/C++, Rust, and .qsst theme tokens.",
+                2800,
+            )
             return
 
         new_symbol, ok = QInputDialog.getText(
@@ -483,12 +492,193 @@ class LanguageIntelligenceController:
             self.statusBar().showMessage("Rename canceled: use a valid identifier name.", 2400)
             return
 
+        if is_qsst:
+            self._rename_qsst_token_for_editor(
+                ed,
+                payload=payload,
+                old_symbol=symbol,
+                new_symbol=replacement,
+            )
+            return
+
         self._request_rename_for_editor(
             ed,
             payload=payload,
             old_symbol=symbol,
             new_symbol=replacement,
         )
+
+    def _rename_qsst_token_for_editor(
+        self,
+        ed: EditorWidget,
+        *,
+        payload: dict,
+        old_symbol: str,
+        new_symbol: str,
+    ) -> None:
+        file_path = str(ed.file_path or "").strip()
+        if not file_path:
+            self.statusBar().showMessage("Save the file before renaming symbols.", 2200)
+            return
+        source_text = ed.toPlainText()
+        try:
+            line = max(1, int(payload.get("line") or 1))
+            column = max(0, int(payload.get("column") or 0))
+        except Exception:
+            line = 1
+            column = 0
+
+        namespace = self._qsst_namespace_at_cursor(
+            source_text=source_text,
+            line=line,
+            column=column,
+            symbol=old_symbol,
+        )
+        if not namespace:
+            self.statusBar().showMessage(
+                "Rename in .qsst works on token keys and ${section.token} references.",
+                3200,
+            )
+            return
+
+        updated_text, key_updates, ref_updates = self._rename_qsst_token_text(
+            source_text=source_text,
+            namespace=namespace,
+            old_symbol=old_symbol,
+            new_symbol=new_symbol,
+        )
+        total_updates = int(key_updates) + int(ref_updates)
+        if total_updates <= 0:
+            self.statusBar().showMessage("Rename found no matching .qsst token usages.", 2600)
+            return
+
+        cpath = self._canonical_path(file_path)
+        try:
+            with open(cpath, "w", encoding="utf-8") as handle:
+                handle.write(updated_text)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Rename failed: could not write file ({exc}).", 3200)
+            return
+
+        self._apply_replaced_text_to_open_editor(cpath, updated_text)
+        self._note_editor_saved(ed, source=".qsst rename")
+        self.refresh_subtree(os.path.dirname(cpath))
+        self.schedule_git_status_refresh(delay_ms=90)
+        self.statusBar().showMessage(
+            (
+                f"Renamed token '{namespace}.{old_symbol}' to '{namespace}.{new_symbol}' "
+                f"({total_updates} update(s))."
+            ),
+            4200,
+        )
+
+    def _qsst_namespace_at_cursor(
+        self,
+        *,
+        source_text: str,
+        line: int,
+        column: int,
+        symbol: str,
+    ) -> str:
+        lines = str(source_text or "").splitlines()
+        idx = max(0, int(line) - 1)
+        if idx >= len(lines):
+            return ""
+        line_text = str(lines[idx] or "")
+
+        col = max(0, int(column))
+        for match in _QSST_TOKEN_REF_RE.finditer(line_text):
+            token_path = str(match.group(1) or "").strip()
+            token_start = int(match.start(1))
+            token_end = int(match.end(1))
+            if not (token_start <= col < token_end):
+                continue
+            if "." not in token_path:
+                continue
+            namespace, key = token_path.rsplit(".", 1)
+            if key == symbol:
+                return namespace
+
+        key_match = _QSST_KEY_ASSIGN_RE.match(line_text)
+        if key_match is not None:
+            key_start = int(key_match.start(2))
+            key_end = int(key_match.end(2))
+            if key_start <= col < key_end and str(key_match.group(2) or "") == symbol:
+                return self._qsst_namespace_for_line(lines=lines, line_index=idx)
+
+        return ""
+
+    @staticmethod
+    def _qsst_namespace_for_line(*, lines: list[str], line_index: int) -> str:
+        namespace = ""
+        for idx, raw in enumerate(lines):
+            if idx > line_index:
+                break
+            text = str(raw or "").strip()
+            if not text or text.startswith("#"):
+                continue
+            array_header = _QSST_ARRAY_TABLE_RE.match(text)
+            if array_header is not None:
+                namespace = ""
+                continue
+            table_header = _QSST_TABLE_RE.match(text)
+            if table_header is not None:
+                table_name = str(table_header.group(1) or "").strip()
+                namespace = table_name if table_name and not table_name.startswith("rules") else ""
+        return namespace
+
+    @staticmethod
+    def _rename_qsst_token_text(
+        *,
+        source_text: str,
+        namespace: str,
+        old_symbol: str,
+        new_symbol: str,
+    ) -> tuple[str, int, int]:
+        lines = str(source_text or "").splitlines(keepends=True)
+        updated_lines: list[str] = []
+        key_updates = 0
+        current_namespace = ""
+        in_array_table = False
+
+        for raw_line in lines:
+            line = str(raw_line or "")
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                array_header = _QSST_ARRAY_TABLE_RE.match(stripped)
+                if array_header is not None:
+                    in_array_table = True
+                    current_namespace = str(array_header.group(1) or "").strip()
+                else:
+                    table_header = _QSST_TABLE_RE.match(stripped)
+                    if table_header is not None:
+                        in_array_table = False
+                        current_namespace = str(table_header.group(1) or "").strip()
+
+            if (not in_array_table) and current_namespace == namespace:
+                line_ending = ""
+                line_body = line
+                if line_body.endswith("\r\n"):
+                    line_ending = "\r\n"
+                    line_body = line_body[:-2]
+                elif line_body.endswith("\n"):
+                    line_ending = "\n"
+                    line_body = line_body[:-1]
+                key_match = _QSST_KEY_ASSIGN_RE.match(line_body)
+                if key_match is not None and str(key_match.group(2) or "") == old_symbol:
+                    line = f"{key_match.group(1)}{new_symbol}{key_match.group(3)}{line_ending}"
+                    key_updates += 1
+
+            updated_lines.append(line)
+
+        updated_text = "".join(updated_lines)
+        old_ref = f"${{{namespace}.{old_symbol}}}"
+        new_ref = f"${{{namespace}.{new_symbol}}}"
+        ref_updates = int(updated_text.count(old_ref))
+        if ref_updates > 0:
+            updated_text = updated_text.replace(old_ref, new_ref)
+
+        return updated_text, key_updates, ref_updates
 
     def _on_editor_extract_variable_requested(self, ed_ref, payload: object) -> None:
         ed = ed_ref() if callable(ed_ref) else ed_ref

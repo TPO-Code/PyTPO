@@ -50,6 +50,7 @@ def infer_language_for_path(file_path: str) -> str:
         ".toml": "toml",
         ".ini": "ini",
         ".qss": "css",
+        ".qsst": "toml",
     }
     return mapping.get(suffix, "text")
 

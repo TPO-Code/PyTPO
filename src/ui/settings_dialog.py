@@ -53,6 +53,7 @@ from src.ui.settings.clangd_repair_settings_page import ClangdRepairSettingsPage
 from src.ui.settings.project_maintenance_page import ProjectMaintenancePage
 from src.ui.settings.python_run_configs_settings_page import PythonRunConfigsSettingsPage
 from src.ui.settings.rust_run_configs_settings_page import RustRunConfigsSettingsPage
+from src.ui.theme_runtime import apply_settings_color_swatch_size
 
 FieldType = Literal[
     "checkbox",
@@ -778,7 +779,7 @@ class SettingsDialog(DialogWindow):
             line.setPlaceholderText("#RRGGBB or #RRGGBBAA")
 
             swatch = QPushButton()
-            swatch.setFixedSize(34, 20)
+            apply_settings_color_swatch_size(swatch)
             swatch.setCursor(Qt.PointingHandCursor)
             swatch.setToolTip("Pick color")
             swatch.setText("")
@@ -799,12 +800,22 @@ class SettingsDialog(DialogWindow):
                         f"background-color: {rgba}; "
                         "border: 1px solid #6a6a6a; "
                         "border-radius: 3px; "
+                        "min-height: 0px; "
+                        "min-width: 0px; "
+                        "padding: 0px; "
                         "}"
                     )
                     swatch.setText("")
                     return
                 swatch.setStyleSheet(
-                    "QPushButton { background-color: #2f2f2f; border: 1px solid #6a6a6a; border-radius: 3px; }"
+                    "QPushButton { "
+                    "background-color: #2f2f2f; "
+                    "border: 1px solid #6a6a6a; "
+                    "border-radius: 3px; "
+                    "min-height: 0px; "
+                    "min-width: 0px; "
+                    "padding: 0px; "
+                    "}"
                 )
                 swatch.setText("?")
 

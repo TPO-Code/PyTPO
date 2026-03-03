@@ -416,11 +416,6 @@ class TerminalWidget(QtWidgets.QWidget):
         self._blink.timeout.connect(self._toggle_cursor)
         self._blink.start(600)
     
-        # Shortcuts
-        self._paste_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+V"), self)
-        self._paste_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        self._paste_shortcut.activated.connect(self._paste_bracketed)
-    
         # Mouse / bracketed paste modes
         self.setMouseTracking(True)
         self._mouse_btns = 0
@@ -1204,8 +1199,14 @@ class TerminalWidget(QtWidgets.QWidget):
         if key == QtCore.Qt.Key_End and (mods & QtCore.Qt.ControlModifier):
             self._view_offset = 0; self.update(); return
 
-        # Paste convenience (Ctrl+V without Shift)
-        if (mods & QtCore.Qt.ControlModifier) and key == QtCore.Qt.Key_V and not (mods & QtCore.Qt.ShiftModifier):
+        # Paste convenience (Ctrl+Shift+V). Plain Ctrl+V remains a terminal control key.
+        if (
+            (mods & QtCore.Qt.ControlModifier)
+            and (mods & QtCore.Qt.ShiftModifier)
+            and key == QtCore.Qt.Key_V
+            and not (mods & QtCore.Qt.AltModifier)
+            and not (mods & QtCore.Qt.MetaModifier)
+        ):
             self._paste_bracketed(); return
 
         # Copy selection (Ctrl+Shift+C)
@@ -1428,6 +1429,20 @@ class TerminalWidget(QtWidgets.QWidget):
             self._send(b"\x1b[M" + bytes([Cb, Cx, Cy]))
 
     # -------- Clipboard & Paste --------
+    def copy(self) -> None:
+        self.copySelection()
+
+    def paste(self) -> None:
+        self._paste_bracketed()
+
+    def paste_and_reindent(self) -> None:
+        self._paste_bracketed()
+
+    def send_ctrl_v_literal(self) -> None:
+        """Send raw Ctrl+V (0x16) to preserve normal shell quote-next behavior."""
+        self._send(b"\x16")
+        self._ensure_bottom()
+
     def _paste_bracketed(self):
         text = QtGui.QGuiApplication.clipboard().text()
         if not text:

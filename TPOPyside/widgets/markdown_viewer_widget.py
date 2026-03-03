@@ -84,6 +84,7 @@ class MarkdownViewerWidget(QWidget):
         self._pending_scroll_ratio: float | None = None
         self._pending_scroll_smooth: bool = False
         self._preferred_page_bg: str = ""
+        self._web_shutdown_done: bool = False
 
         # explicit head flags (default blank header)
         self._head_flags: MDHeadFlags = MDHeadFlags.none
@@ -178,6 +179,7 @@ class MarkdownViewerWidget(QWidget):
 
         # initialize head UI
         self._apply_head_flags_ui()
+        self.destroyed.connect(lambda *_args: self._shutdown_web_view())
 
     # ---------- qproperty-* (no bgColor here) ----------
     def _trigger_theme_update(self):
@@ -1263,6 +1265,39 @@ td.code { padding: 0; }
         self.web_view.page().setBackgroundColor(Qt.transparent)
         self.web_view.setAttribute(Qt.WA_TranslucentBackground, True)
         self.web_view.setStyleSheet("background: transparent;")
+
+    def _shutdown_web_view(self) -> None:
+        if self._web_shutdown_done:
+            return
+        self._web_shutdown_done = True
+
+        web_view = getattr(self, "web_view", None)
+        if not isinstance(web_view, QWebEngineView):
+            return
+
+        try:
+            web_view.stop()
+        except Exception:
+            pass
+
+        try:
+            page = web_view.page()
+        except Exception:
+            page = None
+
+        if page is not None:
+            try:
+                page.setWebChannel(None)
+            except Exception:
+                pass
+            try:
+                page.load(QUrl("about:blank"))
+            except Exception:
+                pass
+
+    def closeEvent(self, event) -> None:
+        self._shutdown_web_view()
+        super().closeEvent(event)
 
     @staticmethod
     def _repr_js(s: str) -> str:
