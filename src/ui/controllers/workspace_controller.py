@@ -148,6 +148,13 @@ class WorkspaceController(QObject):
             self._external_file_signatures[saved_path] = sig
         if self._is_project_config_path(saved_path) and not self.ide._project_config_reload_active:
             self._queue_project_config_reload(source=source, honor_open_editors=True)
+        theme_controller = getattr(self.ide, "theme_controller", None)
+        refresh_theme = getattr(theme_controller, "refresh_active_theme_for_saved_path", None)
+        if callable(refresh_theme):
+            try:
+                refresh_theme(saved_path)
+            except Exception:
+                pass
         change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
         notifier = getattr(change_highlights, "notify_file_saved", None)
         if callable(notifier):

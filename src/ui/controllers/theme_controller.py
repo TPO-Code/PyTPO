@@ -52,6 +52,24 @@ class ThemeController:
 
         return candidates[0]
 
+    def refresh_active_theme_for_saved_path(self, saved_path: str) -> bool:
+        resolved = self._resolve_theme_path(self.ide.theme_name)
+        if resolved is None:
+            return False
+
+        _, theme_path = resolved
+        try:
+            saved_cpath = self._canonical_path(saved_path)
+            active_theme_cpath = self._canonical_path(str(theme_path))
+        except Exception:
+            return False
+
+        if saved_cpath != active_theme_cpath:
+            return False
+
+        self.apply_selected_theme()
+        return True
+
     def apply_selected_theme(self) -> None:
         app = QApplication.instance()
         if app is None:
