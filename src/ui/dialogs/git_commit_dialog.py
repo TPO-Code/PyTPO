@@ -12,6 +12,7 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -38,6 +39,7 @@ from src.ui.widgets.spellcheck_inputs import SpellcheckPlainTextEdit
 _BUILD_TAG_RE = re.compile(
     r"^v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\+build\.(?P<build>[0-9]+)$"
 )
+_BRANCH_FORBIDDEN_CHARS = set("~^:?*[\\")
 
 
 class GitCommitDialog(DialogWindow):
@@ -72,7 +74,7 @@ class GitCommitDialog(DialogWindow):
     ) -> None:
         super().__init__(use_native_chrome=use_native_chrome, resizable=True, parent=parent)
         self.setWindowTitle("Commit Changes")
-        self.resize(760, 620)
+        self.resize(980, 760)
 
         self._git_service = git_service
         self._repo_root = str(repo_root)
@@ -100,6 +102,7 @@ class GitCommitDialog(DialogWindow):
         self._updating_release_build_value = False
         self._initial_commit_message = str(initial_commit_message or "")
         self._initial_release_message = str(initial_release_message or "")
+        self._current_branch_name: str = ""
 
         self._result_pump = QTimer(self)
         self._result_pump.setInterval(40)
@@ -108,6 +111,7 @@ class GitCommitDialog(DialogWindow):
         self.commit_output: str = ""
         self.push_output: str = ""
         self.push_error: str = ""
+        self.push_error_kind: str = ""
         self.release_url: str = ""
         self.release_error: str = ""
 
@@ -134,65 +138,42 @@ class GitCommitDialog(DialogWindow):
         root.addWidget(self.note_label)
 
         top_row = QHBoxLayout()
-        self.branch_label = QLabel("Branch: ")
+        self.branch_label = QLabel("Current branch: (loading...)")
         top_row.addWidget(self.branch_label, 1)
 
         self.refresh_btn = QPushButton("Refresh")
         top_row.addWidget(self.refresh_btn)
         root.addLayout(top_row)
 
-        trees_row = QHBoxLayout()
-        trees_row.setSpacing(10)
+        content_row = QHBoxLayout()
+        content_row.setSpacing(12)
 
-        tracked_host = QVBoxLayout()
-        self.tracked_label = QLabel("Tracked Changes")
-        tracked_host.addWidget(self.tracked_label)
-        tracked_actions = QHBoxLayout()
-        self.tracked_select_all_btn = QPushButton("All")
-        self.tracked_select_none_btn = QPushButton("None")
-        tracked_actions.addWidget(self.tracked_select_all_btn)
-        tracked_actions.addWidget(self.tracked_select_none_btn)
-        tracked_actions.addStretch(1)
-        tracked_host.addLayout(tracked_actions)
-        self.tracked_tree = QTreeWidget()
-        self.tracked_tree.setColumnCount(1)
-        self.tracked_tree.setHeaderLabel("Tracked")
-        tracked_host.addWidget(self.tracked_tree, 1)
-        trees_row.addLayout(tracked_host, 1)
+        trees_column = QVBoxLayout()
+        trees_column.setSpacing(10)
 
-        untracked_host = QVBoxLayout()
-        self.untracked_label = QLabel("Untracked Files")
-        untracked_host.addWidget(self.untracked_label)
-        untracked_actions = QHBoxLayout()
-        self.untracked_select_all_btn = QPushButton("All")
-        self.untracked_select_none_btn = QPushButton("None")
-        untracked_actions.addWidget(self.untracked_select_all_btn)
-        untracked_actions.addWidget(self.untracked_select_none_btn)
-        untracked_actions.addStretch(1)
-        untracked_host.addLayout(untracked_actions)
-        self.untracked_tree = QTreeWidget()
-        self.untracked_tree.setColumnCount(1)
-        self.untracked_tree.setHeaderLabel("Untracked")
-        untracked_host.addWidget(self.untracked_tree, 1)
-        trees_row.addLayout(untracked_host, 1)
+        tree_header = QLabel("Files")
+        trees_column.addWidget(tree_header)
+        self.files_tree = QTreeWidget()
+        self.files_tree.setColumnCount(1)
+        self.files_tree.setHeaderLabel("Changed / Unversioned")
+        trees_column.addWidget(self.files_tree, 1)
+        content_row.addLayout(trees_column, 1)
 
-        root.addLayout(trees_row, 1)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        content_row.addWidget(separator)
 
-        selection_row = QHBoxLayout()
-        self.select_all_btn = QPushButton("Select All")
-        self.select_none_btn = QPushButton("Select None")
-        selection_row.addWidget(self.select_all_btn)
-        selection_row.addWidget(self.select_none_btn)
-        selection_row.addStretch(1)
-        root.addLayout(selection_row)
+        details_column = QVBoxLayout()
+        details_column.setSpacing(8)
 
         self.message_edit = SpellcheckPlainTextEdit()
         self.message_edit.setPlaceholderText("Commit message")
-        self.message_edit.setFixedHeight(120)
-        root.addWidget(self.message_edit)
+        self.message_edit.setMinimumHeight(180)
+        details_column.addWidget(self.message_edit, 2)
 
         self.release_chk = QCheckBox("Create GitHub release after push")
-        root.addWidget(self.release_chk)
+        details_column.addWidget(self.release_chk)
 
         self.release_form = QWidget()
         release_layout = QVBoxLayout(self.release_form)
@@ -225,8 +206,8 @@ class GitCommitDialog(DialogWindow):
 
         self.release_notes_edit = SpellcheckPlainTextEdit()
         self.release_notes_edit.setPlaceholderText("Release notes (optional)")
-        self.release_notes_edit.setFixedHeight(84)
-        release_layout.addWidget(self.release_notes_edit)
+        self.release_notes_edit.setMinimumHeight(120)
+        release_layout.addWidget(self.release_notes_edit, 1)
 
         self.release_prerelease_chk = QCheckBox("Pre-release")
         release_layout.addWidget(self.release_prerelease_chk)
@@ -243,12 +224,34 @@ class GitCommitDialog(DialogWindow):
             self.bump_cargo_chk.setChecked(True)
             release_layout.addWidget(self.bump_cargo_chk)
 
-        root.addWidget(self.release_form)
+        details_column.addWidget(self.release_form, 1)
         self.release_form.setVisible(False)
+
+        self.branch_form = QWidget()
+        branch_layout = QVBoxLayout(self.branch_form)
+        branch_layout.setContentsMargins(0, 0, 0, 0)
+        branch_layout.setSpacing(6)
+        self.current_branch_detail_label = QLabel("Current branch: (loading...)")
+        branch_layout.addWidget(self.current_branch_detail_label)
+        self.target_branch_label = QLabel("Commit target: (loading...)")
+        branch_layout.addWidget(self.target_branch_label)
+        self.commit_new_branch_chk = QCheckBox("Commit to new branch")
+        branch_layout.addWidget(self.commit_new_branch_chk)
+        self.new_branch_name_row = QWidget(self.branch_form)
+        new_branch_row_layout = QHBoxLayout(self.new_branch_name_row)
+        new_branch_row_layout.setContentsMargins(0, 0, 0, 0)
+        new_branch_row_layout.setSpacing(6)
+        new_branch_row_layout.addWidget(QLabel("New branch name"), 0)
+        self.new_branch_name_edit = QLineEdit(self.new_branch_name_row)
+        self.new_branch_name_edit.setPlaceholderText("feature/my-change")
+        new_branch_row_layout.addWidget(self.new_branch_name_edit, 1)
+        branch_layout.addWidget(self.new_branch_name_row)
+        self.new_branch_name_row.setVisible(False)
+        details_column.addWidget(self.branch_form)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
+        details_column.addWidget(self.status_label)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -262,17 +265,13 @@ class GitCommitDialog(DialogWindow):
         actions.addWidget(self.cancel_btn)
         actions.addWidget(self.commit_btn)
         actions.addWidget(self.commit_push_btn)
-        root.addLayout(actions)
+        details_column.addLayout(actions)
+
+        content_row.addLayout(details_column, 2)
+        root.addLayout(content_row, 1)
 
         # signals
         self.refresh_btn.clicked.connect(self._load_changes)
-
-        self.select_all_btn.clicked.connect(self._select_all)
-        self.select_none_btn.clicked.connect(self._select_none)
-        self.tracked_select_all_btn.clicked.connect(lambda: self._select_kind("tracked", True))
-        self.tracked_select_none_btn.clicked.connect(lambda: self._select_kind("tracked", False))
-        self.untracked_select_all_btn.clicked.connect(lambda: self._select_kind("untracked", True))
-        self.untracked_select_none_btn.clicked.connect(lambda: self._select_kind("untracked", False))
         self.cancel_btn.clicked.connect(self.reject)
 
         self.commit_btn.clicked.connect(lambda: self._commit_clicked(push_after=False))
@@ -285,9 +284,11 @@ class GitCommitDialog(DialogWindow):
         self.release_tag_edit.textChanged.connect(self._refresh_commit_enabled)
         self.release_tag_edit.textEdited.connect(lambda _text: self.release_tag_edit.setModified(True))
         self.release_title_edit.textEdited.connect(lambda _text: self.release_title_edit.setModified(True))
-        self.tracked_tree.itemChanged.connect(self._on_item_changed)
-        self.untracked_tree.itemChanged.connect(self._on_item_changed)
+        self.commit_new_branch_chk.toggled.connect(self._on_commit_new_branch_toggled)
+        self.new_branch_name_edit.textChanged.connect(self._on_new_branch_name_changed)
+        self.files_tree.itemChanged.connect(self._on_item_changed)
 
+        self._refresh_branch_target_state()
         self._seed_release_version()
         if self._initial_commit_message:
             self.message_edit.setPlainText(self._initial_commit_message)
@@ -313,44 +314,6 @@ class GitCommitDialog(DialogWindow):
                 return self._git_service.read_status(self._repo_root)
 
         self._submit_task("load", _run)
-
-    def _select_all(self) -> None:
-        self._is_syncing_tree_checks = True
-        self.tracked_tree.blockSignals(True)
-        self.untracked_tree.blockSignals(True)
-        for rel_path in self._file_states.keys():
-            self._checked_by_path[rel_path] = True
-        self._sync_file_item_checks()
-        self.tracked_tree.blockSignals(False)
-        self.untracked_tree.blockSignals(False)
-        self._is_syncing_tree_checks = False
-        self._refresh_commit_enabled()
-
-    def _select_none(self) -> None:
-        self._is_syncing_tree_checks = True
-        self.tracked_tree.blockSignals(True)
-        self.untracked_tree.blockSignals(True)
-        for rel_path in self._file_states.keys():
-            self._checked_by_path[rel_path] = False
-        self._sync_file_item_checks()
-        self.tracked_tree.blockSignals(False)
-        self.untracked_tree.blockSignals(False)
-        self._is_syncing_tree_checks = False
-        self._refresh_commit_enabled()
-
-    def _select_kind(self, kind: str, checked: bool) -> None:
-        self._is_syncing_tree_checks = True
-        self.tracked_tree.blockSignals(True)
-        self.untracked_tree.blockSignals(True)
-        for rel_path, path_kind in self._file_states.items():
-            if path_kind != kind:
-                continue
-            self._checked_by_path[rel_path] = bool(checked)
-        self._sync_file_item_checks()
-        self.tracked_tree.blockSignals(False)
-        self.untracked_tree.blockSignals(False)
-        self._is_syncing_tree_checks = False
-        self._refresh_commit_enabled()
 
     def _seed_release_version(self) -> None:
         version = ""
@@ -496,6 +459,74 @@ class GitCommitDialog(DialogWindow):
         self._sync_release_identity_fields()
         self._refresh_commit_enabled()
 
+    def _on_commit_new_branch_toggled(self, checked: bool) -> None:
+        self.new_branch_name_row.setVisible(bool(checked))
+        if checked and not self._pending:
+            self.new_branch_name_edit.setFocus()
+            self.new_branch_name_edit.selectAll()
+        self._refresh_branch_target_state()
+        self._refresh_commit_enabled()
+
+    def _on_new_branch_name_changed(self, _text: str) -> None:
+        self._refresh_branch_target_state()
+        self._refresh_commit_enabled()
+
+    def _refresh_branch_target_state(self) -> None:
+        current = str(self._current_branch_name or "").strip() or "(detached)"
+        self.branch_label.setText(f"Current branch: {current}")
+        self.current_branch_detail_label.setText(f"Current branch: {current}")
+
+        if bool(self.commit_new_branch_chk.isChecked()):
+            target = str(self.new_branch_name_edit.text() or "").strip()
+            if target:
+                self.target_branch_label.setText(f"Commit target: {target} (new branch)")
+            else:
+                self.target_branch_label.setText("Commit target: (new branch name required)")
+        else:
+            self.target_branch_label.setText(f"Commit target: {current}")
+
+    @staticmethod
+    def _validate_branch_name(branch_name: str) -> str | None:
+        name = str(branch_name or "").strip()
+        if not name:
+            return "New branch name is required."
+        if name == "@" or name.upper() == "HEAD":
+            return "Invalid branch name."
+        if name.startswith("-"):
+            return "Branch name cannot start with '-'."
+        if (
+            name.startswith("/")
+            or name.endswith("/")
+            or name.startswith(".")
+            or name.endswith(".")
+            or name.endswith(".lock")
+            or ".." in name
+            or "//" in name
+            or "@{" in name
+        ):
+            return "Invalid branch name."
+        if any(ch.isspace() for ch in name):
+            return "Branch name cannot contain whitespace."
+        if any(ch in _BRANCH_FORBIDDEN_CHARS for ch in name):
+            return "Branch name contains invalid characters."
+        for part in name.split("/"):
+            if not part or part in {".", ".."} or part.endswith(".lock"):
+                return "Invalid branch name."
+        return None
+
+    def _local_branch_exists(self, branch_name: str) -> bool:
+        target = str(branch_name or "").strip().lower()
+        if not target:
+            return False
+        try:
+            info = self._git_service.list_branches(self._repo_root, include_remote=False)
+        except Exception:
+            return False
+        branches = getattr(info, "branches", [])
+        if not isinstance(branches, list):
+            return False
+        return any(str(item or "").strip().lower() == target for item in branches)
+
     def _commit_clicked(self, *, push_after: bool) -> None:
         message = str(self.message_edit.toPlainText() or "").strip()
         if not message:
@@ -506,6 +537,17 @@ class GitCommitDialog(DialogWindow):
         if not selected:
             self._set_status("Select at least one file.", error=True)
             return
+
+        create_new_branch = bool(self.commit_new_branch_chk.isChecked())
+        new_branch_name = str(self.new_branch_name_edit.text() or "").strip()
+        if create_new_branch:
+            branch_error = self._validate_branch_name(new_branch_name)
+            if branch_error:
+                self._set_status(branch_error, error=True)
+                return
+            if self._local_branch_exists(new_branch_name):
+                self._set_status("Branch already exists.", error=True)
+                return
 
         create_release = bool(self.release_chk.isChecked())
         push_required = bool(push_after or create_release)
@@ -552,14 +594,25 @@ class GitCommitDialog(DialogWindow):
         self._commit_with_push = push_required
         self.release_error = ""
         self.release_url = ""
+        self.push_error_kind = ""
         if create_release:
             self._set_status("Committing, pushing, and publishing release...")
+        elif create_new_branch:
+            if push_required:
+                self._set_status(f"Creating branch '{new_branch_name}', committing, and pushing...")
+            else:
+                self._set_status(f"Creating branch '{new_branch_name}' and committing changes...")
         else:
             self._set_status("Committing and pushing..." if push_required else "Committing changes...")
 
         def _run():
             release_url = ""
             release_error = ""
+            push_error_kind = ""
+
+            if create_new_branch:
+                self._git_service.create_branch(self._repo_root, new_branch_name, checkout=True)
+
             # Add selected untracked files first so they become tracked in this commit.
             if to_add:
                 add_fn = getattr(self._git_service, "add_files", None)
@@ -581,9 +634,16 @@ class GitCommitDialog(DialogWindow):
             push_error = ""
             if push_required:
                 try:
-                    push_output = self._git_service.push_current_branch(self._repo_root)
+                    if create_new_branch:
+                        push_output = self._git_service.push_head_to_origin(
+                            self._repo_root,
+                            set_upstream=True,
+                        )
+                    else:
+                        push_output = self._git_service.push_current_branch(self._repo_root)
                 except GitServiceError as exc:
                     push_error = str(exc)
+                    push_error_kind = str(getattr(exc, "kind", "") or "")
 
             if create_release and not push_error and self._release_service is not None and release_req is not None:
                 try:
@@ -596,8 +656,10 @@ class GitCommitDialog(DialogWindow):
                 "commit_output": str(commit_output or "").strip(),
                 "push_output": str(push_output or "").strip(),
                 "push_error": str(push_error or "").strip(),
+                "push_error_kind": str(push_error_kind or "").strip(),
                 "release_url": release_url,
                 "release_error": release_error,
+                "target_branch": new_branch_name if create_new_branch else str(self._current_branch_name or "").strip(),
             }
 
         self._submit_task("commit", _run)
@@ -645,14 +707,13 @@ class GitCommitDialog(DialogWindow):
         if kind == "load":
             if error is None and hasattr(result, "file_states"):
                 branch = str(getattr(result, "current_branch", "") or "")
-                self.branch_label.setText(f"Branch: {branch or '(detached)'}")
+                self._current_branch_name = branch
+                self._refresh_branch_target_state()
 
                 self._file_states = self._extract_file_states(result)
                 self._populate_files_tree()
                 tracked_count = sum(1 for v in self._file_states.values() if v == "tracked")
                 untracked_count = sum(1 for v in self._file_states.values() if v == "untracked")
-                self.tracked_label.setText(f"Tracked Changes ({tracked_count})")
-                self.untracked_label.setText(f"Untracked Files ({untracked_count})")
 
                 if not self._file_states:
                     self._set_status("No files to commit.")
@@ -678,15 +739,25 @@ class GitCommitDialog(DialogWindow):
                 self.commit_output = str(payload.get("commit_output") or "").strip()
                 self.push_output = str(payload.get("push_output") or "").strip()
                 self.push_error = str(payload.get("push_error") or "").strip()
+                self.push_error_kind = str(payload.get("push_error_kind") or "").strip()
                 self.release_url = str(payload.get("release_url") or "").strip()
                 self.release_error = str(payload.get("release_error") or "").strip()
+                target_branch = str(payload.get("target_branch") or "").strip()
+                if target_branch:
+                    self._current_branch_name = target_branch
+                    self._refresh_branch_target_state()
 
                 if self.push_error:
-                    self._set_status("Commit succeeded locally, but push authentication failed.", error=True)
+                    self._set_status("Commit succeeded locally, but push failed.", error=True)
+                    push_title = "Commit and Push"
+                    if self.push_error_kind == "auth_failed":
+                        push_body = f"Commit succeeded locally, but push authentication failed.\n\n{self.push_error}"
+                    else:
+                        push_body = f"Commit succeeded locally, but push failed.\n\n{self.push_error}"
                     QMessageBox.warning(
                         self,
-                        "Commit and Push",
-                        f"Commit succeeded locally, but push authentication failed.\n\n{self.push_error}",
+                        push_title,
+                        push_body,
                     )
                 elif self.release_error:
                     self._set_status("Commit/push succeeded, but release publishing failed.", error=True)
@@ -769,42 +840,56 @@ class GitCommitDialog(DialogWindow):
         self._checked_by_path = next_checked
 
         self._is_syncing_tree_checks = True
-        self.tracked_tree.blockSignals(True)
-        self.untracked_tree.blockSignals(True)
-        self.tracked_tree.clear()
-        self.untracked_tree.clear()
+        self.files_tree.blockSignals(True)
+        self.files_tree.clear()
 
         style = QApplication.style()
         folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon) if style is not None else None
         fallback_file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon) if style is not None else None
 
+        tracked_count = sum(1 for kind in self._file_states.values() if kind == "tracked")
+        untracked_count = sum(1 for kind in self._file_states.values() if kind == "untracked")
+
+        tracked_root = QTreeWidgetItem([f"Changed ({tracked_count})"])
+        tracked_root.setData(0, Qt.UserRole, "")
+        tracked_root.setFlags(tracked_root.flags() | Qt.ItemIsUserCheckable)
+        tracked_root.setCheckState(0, Qt.Unchecked)
+        if folder_icon is not None:
+            tracked_root.setIcon(0, folder_icon)
+        self.files_tree.addTopLevelItem(tracked_root)
+
+        untracked_root = QTreeWidgetItem([f"Unversioned Files ({untracked_count})"])
+        untracked_root.setData(0, Qt.UserRole, "")
+        untracked_root.setFlags(untracked_root.flags() | Qt.ItemIsUserCheckable)
+        untracked_root.setCheckState(0, Qt.Unchecked)
+        if folder_icon is not None:
+            untracked_root.setIcon(0, folder_icon)
+        self.files_tree.addTopLevelItem(untracked_root)
+
         self._populate_tree_for_kind(
-            tree=self.tracked_tree,
+            root_item=tracked_root,
             kind="tracked",
             folder_icon=folder_icon,
             fallback_file_icon=fallback_file_icon,
         )
         self._populate_tree_for_kind(
-            tree=self.untracked_tree,
+            root_item=untracked_root,
             kind="untracked",
             folder_icon=folder_icon,
             fallback_file_icon=fallback_file_icon,
         )
 
-        self._refresh_directory_states(self.tracked_tree)
-        self._refresh_directory_states(self.untracked_tree)
+        self._refresh_directory_states(self.files_tree)
 
-        self.tracked_tree.expandAll()
-        self.untracked_tree.expandAll()
-        self.tracked_tree.blockSignals(False)
-        self.untracked_tree.blockSignals(False)
+        self.files_tree.expandAll()
+        self.files_tree.blockSignals(False)
         self._is_syncing_tree_checks = False
         self._refresh_commit_enabled()
 
     def _populate_tree_for_kind(
         self,
         *,
-        tree: QTreeWidget,
+        root_item: QTreeWidgetItem,
         kind: str,
         folder_icon,
         fallback_file_icon,
@@ -814,7 +899,7 @@ class GitCommitDialog(DialogWindow):
         for rel_path, entry_kind in self._file_states.items():
             if entry_kind != kind:
                 continue
-            parent = tree.invisibleRootItem()
+            parent = root_item
             parts = [part for part in rel_path.split("/") if part]
             if not parts:
                 continue
@@ -853,10 +938,8 @@ class GitCommitDialog(DialogWindow):
             parent.addChild(file_item)
 
     def _sync_file_item_checks(self) -> None:
-        self._sync_tree_file_item_checks(self.tracked_tree)
-        self._sync_tree_file_item_checks(self.untracked_tree)
-        self._refresh_directory_states(self.tracked_tree)
-        self._refresh_directory_states(self.untracked_tree)
+        self._sync_tree_file_item_checks(self.files_tree)
+        self._refresh_directory_states(self.files_tree)
 
     def _sync_tree_file_item_checks(self, tree: QTreeWidget) -> None:
         stack: list[QTreeWidgetItem] = []
@@ -977,25 +1060,24 @@ class GitCommitDialog(DialogWindow):
                 str(self.release_version_edit.text() or "").strip()
                 and str(self.release_tag_edit.text() or "").strip()
             )
-        enabled = bool(has_message and has_files and release_valid)
+        branch_valid = True
+        if self.commit_new_branch_chk.isChecked():
+            branch_valid = bool(str(self.new_branch_name_edit.text() or "").strip())
+        enabled = bool(has_message and has_files and release_valid and branch_valid)
         self.commit_btn.setEnabled(enabled)
         self.commit_push_btn.setEnabled(enabled)
 
     def _set_busy(self, busy: bool) -> None:
         disabled = bool(busy)
         self.refresh_btn.setDisabled(disabled)
-        self.tracked_tree.setDisabled(disabled)
-        self.untracked_tree.setDisabled(disabled)
-        self.select_all_btn.setDisabled(disabled)
-        self.select_none_btn.setDisabled(disabled)
-        self.tracked_select_all_btn.setDisabled(disabled)
-        self.tracked_select_none_btn.setDisabled(disabled)
-        self.untracked_select_all_btn.setDisabled(disabled)
-        self.untracked_select_none_btn.setDisabled(disabled)
+        self.files_tree.setDisabled(disabled)
         self.message_edit.setDisabled(disabled)
         self.release_chk.setDisabled(disabled)
         self.release_form.setDisabled(disabled or not self.release_chk.isChecked())
+        self.commit_new_branch_chk.setDisabled(disabled)
+        self.new_branch_name_edit.setDisabled(disabled or not self.commit_new_branch_chk.isChecked())
         self.cancel_btn.setDisabled(disabled)
+        self._refresh_branch_target_state()
 
         if disabled:
             self.commit_btn.setDisabled(True)
