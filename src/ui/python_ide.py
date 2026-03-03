@@ -5392,7 +5392,9 @@ class PythonIDE(Window):
         host_tabs.removeTab(host_index)
         insert_at = max(0, min(host_index, host_tabs.count()))
 
-        wrapper = MarkdownEditorTab(editor=ed, parent=host_tabs)
+        preview_action = self._act_toggle_markdown_preview
+        default_preview_visible = bool(preview_action.isChecked()) if isinstance(preview_action, QAction) else False
+        wrapper = MarkdownEditorTab(editor=ed, parent=host_tabs, preview_visible=default_preview_visible)
         ed.show()
         host_tabs.insertTab(insert_at, wrapper, "")
         host_tabs._connect_widget_document_signal(wrapper)

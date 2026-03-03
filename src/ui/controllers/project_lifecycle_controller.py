@@ -248,8 +248,24 @@ class ProjectLifecycleController:
             return False
         if not self._launch_project_window(project_path):
             return False
+        hidden_for_handoff = False
+        if self.no_project_mode:
+            try:
+                self.ide.hide()
+                self.ide.repaint()
+                QApplication.processEvents()
+                hidden_for_handoff = True
+            except Exception:
+                hidden_for_handoff = False
         timeout_s = self._instance_handoff_timeout_s()
         if not self._wait_for_project_instance(project_path, timeout_s=timeout_s):
+            if hidden_for_handoff:
+                try:
+                    self.ide.show()
+                    self.ide.raise_()
+                    self.ide.activateWindow()
+                except Exception:
+                    pass
             QMessageBox.warning(
                 self.ide,
                 "Open Project",

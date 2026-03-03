@@ -13,17 +13,20 @@ from TPOPyside.widgets.markdown_viewer_widget import MDHeadFlags, MarkdownViewer
 
 
 class MarkdownEditorTab(QWidget):
-    def __init__(self, *, editor: EditorWidget, parent=None):
+    def __init__(self, *, editor: EditorWidget, parent=None, preview_visible: bool = True):
         super().__init__(parent)
         self._editor = editor
         self.editor_id = str(getattr(editor, "editor_id", "") or id(editor))
         self._last_visible_splitter_sizes: list[int] | None = None
-
-        self._preview = MarkdownViewerWidget(show_toolbar=False)
-        self._preview.setHeadFlags(MDHeadFlags.none)
+        self._preview: MarkdownViewerWidget | None = None
+        self._preview_bg_color: QColor | None = None
+        self._preview_host = QWidget(self)
+        self._preview_host.setObjectName("MarkdownPreviewHost")
+        self._preview_host_layout = QVBoxLayout(self._preview_host)
+        self._preview_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._preview_host_layout.setSpacing(0)
         self._editor.setMinimumWidth(260)
-        self._preview.setMinimumWidth(220)
-        self._sync_preview_background_from_editor()
+        self._preview_host.setMinimumWidth(220)
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -41,7 +44,7 @@ class MarkdownEditorTab(QWidget):
         self._splitter = QSplitter(self)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.addWidget(self._editor)
-        self._splitter.addWidget(self._preview)
+        self._splitter.addWidget(self._preview_host)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
         self._apply_default_splitter_sizes(force=True)
@@ -56,8 +59,8 @@ class MarkdownEditorTab(QWidget):
         self._editor.verticalScrollBar().valueChanged.connect(
             lambda _value: self._queue_preview_scroll_sync(use_caret=False, immediate=False)
         )
-        self._queue_preview_refresh(immediate=True)
-        self._queue_preview_scroll_sync(use_caret=True, immediate=True)
+        self._preview_host.setVisible(False)
+        self.set_preview_visible(bool(preview_visible))
 
     def __getattr__(self, name: str):
         return getattr(self._editor, name)
@@ -119,7 +122,7 @@ class MarkdownEditorTab(QWidget):
             sizes = list(self._splitter.sizes())
             if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
                 self._last_visible_splitter_sizes = sizes
-            self._preview.setVisible(False)
+            self._preview_host.setVisible(False)
             self._splitter.setSizes([max(260, self.width()), 0])
             self._pending_refresh_while_hidden = True
             self._pending_hidden_scroll_sync = True
@@ -127,7 +130,8 @@ class MarkdownEditorTab(QWidget):
             self._scroll_sync_timer.stop()
             return
 
-        self._preview.setVisible(True)
+        self._preview_host.setVisible(True)
+        self._ensure_preview_widget()
         if self._last_visible_splitter_sizes and len(self._last_visible_splitter_sizes) == 2:
             self._splitter.setSizes(self._last_visible_splitter_sizes)
         else:
@@ -138,7 +142,22 @@ class MarkdownEditorTab(QWidget):
             self._queue_preview_scroll_sync(use_caret=True, immediate=True)
 
     def is_preview_visible(self) -> bool:
-        return bool(self._preview.isVisible())
+        return bool(self._preview_host.isVisible())
+
+    def _ensure_preview_widget(self) -> MarkdownViewerWidget:
+        existing = self._preview
+        if isinstance(existing, MarkdownViewerWidget):
+            return existing
+        preview = MarkdownViewerWidget(show_toolbar=False, parent=self._preview_host)
+        preview.setHeadFlags(MDHeadFlags.none)
+        preview.setMinimumWidth(220)
+        self._preview_host_layout.addWidget(preview, 1)
+        if self._preview_bg_color is not None:
+            setter = getattr(preview, "setPreferredPageBackgroundColor", None)
+            if callable(setter):
+                setter(self._preview_bg_color)
+        self._preview = preview
+        return preview
 
     def _base_url(self) -> QUrl:
         path = str(self.file_path or "").strip()
@@ -165,9 +184,10 @@ class MarkdownEditorTab(QWidget):
         if not self.is_preview_visible():
             self._pending_refresh_while_hidden = True
             return
+        preview = self._ensure_preview_widget()
         self._sync_preview_background_from_editor()
         text = str(self._editor.toPlainText() or "")
-        self._preview.setMarkdown(text, base_url=self._base_url())
+        preview.setMarkdown(text, base_url=self._base_url())
         self._pending_refresh_while_hidden = False
         self._queue_preview_scroll_sync(use_caret=True, immediate=True)
 
@@ -186,8 +206,9 @@ class MarkdownEditorTab(QWidget):
         if not self.is_preview_visible():
             self._pending_hidden_scroll_sync = True
             return
+        preview = self._ensure_preview_widget()
         ratio = self._editor_scroll_ratio(use_caret=self._sync_preview_scroll_use_caret)
-        self._preview.scroll_to_ratio(ratio, smooth=False)
+        preview.scroll_to_ratio(ratio, smooth=False)
         self._pending_hidden_scroll_sync = False
 
     def _editor_scroll_ratio(self, *, use_caret: bool) -> float:
@@ -247,9 +268,12 @@ class MarkdownEditorTab(QWidget):
             if palette_color.isValid() and palette_color.alpha() > 0:
                 color = palette_color
 
+        self._preview_bg_color = color if isinstance(color, QColor) and color.isValid() else None
+        if not isinstance(self._preview, MarkdownViewerWidget):
+            return
         setter = getattr(self._preview, "setPreferredPageBackgroundColor", None)
         if callable(setter):
-            setter(color if isinstance(color, QColor) and color.isValid() else "")
+            setter(self._preview_bg_color if self._preview_bg_color is not None else "")
 
     def _apply_default_splitter_sizes(self, *, force: bool = False) -> None:
         if not self.is_preview_visible():

@@ -295,7 +295,7 @@ class ActionRegistry:
         view.addSeparator()
         act_markdown_preview = QAction("Markdown Live Preview", ide)
         act_markdown_preview.setCheckable(True)
-        act_markdown_preview.setChecked(True)
+        act_markdown_preview.setChecked(False)
         act_markdown_preview.toggled.connect(ide.set_active_markdown_preview_visible)
         view.addAction(act_markdown_preview)
         ide._act_toggle_markdown_preview = act_markdown_preview

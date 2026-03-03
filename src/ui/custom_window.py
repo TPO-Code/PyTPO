@@ -618,15 +618,17 @@ class Window(QMainWindow):
 
         if was_visible:
             self.hide()
-        self.show()
+            self.show()
 
-        self.setGeometry(geom)
-        if was_full:
-            self.showFullScreen()
-        elif was_max:
-            self.showMaximized()
+            self.setGeometry(geom)
+            if was_full:
+                self.showFullScreen()
+            elif was_max:
+                self.showMaximized()
+            else:
+                self.showNormal()
         else:
-            self.showNormal()
+            self.setGeometry(geom)
 
         self._layout_grips()
 
