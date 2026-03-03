@@ -31,6 +31,7 @@ User documentation for running, configuring, and troubleshooting PyTPO.
 ## Configuration
 
 - [Configuration Index](configuration/README.md)
+- [Themes (`.qss` and `.qsst`)](configuration/themes.md)
 - [IDE Settings](configuration/ide-settings.md)
 - [Run Configurations](configuration/run-configurations.md)
 - [Project Configuration (`.tide/project.json`)](configuration/project-json.md)

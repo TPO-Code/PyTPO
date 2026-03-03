@@ -259,6 +259,12 @@ class LanguageIntelligenceController:
         for widget in self.editor_workspace.all_document_widgets():
             if self._editor_lookup_id(widget) == editor_id:
                 return widget
+        commit_editor = getattr(self.ide, "commit_md_editor", None)
+        if self._editor_lookup_id(commit_editor) == editor_id:
+            return commit_editor
+        commit_widget = getattr(self.ide, "commit_md_widget", None)
+        if self._editor_lookup_id(commit_widget) == editor_id:
+            return commit_widget
         return None
 
     def _on_ai_inline_suggestion_ready(self, payload_obj: object) -> None:

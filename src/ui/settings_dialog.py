@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
@@ -214,12 +215,6 @@ class SettingsDialog(DialogWindow):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
 
-        header_row = QHBoxLayout()
-        title = QLabel("Settings")
-        title.setObjectName("SettingsTitle")
-        header_row.addWidget(title)
-        header_row.addStretch(1)
-        root.addLayout(header_row)
 
         body = QHBoxLayout()
         body.setSpacing(12)
@@ -254,6 +249,7 @@ class SettingsDialog(DialogWindow):
             "QTreeView::item { border: none; } "
             "QTreeView::item:selected { border: none; } "
         )
+        self._apply_configured_tree_font()
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         left_layout.addWidget(self.tree, 1)
         left.setFixedWidth(320)
@@ -313,6 +309,24 @@ class SettingsDialog(DialogWindow):
         footer.addWidget(self.btn_save)
 
         root.addLayout(footer)
+
+    def _apply_configured_tree_font(self) -> None:
+        try:
+            size = int(self.manager.get("tree_font_size", scope_preference="ide", default=10))
+        except Exception:
+            size = 10
+        size = max(6, min(48, size))
+        family = str(self.manager.get("tree_font_family", scope_preference="ide", default="") or "").strip()
+        if family and family not in set(QFontDatabase.families()):
+            family = ""
+        try:
+            base_font = QApplication.font(self.tree)
+            font = self.tree.font()
+            font.setPointSize(size)
+            font.setFamily(family or base_font.family())
+            self.tree.setFont(font)
+        except Exception:
+            pass
 
     def _build_tree_and_pages(self) -> None:
         runtime_expanded_paths = self._collect_tree_expanded_paths() if self.tree.topLevelItemCount() > 0 else None
@@ -1453,6 +1467,7 @@ class SettingsDialog(DialogWindow):
             )
             self._dirty_scopes -= saved
 
+        self._apply_configured_tree_font()
         if self.on_applied is not None:
             self.on_applied()
 
@@ -2177,6 +2192,23 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 scope="ide",
                                 description="Monospace font used by the code editor.",
                             ),
+                            SchemaField(
+                                id="ide-tree-font-size",
+                                key="tree_font_size",
+                                label="Tree Font Size",
+                                type="spin",
+                                scope="ide",
+                                min=6,
+                                max=48,
+                            ),
+                            SchemaField(
+                                id="ide-tree-font-family",
+                                key="tree_font_family",
+                                label="Tree Font Family",
+                                type="font_family",
+                                scope="ide",
+                                description="Font used by project and navigation trees.",
+                            ),
                         ],
                     ),
                     SchemaSection(
@@ -2262,6 +2294,51 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 description=(
                                     "Hex color like #ff4d4d24 for in-editor saved-but-uncommitted "
                                     "changes (HEAD vs disk)."
+                                ),
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="Editor Gutter",
+                        fields=[
+                            SchemaField(
+                                id="ide-editor-gutter-bg",
+                                key="editor.gutter_background_color",
+                                label="Gutter Background Color",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Hex color like #1d232c. Leave blank to auto-derive from editor background."
+                                ),
+                            ),
+                            SchemaField(
+                                id="ide-editor-gutter-fg",
+                                key="editor.gutter_foreground_color",
+                                label="Gutter Foreground Color",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Line-number color. Leave blank to auto-derive from gutter background."
+                                ),
+                            ),
+                            SchemaField(
+                                id="ide-editor-gutter-fg-active",
+                                key="editor.gutter_active_foreground_color",
+                                label="Active Line Number Color",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Current-line number color. Leave blank to use the default behavior."
+                                ),
+                            ),
+                            SchemaField(
+                                id="ide-editor-gutter-fold-marker",
+                                key="editor.gutter_fold_marker_color",
+                                label="Fold Marker Color",
+                                type="color",
+                                scope="ide",
+                                description=(
+                                    "Fold triangle color. Leave blank to auto-derive from line-number color."
                                 ),
                             ),
                         ],

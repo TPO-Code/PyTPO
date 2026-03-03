@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QFontDatabase, QIcon, QTextCursor
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QTreeView, QWidget
 
 from src.ai.context_assembler import ContextAssembler
 from src.ai.inline_controller import InlineSuggestionController
@@ -365,11 +365,27 @@ class PythonIDE(Window):
                 default=self.config.get("font_family", ""),
             )
         )
+        self.tree_font_size = self._clamp_tree_font_size(
+            int(
+                self.settings_manager.get(
+                    "tree_font_size",
+                    scope_preference="ide",
+                    default=self.config.get("tree_font_size", self.config.get("font_size", 10)),
+                )
+            )
+        )
+        self.tree_font_family = self._resolve_tree_font_family(
+            self.settings_manager.get(
+                "tree_font_family",
+                scope_preference="ide",
+                default=self.config.get("tree_font_family", ""),
+            )
+        )
         self.theme_name = str(
             self.settings_manager.get(
                 "theme",
                 scope_preference="ide",
-                default=self.config.get("theme", "Dark"),
+                default=self.config.get("theme", "Default"),
             )
         )
         self.project_policy_service = ProjectPolicyService(
@@ -391,7 +407,8 @@ class PythonIDE(Window):
         self.dock_usages: QDockWidget | None = None
         self.symbol_outline_panel: SymbolOutlinePanel | None = None
         self.dock_outline: QDockWidget | None = None
-        self.commit_md_editor: CodeEditor | None = None
+        self.commit_md_editor: EditorWidget | None = None
+        self.commit_md_widget: MarkdownEditorTab | None = None
         self.dock_commit_md: QDockWidget | None = None
 
         self.lint_manager = LintManager(
@@ -847,6 +864,7 @@ class PythonIDE(Window):
         self.tree.pathContextMenuRequested.connect(self._show_project_tree_context_menu)
         self.tree.operationError.connect(self._show_tree_error)
         self.tree.pathMoved.connect(self._on_tree_path_moved)
+        self._apply_tree_font_settings_to_all()
 
         act_tree_copy = QAction("Copy", self.tree)
         act_tree_copy.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1146,6 +1164,7 @@ class PythonIDE(Window):
         self.tabifyDockWidget(self.dock_debug, self.dock_terminal)
         self.tabifyDockWidget(self.dock_terminal, self.dock_problems)
         self.tabifyDockWidget(self.dock_problems, self.dock_usages)
+        self._apply_tree_font_settings_to_all()
         self.dock_outline.hide()
         self.dock_debug.show()
 
@@ -1161,7 +1180,7 @@ class PythonIDE(Window):
         self.dock_commit_md.setFeatures(features)
         self.dock_commit_md.setMinimumWidth(240)
 
-        editor = CodeEditor(self)
+        editor = EditorWidget(parent=self)
         editor.setLineWrapMode(CodeEditor.LineWrapMode.WidgetWidth)
         editor.setPlaceholderText("Project-local draft source: .tide/commit.md")
         editor.set_editor_font_preferences(
@@ -1169,9 +1188,34 @@ class PythonIDE(Window):
             point_size=int(self.font_size),
         )
         self._apply_editor_background_to_editor(editor)
+        self._apply_editor_indent_settings_to_editor(editor)
+        self._apply_editor_overview_settings_to_editor(editor)
+        self._apply_lint_visual_settings_to_editor(editor)
+        self._apply_spellcheck_visual_settings_to_widget(editor)
+        configure_keybindings = getattr(editor, "configure_keybindings", None)
+        if callable(configure_keybindings):
+            try:
+                configure_keybindings(self._keybindings_config())
+            except Exception:
+                pass
+        editor.aiAssistRequested.connect(lambda reason: self._on_editor_ai_assist_requested(editor, reason))
+        editor.contextMenuAboutToShow.connect(
+            lambda menu, payload: self._append_spellcheck_context_actions(editor, menu, payload)
+        )
         editor.textChanged.connect(self._on_commit_md_editor_text_changed)
         self.commit_md_editor = editor
-        self.dock_commit_md.setWidget(editor)
+        default_preview_visible = (
+            bool(self._act_toggle_markdown_preview.isChecked())
+            if isinstance(self._act_toggle_markdown_preview, QAction)
+            else False
+        )
+        commit_widget = MarkdownEditorTab(
+            editor=editor,
+            parent=self.dock_commit_md,
+            preview_visible=default_preview_visible,
+        )
+        self.commit_md_widget = commit_widget
+        self.dock_commit_md.setWidget(commit_widget)
         self._track_widget_change_highlights(editor)
 
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_commit_md)
@@ -1222,6 +1266,10 @@ class PythonIDE(Window):
     def _on_commit_md_editor_text_changed(self) -> None:
         if self._commit_md_syncing_editor:
             return
+        editor = self.commit_md_editor
+        if isinstance(editor, EditorWidget):
+            self.spellcheck_manager.on_document_text_changed(editor)
+            self._request_ai_inline_for_editor(editor, reason="passive")
         self._schedule_commit_md_dock_save()
 
     def _schedule_commit_md_dock_save(self) -> None:
@@ -1850,7 +1898,17 @@ class PythonIDE(Window):
 
     def _active_markdown_editor_tab(self) -> MarkdownEditorTab | None:
         current = self._current_document_widget()
-        return current if isinstance(current, MarkdownEditorTab) else None
+        if isinstance(current, MarkdownEditorTab):
+            return current
+        commit_editor = self.commit_md_editor
+        commit_widget = self.commit_md_widget
+        if (
+            isinstance(commit_widget, MarkdownEditorTab)
+            and isinstance(commit_editor, QWidget)
+            and current is commit_editor
+        ):
+            return commit_widget
+        return None
 
     def set_active_markdown_preview_visible(self, visible: bool) -> None:
         tab = self._active_markdown_editor_tab()
@@ -2201,6 +2259,14 @@ class PythonIDE(Window):
                 configure_keybindings(bindings)
             except Exception:
                 pass
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, EditorWidget):
+            configure_keybindings = getattr(commit_editor, "configure_keybindings", None)
+            if callable(configure_keybindings):
+                try:
+                    configure_keybindings(bindings)
+                except Exception:
+                    pass
 
     def register_language_provider(
         self,
@@ -2402,6 +2468,79 @@ class PythonIDE(Window):
         if announce:
             self.statusBar().showMessage(f"Editor font: {self.font_family}", 1300)
 
+    def _clamp_tree_font_size(self, value: int) -> int:
+        return max(self.FONT_SIZE_MIN, min(self.FONT_SIZE_MAX, int(value)))
+
+    def _resolve_tree_font_family(self, family: object) -> str:
+        preferred = str(family or "").strip()
+        if not preferred:
+            return ""
+        return preferred if preferred in set(QFontDatabase.families()) else ""
+
+    def _apply_tree_font_settings_to_all(self) -> None:
+        family = str(self.tree_font_family or "").strip()
+        app = QApplication.instance()
+        if app is not None:
+            class_font = app.font()
+            class_font.setPointSize(int(self.tree_font_size))
+            if family:
+                class_font.setFamily(family)
+            try:
+                app.setFont(class_font, b"QTreeView")
+                app.setFont(class_font, b"QTreeWidget")
+            except Exception:
+                pass
+
+        for widget in QApplication.allWidgets():
+            if not isinstance(widget, QTreeView):
+                continue
+            try:
+                default_font = QApplication.font(widget)
+                font = widget.font()
+                font.setPointSize(int(self.tree_font_size))
+                font.setFamily(family or default_font.family())
+                widget.setFont(font)
+                viewport = widget.viewport()
+                if viewport is not None:
+                    viewport.update()
+                widget.updateGeometry()
+                widget.update()
+            except Exception:
+                continue
+
+    def _set_tree_font_size(self, size: int, *, persist: bool = True, announce: bool = False) -> None:
+        new_size = self._clamp_tree_font_size(size)
+        if int(new_size) == int(self.tree_font_size):
+            return
+        self.tree_font_size = int(new_size)
+        self._apply_tree_font_settings_to_all()
+        self.settings_manager.set("tree_font_size", int(self.tree_font_size), "ide")
+        if persist:
+            try:
+                self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+            except Exception:
+                pass
+        self.config = self.settings_manager.export_legacy_config()
+        if announce:
+            self.statusBar().showMessage(f"Tree font size: {self.tree_font_size}", 1300)
+
+    def _set_tree_font_family(self, family: object, *, persist: bool = True, announce: bool = False) -> None:
+        new_family = self._resolve_tree_font_family(family)
+        if str(new_family) == str(self.tree_font_family):
+            return
+        self.tree_font_family = new_family
+        self._apply_tree_font_settings_to_all()
+        self.settings_manager.set("tree_font_family", str(self.tree_font_family), "ide")
+        if persist:
+            try:
+                self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+            except Exception:
+                pass
+        self.config = self.settings_manager.export_legacy_config()
+        if announce:
+            status = self.tree_font_family or "System default"
+            self.statusBar().showMessage(f"Tree font: {status}", 1300)
+
     def _editor_background_config(self) -> dict:
         cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
         return cfg if isinstance(cfg, dict) else {}
@@ -2567,6 +2706,10 @@ class PythonIDE(Window):
                 background_image_brightness=int(cfg.get("background_image_brightness", 100)),
                 background_tint_color=str(cfg.get("background_tint_color", "#000000") or "#000000"),
                 background_tint_strength=int(cfg.get("background_tint_strength", 0)),
+                gutter_background_color=str(cfg.get("gutter_background_color", "") or ""),
+                gutter_foreground_color=str(cfg.get("gutter_foreground_color", "") or ""),
+                gutter_active_foreground_color=str(cfg.get("gutter_active_foreground_color", "") or ""),
+                gutter_fold_marker_color=str(cfg.get("gutter_fold_marker_color", "") or ""),
             )
         except Exception:
             pass
@@ -3096,6 +3239,22 @@ class PythonIDE(Window):
                 return widget
             widget = widget.parentWidget()
         return None
+
+    @staticmethod
+    def _focus_chain_contains_widget(target: QWidget | None) -> bool:
+        if not isinstance(target, QWidget):
+            return False
+        widget = QApplication.focusWidget()
+        visited: set[int] = set()
+        while isinstance(widget, QWidget):
+            wid = id(widget)
+            if wid in visited:
+                break
+            visited.add(wid)
+            if widget is target:
+                return True
+            widget = widget.parentWidget()
+        return False
 
     def copy_focused_widget(self) -> None:
         if self._is_project_tree_focus_context():
@@ -4414,7 +4573,19 @@ class PythonIDE(Window):
         return paths
 
     def _current_document_widget(self) -> QWidget | None:
-        return self.editor_workspace.active_document_widget()
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, QWidget):
+            if self._focus_chain_contains_widget(commit_editor):
+                return commit_editor
+            if self._focus_chain_contains_widget(self.commit_md_widget):
+                return commit_editor
+            if self._focus_chain_contains_widget(self.dock_commit_md):
+                return commit_editor
+
+        current = self.editor_workspace.active_document_widget()
+        if isinstance(current, QWidget):
+            return current
+        return None
 
     def _find_open_document_for_path(self, canonical_path: str) -> QWidget | None:
         target = self._canonical_path(canonical_path)
@@ -4431,6 +4602,11 @@ class PythonIDE(Window):
     def _focus_document_widget(self, widget: QWidget) -> None:
         if not isinstance(widget, QWidget):
             return
+        commit_editor = self.commit_md_editor
+        if isinstance(commit_editor, QWidget):
+            if widget is commit_editor or widget is self.commit_md_widget:
+                commit_editor.setFocus()
+                return
         for tabs in self.editor_workspace.all_tabs():
             idx = tabs.indexOf(widget)
             if idx >= 0:
@@ -5565,6 +5741,10 @@ class PythonIDE(Window):
         if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
             return
+        if widget is self.commit_md_editor:
+            if self._flush_commit_md_dock_save(report_conflict=True):
+                self.statusBar().showMessage("Commit draft saved.", 1400)
+            return
 
         path = self._document_widget_path(widget)
         if not path:
@@ -5594,6 +5774,9 @@ class PythonIDE(Window):
         widget = self._current_document_widget()
         if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
+            return
+        if widget is self.commit_md_editor:
+            self.statusBar().showMessage("Commit draft path is fixed to .tide/commit.md.", 2200)
             return
 
         path, _ = get_save_file_name(
@@ -5888,10 +6071,32 @@ class PythonIDE(Window):
             persist=False,
             announce=False,
         )
+        self._set_tree_font_size(
+            int(
+                self.settings_manager.get(
+                    "tree_font_size",
+                    scope_preference="ide",
+                    default=self.tree_font_size,
+                )
+            ),
+            persist=False,
+            announce=False,
+        )
+        self._set_tree_font_family(
+            self.settings_manager.get(
+                "tree_font_family",
+                scope_preference="ide",
+                default=self.tree_font_family,
+            ),
+            persist=False,
+            announce=False,
+        )
         # Ensure already-open editors stay in sync with current font settings.
         self._apply_editor_font_settings_to_all()
-        self.theme_name = str(self.settings_manager.get("theme", scope_preference="ide", default="Dark"))
+        self._apply_tree_font_settings_to_all()
+        self.theme_name = str(self.settings_manager.get("theme", scope_preference="ide", default="Default"))
         self.apply_selected_theme()
+        self._apply_tree_font_settings_to_all()
         self._configure_autosave_timer()
         self._refresh_recent_projects_menu()
         self._refresh_welcome_recent_projects()
@@ -5967,6 +6172,10 @@ class PythonIDE(Window):
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._track_widget_change_highlights(self.commit_md_editor)
         self._apply_editor_background_to_editor(self.commit_md_editor)
+        self._apply_editor_indent_settings_to_editor(self.commit_md_editor)
+        self._apply_editor_overview_settings_to_editor(self.commit_md_editor)
+        self._apply_lint_visual_settings_to_editor(self.commit_md_editor)
+        self._apply_spellcheck_visual_settings_to_widget(self.commit_md_editor)
 
         if lint_cfg.get("enabled", True):
             ed = self.current_editor()

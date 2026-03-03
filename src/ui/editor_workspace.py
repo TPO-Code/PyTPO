@@ -427,6 +427,7 @@ class EditorTabs(QTabWidget):
 
     def __init__(self, workspace: "EditorWorkspace", owner_window: QMainWindow | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("EditorTabs")
 
         self._overlay = DropOverlay(self)
         self._overlay.setGeometry(self.rect())
@@ -440,7 +441,9 @@ class EditorTabs(QTabWidget):
         self._pin_icon = QIcon()
 
         self._tabbar = DraggableTabBar(self, self)
+        self._tabbar.setObjectName("EditorTabBar")
         self.setTabBar(self._tabbar)
+        self._tabbar.setDrawBase(False)
 
         self.setTabsClosable(True)
         self.setMovable(True)

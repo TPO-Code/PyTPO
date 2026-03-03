@@ -41,7 +41,7 @@ bg_titlebar_gradient_top = "#12121b"
 bg_titlebar_gradient_bottom = "#1E1E2C"
 
 # Border system
-border_subtle = "#3a3d41"
+border_subtle = "#413A3A"
 border_control = "#45494f"
 border_input = "#3f4349"
 border_input_focus = "#4f8cff"
@@ -162,6 +162,12 @@ terminal_toolbar_button_padding = "4px 8px"
 # Optional component-level mappings
 # -------------------------------------------------------------------
 [components.tabs]
+# Editor tab host chrome (helps suppress Qt-native tabbar frame seams)
+tab_host_background = "${colors.bg_root}"
+tab_host_border = "none"
+tab_bar_background = "${colors.bg_root}"
+tab_bar_border = "none"
+
 tab_pane_border_width = "1px"
 tab_pane_border_color = "${colors.border_subtle}"
 tab_pane_background = "${colors.bg_tab_pane}"
@@ -170,8 +176,9 @@ tab_pane_top_offset = "${metrics.tab_pane_top_offset}"
 tab_button_background = "${colors.transparent}"
 tab_button_text = "${colors.text_muted}"
 tab_button_border_width = "0px"
-tab_button_border_color = "${colors.border_subtle}"
+tab_button_border_color = "${colors.transparent}"
 tab_button_border_bottom = "none"
+tab_button_border_top = "none"
 tab_button_padding = "${spacing.tab_padding}"
 tab_button_margin_right = "${spacing.tab_margin_right}"
 tab_button_radius_top_left = "0px"
@@ -243,7 +250,7 @@ properties.padding = "${spacing.tooltip_padding}"
 [[rules]]
 comment = "Menus and status"
 selector = "QMenuBar"
-properties.background = "${colors.bg_surface_alt}"
+properties.background = "${colors.bg_surface_alt}" 
 properties.color = "${colors.text_primary}"
 properties.border-bottom = "${metrics.border_width} solid ${colors.border_subtle}"
 
@@ -489,6 +496,22 @@ properties.border-color = "${colors.border_checkbox_checked}"
 # --- Editor/panel tabs ---
 [[rules]]
 comment = "Tabs"
+selector = "QTabWidget#EditorTabs"
+properties.background = "${components.tabs.tab_host_background}"
+properties.border = "${components.tabs.tab_host_border}"
+
+[[rules]]
+selector = "QTabWidget#EditorTabs::tab-bar"
+properties.background = "${components.tabs.tab_bar_background}"
+properties.border = "${components.tabs.tab_bar_border}"
+properties.top = "0px"
+
+[[rules]]
+selector = "QTabBar#EditorTabBar"
+properties.background = "${components.tabs.tab_bar_background}"
+properties.border = "${components.tabs.tab_bar_border}"
+
+[[rules]]
 selector = "QTabWidget::pane"
 properties.border = "${components.tabs.tab_pane_border_width} solid ${components.tabs.tab_pane_border_color}"
 properties.background = "${components.tabs.tab_pane_background}"
@@ -500,6 +523,7 @@ properties.background = "${components.tabs.tab_button_background}"
 properties.color = "${components.tabs.tab_button_text}"
 properties.border = "${components.tabs.tab_button_border_width} solid ${components.tabs.tab_button_border_color}"
 properties.border-bottom = "${components.tabs.tab_button_border_bottom}"
+properties.border-top = "${components.tabs.tab_button_border_top}"
 properties.padding = "${components.tabs.tab_button_padding}"
 properties.margin-right = "${components.tabs.tab_button_margin_right}"
 properties.border-top-left-radius = "${components.tabs.tab_button_radius_top_left}"
@@ -663,7 +687,6 @@ properties.qproperty-linkColor = "${colors.terminal_link}"
 selector = "QToolBar[surface=\"terminal-toolbar\"]"
 properties.background = "${colors.bg_terminal_toolbar_shell}"
 properties.border = "none"
-properties.border-bottom = "${metrics.border_width} solid ${colors.terminal_border}"
 properties.spacing = "${spacing.terminal_toolbar_spacing}"
 properties.padding = "${spacing.terminal_toolbar_padding}"
 

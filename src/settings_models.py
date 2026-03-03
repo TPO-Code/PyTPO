@@ -250,6 +250,10 @@ class IdeEditorSettings(TypedDict, total=False):
     background_image_brightness: int
     background_tint_color: str
     background_tint_strength: int
+    gutter_background_color: str
+    gutter_foreground_color: str
+    gutter_active_foreground_color: str
+    gutter_fold_marker_color: str
     editor_dirty_background: str
     editor_uncommitted_background: str
     open_created_files: bool
@@ -281,6 +285,8 @@ class IdeSettings(TypedDict, total=False):
     theme: str
     font_size: int
     font_family: str
+    tree_font_size: int
+    tree_font_family: str
     window: IdeWindowSettings
     run: RunSettings
     projects: IdeProjectHistorySettings
@@ -439,9 +445,11 @@ def default_ide_settings() -> IdeSettings:
         },
     ]
     defaults: IdeSettings = {
-        "theme": "Dark",
+        "theme": "Default",
         "font_size": 10,
         "font_family": "",
+        "tree_font_size": 10,
+        "tree_font_family": "",
         "window": {
             "use_native_chrome": False,
             "show_title_in_custom_toolbar": True,
@@ -489,6 +497,10 @@ def default_ide_settings() -> IdeSettings:
             "background_image_brightness": 100,
             "background_tint_color": "#000000",
             "background_tint_strength": 0,
+            "gutter_background_color": "",
+            "gutter_foreground_color": "",
+            "gutter_active_foreground_color": "",
+            "gutter_fold_marker_color": "",
             "editor_dirty_background": "#ffcc0030",
             "editor_uncommitted_background": "#ff4d4d24",
             "open_created_files": True,

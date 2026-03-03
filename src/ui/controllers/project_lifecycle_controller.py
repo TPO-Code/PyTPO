@@ -243,9 +243,20 @@ class ProjectLifecycleController:
             time.sleep(0.05)
         return False
 
+    def _persist_window_layout_before_handoff(self) -> None:
+        persister = getattr(self.ide, "_persist_window_and_dock_layout", None)
+        if not callable(persister):
+            return
+        try:
+            persister()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
     def _open_project_in_current_window(self, project_path: str) -> bool:
         if not self._confirm_save_modified_editors():
             return False
+        self._persist_window_layout_before_handoff()
         if not self._launch_project_window(project_path):
             return False
         hidden_for_handoff = False
@@ -282,6 +293,7 @@ class ProjectLifecycleController:
             return
         if not self._confirm_save_modified_editors():
             return
+        self._persist_window_layout_before_handoff()
         if not self._launch_no_project_window():
             return
         no_project_key = self.no_project_instance_key()

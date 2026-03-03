@@ -221,6 +221,8 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
     "font_family": "font_family",
+    "tree_font_size": "tree_font_size",
+    "tree_font_family": "tree_font_family",
     "window": "window",
     "window.use_native_chrome": "window.use_native_chrome",
     "window.show_title_in_custom_toolbar": "window.show_title_in_custom_toolbar",
@@ -277,6 +279,10 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "editor.background_image_brightness": "editor.background_image_brightness",
     "editor.background_tint_color": "editor.background_tint_color",
     "editor.background_tint_strength": "editor.background_tint_strength",
+    "editor.gutter_background_color": "editor.gutter_background_color",
+    "editor.gutter_foreground_color": "editor.gutter_foreground_color",
+    "editor.gutter_active_foreground_color": "editor.gutter_active_foreground_color",
+    "editor.gutter_fold_marker_color": "editor.gutter_fold_marker_color",
     "editor.editor_dirty_background": "editor.editor_dirty_background",
     "editor.editor_uncommitted_background": "editor.editor_uncommitted_background",
     "editor.use_tabs": "editor.use_tabs",
@@ -307,6 +313,8 @@ IDE_KEY_PREFIXES: tuple[str, ...] = (
     "theme",
     "font_size",
     "font_family",
+    "tree_font_size",
+    "tree_font_family",
     "window",
     "run",
     "projects",
@@ -476,6 +484,8 @@ class SettingsManager:
             "theme",
             "font_size",
             "font_family",
+            "tree_font_size",
+            "tree_font_family",
             "window",
             "run",
             "projects",
@@ -507,6 +517,9 @@ class SettingsManager:
             if key in {
                 "theme",
                 "font_size",
+                "font_family",
+                "tree_font_size",
+                "tree_font_family",
                 "window",
                 "run",
                 "projects",
@@ -955,12 +968,21 @@ class SettingsManager:
         file_templates_present_on_disk = self._ide_file_contains_top_level_key("file_templates")
 
         theme = data.get("theme")
-        data["theme"] = str(theme).strip() if isinstance(theme, str) and theme.strip() else "Dark"
+        data["theme"] = str(theme).strip() if isinstance(theme, str) and theme.strip() else "Default"
 
         try:
             data["font_size"] = max(6, min(48, int(data.get("font_size", 10))))
         except Exception:
             data["font_size"] = 10
+        font_family = data.get("font_family")
+        data["font_family"] = str(font_family).strip() if isinstance(font_family, str) else ""
+
+        try:
+            data["tree_font_size"] = max(6, min(48, int(data.get("tree_font_size", 10))))
+        except Exception:
+            data["tree_font_size"] = 10
+        tree_font_family = data.get("tree_font_family")
+        data["tree_font_family"] = str(tree_font_family).strip() if isinstance(tree_font_family, str) else ""
 
         window = data.get("window")
         if not isinstance(window, dict):
@@ -1202,6 +1224,22 @@ class SettingsManager:
             )
         except Exception:
             editor_cfg["background_tint_strength"] = 0
+        gutter_bg = str(editor_cfg.get("gutter_background_color") or "").strip()
+        if gutter_bg and not _EDITOR_BACKGROUND_HEX_RE.fullmatch(gutter_bg):
+            gutter_bg = ""
+        editor_cfg["gutter_background_color"] = gutter_bg
+        gutter_fg = str(editor_cfg.get("gutter_foreground_color") or "").strip()
+        if gutter_fg and not _EDITOR_BACKGROUND_HEX_RE.fullmatch(gutter_fg):
+            gutter_fg = ""
+        editor_cfg["gutter_foreground_color"] = gutter_fg
+        gutter_fg_active = str(editor_cfg.get("gutter_active_foreground_color") or "").strip()
+        if gutter_fg_active and not _EDITOR_BACKGROUND_HEX_RE.fullmatch(gutter_fg_active):
+            gutter_fg_active = ""
+        editor_cfg["gutter_active_foreground_color"] = gutter_fg_active
+        gutter_fold = str(editor_cfg.get("gutter_fold_marker_color") or "").strip()
+        if gutter_fold and not _EDITOR_BACKGROUND_HEX_RE.fullmatch(gutter_fold):
+            gutter_fold = ""
+        editor_cfg["gutter_fold_marker_color"] = gutter_fold
         dirty_bg = str(editor_cfg.get("editor_dirty_background") or "#ffcc0030").strip() or "#ffcc0030"
         if not _EDITOR_BACKGROUND_HEX_RE.fullmatch(dirty_bg):
             dirty_bg = "#ffcc0030"

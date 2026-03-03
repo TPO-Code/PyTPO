@@ -613,6 +613,14 @@ class SpellcheckManager(QObject):
     def _coerce_spellcheck_widget(self, widget: object) -> EditorWidget | TDocDocumentWidget | None:
         if isinstance(widget, (EditorWidget, TDocDocumentWidget)):
             return widget
+        getter = getattr(widget, "editor_widget", None)
+        if callable(getter):
+            try:
+                resolved = getter()
+            except Exception:
+                resolved = None
+            if isinstance(resolved, (EditorWidget, TDocDocumentWidget)):
+                return resolved
         return None
 
     def _apply_visual_settings_to_open_widgets(self) -> None:

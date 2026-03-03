@@ -385,6 +385,10 @@ class CodeEditor(QPlainTextEdit):
         self._editor_background_image_brightness = 100
         self._editor_background_tint_color = QColor("#000000")
         self._editor_background_tint_strength = 0
+        self._gutter_background_color = QColor()
+        self._gutter_foreground_color = QColor()
+        self._gutter_active_foreground_color = QColor()
+        self._gutter_fold_marker_color = QColor()
         self._editor_background_source_pixmap: QPixmap | None = None
         self._editor_background_cache_size = QSize()
         self._editor_background_cache_pixmap: QPixmap | None = None
@@ -1088,9 +1092,17 @@ class CodeEditor(QPlainTextEdit):
         background_image_brightness: int = 100,
         background_tint_color: str | QColor = "#000000",
         background_tint_strength: int = 0,
+        gutter_background_color: str | QColor | None = None,
+        gutter_foreground_color: str | QColor | None = None,
+        gutter_active_foreground_color: str | QColor | None = None,
+        gutter_fold_marker_color: str | QColor | None = None,
     ) -> None:
         base = self._resolve_background_color(background_color, "#252526")
         tint = self._resolve_background_color(background_tint_color, "#000000")
+        gutter_bg = self._resolve_optional_color(gutter_background_color)
+        gutter_fg = self._resolve_optional_color(gutter_foreground_color)
+        gutter_fg_active = self._resolve_optional_color(gutter_active_foreground_color)
+        gutter_fold = self._resolve_optional_color(gutter_fold_marker_color)
         scale_mode = str(background_image_scale_mode or "stretch").strip().lower()
         if scale_mode not in {"stretch", "fit_width", "fit_height", "tile"}:
             scale_mode = "stretch"
@@ -1119,12 +1131,20 @@ class CodeEditor(QPlainTextEdit):
             or tint_strength != self._editor_background_tint_strength
             or image_path != self._editor_background_image_path
             or source_pixmap is not self._editor_background_source_pixmap
+            or gutter_bg != self._gutter_background_color
+            or gutter_fg != self._gutter_foreground_color
+            or gutter_fg_active != self._gutter_active_foreground_color
+            or gutter_fold != self._gutter_fold_marker_color
         )
         if not changed:
             return
 
         self._editor_background_color = base
         self._editor_background_tint_color = tint
+        self._gutter_background_color = gutter_bg
+        self._gutter_foreground_color = gutter_fg
+        self._gutter_active_foreground_color = gutter_fg_active
+        self._gutter_fold_marker_color = gutter_fold
         self._editor_background_scale_mode = scale_mode
         self._editor_background_image_brightness = brightness
         self._editor_background_tint_strength = tint_strength
@@ -1146,6 +1166,44 @@ class CodeEditor(QPlainTextEdit):
         if not color.isValid():
             color = QColor(fallback)
         return color
+
+    @staticmethod
+    def _resolve_optional_color(value: str | QColor | None) -> QColor:
+        if value is None:
+            return QColor()
+        if isinstance(value, QColor):
+            color = QColor(value)
+        else:
+            text = str(value or "").strip()
+            if not text:
+                return QColor()
+            color = QColor(text)
+        return color if color.isValid() else QColor()
+
+    def _resolved_gutter_background_color(self) -> QColor:
+        if self._gutter_background_color.isValid():
+            return QColor(self._gutter_background_color)
+        gutter = QColor(self._editor_background_color)
+        if gutter.lightness() < 128:
+            return gutter.darker(125)
+        return gutter.darker(108)
+
+    def _resolved_gutter_number_color(self, gutter: QColor, *, active: bool = False) -> QColor:
+        if active and self._gutter_active_foreground_color.isValid():
+            return QColor(self._gutter_active_foreground_color)
+        if self._gutter_foreground_color.isValid():
+            return QColor(self._gutter_foreground_color)
+        number_color = QColor(gutter)
+        if number_color.lightness() < 128:
+            return number_color.lighter(155)
+        return number_color.darker(155)
+
+    def _resolved_gutter_fold_marker_color(self, number_color: QColor) -> QColor:
+        if self._gutter_fold_marker_color.isValid():
+            return QColor(self._gutter_fold_marker_color)
+        marker_color = QColor(number_color)
+        marker_color.setAlpha(220)
+        return marker_color
 
     def _build_editor_background_pixmap(self, size: QSize) -> QPixmap | None:
         source = self._editor_background_source_pixmap
@@ -2123,26 +2181,22 @@ class CodeEditor(QPlainTextEdit):
 
     def lineNumberAreaPaintEvent(self, event):
         painter = QPainter(self.lineNumberArea)
-        gutter = QColor(self._editor_background_color)
-        if gutter.lightness() < 128:
-            gutter = gutter.darker(125)
-        else:
-            gutter = gutter.darker(108)
+        gutter = self._resolved_gutter_background_color()
         painter.fillRect(event.rect(), gutter)
 
         block = self.firstVisibleBlock()
         blockNumber = block.blockNumber()
+        current_block_no = int(self.textCursor().blockNumber())
         top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
         bottom = top + self.blockBoundingRect(block).height()
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 number = str(blockNumber + 1)
-                number_color = QColor(gutter)
-                if number_color.lightness() < 128:
-                    number_color = number_color.lighter(155)
-                else:
-                    number_color = number_color.darker(155)
+                number_color = self._resolved_gutter_number_color(
+                    gutter,
+                    active=bool(blockNumber == current_block_no),
+                )
                 painter.setPen(number_color)
                 number_left = int(self._fold_gutter_width if self._fold_provider is not None else 0)
                 painter.drawText(
@@ -2155,8 +2209,7 @@ class CodeEditor(QPlainTextEdit):
                 )
                 if self._fold_provider is not None and blockNumber in self._fold_ranges:
                     marker = self._fold_marker_rect(int(top), self.fontMetrics().height())
-                    marker_color = QColor(number_color)
-                    marker_color.setAlpha(220)
+                    marker_color = self._resolved_gutter_fold_marker_color(number_color)
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(marker_color)
                     if blockNumber in self._folded_starts:

@@ -133,7 +133,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app = QApplication([sys.argv[0], *cli_args])
-    app.setStyle("Fusion")
+    #app.setStyle("Fusion")
+    app.setStyleSheet("border:0px")
     app.setApplicationName(PythonIDE.APP_NAME)
     initial_display = f"{PythonIDE.APP_NAME} [{'Welcome' if start_no_project_mode else Path(startup_project or '').name}]"
     app.setApplicationDisplayName(initial_display)

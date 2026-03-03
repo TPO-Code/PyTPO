@@ -199,3 +199,9 @@ class ThemeController:
             self.ide.theme_name = resolved_name
             self.settings_manager.set("theme", resolved_name, "ide")
             self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+        apply_tree_fonts = getattr(self.ide, "_apply_tree_font_settings_to_all", None)
+        if callable(apply_tree_fonts):
+            try:
+                apply_tree_fonts()
+            except Exception:
+                pass
