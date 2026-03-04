@@ -92,6 +92,26 @@ index: on
 
 `index: off` excludes a document from symbol-reference indexing.
 
+## Markdown headings in `.tdoc`
+
+TDOC documents support markdown-style ATX headings:
+
+- `# Heading 1`
+- `## Heading 2`
+- `### Heading 3`
+
+Behavior:
+
+- Heading markers (`#`, `##`, `###`) are shown while editing the heading line.
+- When the caret is outside the heading line, the markers are hidden and the line is rendered as a heading.
+- Rendered heading levels use different font sizes (H1 > H2 > H3).
+- Saving preserves the original raw heading markup.
+
+Notes:
+
+- Heading parsing is line-based and expects heading markers at the start of the line (optionally with up to 3 leading spaces).
+- A space is required after the heading markers (for example `## Title`).
+
 ## Navigation
 
 - `Ctrl+Click` a file link to open that file in the IDE (and line for `#Lnn` links where applicable).
@@ -114,14 +134,17 @@ Generated content is placed below a dashed separator:
 
 ```txt
 --------------------
-Index
-    ...
+# Index
+## ...
 ```
 
 - Manual notes above the separator are preserved.
 - If no separator exists, one is created.
 - Legacy HTML auto markers are removed if present and are not used anymore.
-- Indentation is 4 spaces per level.
+- Generated headers use markdown heading markup (`#`, `##`) so they render as headings in the TDOC editor.
+  - top-level index title: `# Index`
+  - generated sections: `## <Section Name>`
+- Detail rows under each heading are indented with 4 spaces.
 - Generated sections include:
   - symbol groups by section
   - `Unresolved`
@@ -133,11 +156,11 @@ Index
 Example structure (with clickable link markup preserved):
 
 ```txt
-    Characters:
-        [Ari Vale]
-            Aliases: [Ari Vale], [Ari], [A. Vale]
-            References:
-                [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6], [9|demo/chapter_01.tdoc#L9]
+## Characters
+    [Ari Vale]
+        Aliases: [Ari Vale], [Ari], [A. Vale]
+        References:
+            [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6], [9|demo/chapter_01.tdoc#L9]
 ```
 
 ## Problems panel integration and quick fixes

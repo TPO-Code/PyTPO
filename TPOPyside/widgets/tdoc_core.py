@@ -68,6 +68,7 @@ SECTION_HEADER_PATTERN = re.compile(r"^(?P<section>[^=#].*?)\s*:\s*$")
 FILE_LINK_PATTERN = re.compile(r"^(?P<path>.+?\.tdoc)(?:#L(?P<line>\d+))?$", re.IGNORECASE)
 RULE_LINE_PATTERN = re.compile(r"^(?P<rule>include|ignore)\s*:\s*(?P<patterns>.*)$", re.IGNORECASE)
 FRONTMATTER_KV_PATTERN = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$")
+MARKDOWN_HEADING_PATTERN = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<hashes>#{1,3})[ \t]+(?P<title>.+?)\s*$")
 _WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 
 _TDOC_LINT_VISUAL_DEFAULTS = {
@@ -1349,7 +1350,7 @@ class TDocProjectIndex:
             marker_lines = []
         section_header_warnings = TDocProjectIndex._section_header_capitalization_warnings(marker_lines)
 
-        lines = ["Index"]
+        lines = ["# Index", ""]
         indent = " " * 4
 
         if not symbol_refs and not unresolved_refs:
@@ -1361,63 +1362,63 @@ class TDocProjectIndex:
                 section_to_symbols[section].append(symbol)
 
             for section in sorted(section_to_symbols.keys(), key=str.casefold):
-                lines.append(f"{indent}{section}:")
+                lines.append(f"## {section}")
                 for symbol in section_to_symbols[section]:
                     refs = sorted(symbol_refs[symbol], key=lambda x: (x[0].casefold(), x[1]))
                     aliases = symbol_to_aliases.get(symbol, [symbol])
                     metadata = symbol_to_metadata.get(symbol, {})
-                    lines.append(f"{indent * 2}[{symbol}]")
-                    lines.append(f"{indent * 3}Aliases: " + ", ".join(f"[{alias}]" for alias in aliases))
+                    lines.append(f"{indent}[{symbol}]")
+                    lines.append(f"{indent * 2}Aliases: " + ", ".join(f"[{alias}]" for alias in aliases))
                     if metadata:
                         lines.append(
-                            f"{indent * 3}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items())
+                            f"{indent * 2}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items())
                         )
-                    lines.append(f"{indent * 3}References:")
+                    lines.append(f"{indent * 2}References:")
                     for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
                         line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
-                        lines.append(f"{indent * 4}[{rel_path}]: {line_links}")
+                        lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
             if unresolved_refs:
-                lines.append(f"{indent}Unresolved:")
-                lines.append(f"{indent * 2}These symbols are used but not defined in .tdocproject.")
+                lines.append("## Unresolved")
+                lines.append(f"{indent}These symbols are used but not defined in .tdocproject.")
                 for unresolved in sorted(unresolved_refs.keys(), key=str.casefold):
                     refs = sorted(unresolved_refs[unresolved], key=lambda x: (x[0].casefold(), x[1]))
-                    lines.append(f"{indent * 2}[{unresolved}]")
-                    lines.append(f"{indent * 3}References:")
+                    lines.append(f"{indent}[{unresolved}]")
+                    lines.append(f"{indent * 2}References:")
                     for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
                         line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
-                        lines.append(f"{indent * 4}[{rel_path}]: {line_links}")
+                        lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
         if doc_metadata:
-            lines.append(f"{indent}Documents:")
+            lines.append("## Documents")
             for rel_path in sorted(doc_metadata.keys(), key=str.casefold):
                 metadata = doc_metadata[rel_path]
-                lines.append(f"{indent * 2}[{rel_path}]")
+                lines.append(f"{indent}[{rel_path}]")
                 if metadata:
-                    lines.append(f"{indent * 3}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items()))
+                    lines.append(f"{indent * 2}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items()))
                 else:
-                    lines.append(f"{indent * 3}Metadata: (none)")
-                lines.append(f"{indent * 3}Indexing: " + ("on" if is_index_enabled(metadata) else "off"))
+                    lines.append(f"{indent * 2}Metadata: (none)")
+                lines.append(f"{indent * 2}Indexing: " + ("on" if is_index_enabled(metadata) else "off"))
             lines.append("")
             lines.append("")
 
         if section_header_warnings:
-            lines.append(f"{indent}Project Warnings:")
+            lines.append("## Project Warnings")
             for issue in section_header_warnings:
                 lines.append(
-                    f"{indent * 2}{PROJECT_MARKER_FILENAME}#L{issue['line']} {issue['message']}"
+                    f"{indent}{PROJECT_MARKER_FILENAME}#L{issue['line']} {issue['message']}"
                 )
             lines.append("")
             lines.append("")
 
         if frontmatter_issues:
-            lines.append(f"{indent}Frontmatter Warnings:")
+            lines.append("## Frontmatter Warnings")
             for issue in frontmatter_issues:
-                lines.append(f"{indent * 2}[{issue['file']}#L{issue['line']}] {issue['message']}")
+                lines.append(f"{indent}[{issue['file']}#L{issue['line']}] {issue['message']}")
             lines.append("")
             lines.append("")
 
@@ -1698,6 +1699,9 @@ class TDocEditorWidget(QTextEdit):
     LINK_RAW_PROPERTY = QTextCharFormat.UserProperty + 3
     IMAGE_RAW_PROPERTY = QTextCharFormat.UserProperty + 4
     IMAGE_PATH_PROPERTY = QTextCharFormat.UserProperty + 5
+    HEADING_MARKDOWN_PROPERTY = QTextCharFormat.UserProperty + 6
+    HEADING_LEVEL_PROPERTY = QTextCharFormat.UserProperty + 7
+    HEADING_RAW_PROPERTY = QTextCharFormat.UserProperty + 8
     _default_keybindings: dict[str, dict[str, list[str]]] = {
         "general": {
             "action.find": ["Ctrl+F"],
@@ -2035,6 +2039,7 @@ class TDocEditorWidget(QTextEdit):
                 size = int(font.pointSize()) if int(font.pointSize()) > 0 else 10
             font.setPointSize(size)
         self.setFont(font)
+        self._restyle_collapsed_markdown_headings()
 
     def set_editor_indent_preferences(self, *, use_tabs: bool | None = None, indent_width: int | None = None) -> None:
         if indent_width is not None:
@@ -4136,8 +4141,199 @@ class TDocEditorWidget(QTextEdit):
         cursor.insertImage(image_fmt)
         return True
 
+    @staticmethod
+    def _parse_markdown_heading_line(line: str) -> tuple[int, str, int] | None:
+        match = MARKDOWN_HEADING_PATTERN.match(str(line or ""))
+        if not match:
+            return None
+        title = str(match.group("title") or "").strip()
+        if not title:
+            return None
+        hashes = str(match.group("hashes") or "")
+        return len(hashes), title, int(match.start("title"))
+
+    def _heading_point_size_for_level(self, level: int) -> float:
+        try:
+            base = float(self.font().pointSizeF())
+        except Exception:
+            base = -1.0
+        if base <= 0:
+            try:
+                base = float(self.font().pointSize())
+            except Exception:
+                base = 11.0
+        if base <= 0:
+            base = 11.0
+        scale = {1: 1.60, 2: 1.35, 3: 1.18}.get(int(level), 1.0)
+        return max(base, base * scale)
+
+    def _make_markdown_heading_char_format(self, raw_heading: str, level: int) -> QTextCharFormat:
+        lvl = max(1, min(3, int(level)))
+        fmt = QTextCharFormat()
+        heading_font = QFont(self.font())
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(self._heading_point_size_for_level(lvl))
+        fmt.setFont(heading_font)
+        fmt.setProperty(self.HEADING_MARKDOWN_PROPERTY, True)
+        fmt.setProperty(self.HEADING_LEVEL_PROPERTY, lvl)
+        fmt.setProperty(self.HEADING_RAW_PROPERTY, str(raw_heading or ""))
+        return fmt
+
+    def _insert_inline_tokens_for_plain_line(self, cursor: QTextCursor, line_text: str) -> None:
+        line = str(line_text or "")
+        last_pos = 0
+        for match in INLINE_TOKEN_PATTERN.finditer(line):
+            if match.start() < last_pos:
+                continue
+
+            pre_text = line[last_pos:match.start()]
+            if pre_text:
+                cursor.insertText(pre_text, QTextCharFormat())
+
+            raw_image = match.group("image")
+            if raw_image is not None:
+                if not self._insert_inline_image_from_tag(cursor, raw_image):
+                    cursor.insertText(match.group(0), QTextCharFormat())
+                last_pos = match.end()
+                continue
+
+            raw_label = match.group("link") or ""
+            shown = link_display_text(raw_label)
+            if shown:
+                cursor.insertText(shown, self._make_link_char_format(raw_label))
+            else:
+                cursor.insertText(match.group(0), QTextCharFormat())
+            last_pos = match.end()
+
+        if last_pos < len(line):
+            cursor.insertText(line[last_pos:], QTextCharFormat())
+
+    def _insert_tdoc_line(self, cursor: QTextCursor, raw_line: str) -> None:
+        line = str(raw_line or "")
+        parsed_heading = self._parse_markdown_heading_line(line)
+        if parsed_heading:
+            level, title, _prefix_len = parsed_heading
+            cursor.insertText(title, self._make_markdown_heading_char_format(line, level))
+            return
+        self._insert_inline_tokens_for_plain_line(cursor, line)
+
+    def _heading_raw_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        selected_text = str(tc.selectedText() or "")
+        if selected_text in {"\n", "\r", "\u2029"}:
+            return None
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.HEADING_MARKDOWN_PROPERTY):
+            return None
+        value = fmt.property(self.HEADING_RAW_PROPERTY)
+        if not isinstance(value, str):
+            return None
+        return value
+
+    def _heading_level_at_doc_pos(self, pos: int) -> int:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return 0
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return 0
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.HEADING_MARKDOWN_PROPERTY):
+            return 0
+        try:
+            return max(1, min(3, int(fmt.property(self.HEADING_LEVEL_PROPERTY))))
+        except Exception:
+            return 0
+
+    def _collapsed_markdown_heading_info_for_block(self, block) -> tuple[str, int] | None:
+        if not block.isValid():
+            return None
+        text = str(block.text() or "")
+        if not text:
+            return None
+        start = int(block.position())
+        raw = self._heading_raw_at_doc_pos(start)
+        level = self._heading_level_at_doc_pos(start)
+        if not raw or level <= 0:
+            return None
+        for offset in range(len(text)):
+            if self._heading_raw_at_doc_pos(start + offset) != raw:
+                return None
+        return raw, level
+
+    def _serialize_block_to_tdoc(self, block) -> str:
+        heading_info = self._collapsed_markdown_heading_info_for_block(block)
+        if heading_info:
+            return str(heading_info[0])
+
+        output: list[str] = []
+        iter_ = block.begin()
+        while not iter_.atEnd():
+            fragment = iter_.fragment()
+            text = fragment.text()
+            fmt = fragment.charFormat()
+
+            if fmt.isImageFormat():
+                raw = fmt.property(self.IMAGE_RAW_PROPERTY) if fmt.hasProperty(self.IMAGE_RAW_PROPERTY) else ""
+                raw_text = str(raw or "").strip()
+                if not raw_text:
+                    try:
+                        raw_text = str(fmt.toImageFormat().name() or "").strip()
+                    except Exception:
+                        raw_text = ""
+                if raw_text:
+                    output.append(f"![{raw_text}]")
+                else:
+                    output.append(text)
+            elif fmt.hasProperty(self.LINK_PROPERTY):
+                raw = fmt.property(self.LINK_RAW_PROPERTY) if fmt.hasProperty(self.LINK_RAW_PROPERTY) else text
+                raw_text = str(raw) if isinstance(raw, str) else str(text)
+                output.append(f"[{raw_text}]")
+            else:
+                output.append(text)
+            iter_ += 1
+        return "".join(output)
+
+    def _restyle_collapsed_markdown_headings(self) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(doc)
+            edit.beginEditBlock()
+            block = doc.begin()
+            while block.isValid():
+                info = self._collapsed_markdown_heading_info_for_block(block)
+                if info:
+                    raw, level = info
+                    start = int(block.position())
+                    end = start + len(str(block.text() or ""))
+                    if end > start:
+                        edit.setPosition(start)
+                        edit.setPosition(end, QTextCursor.KeepAnchor)
+                        edit.setCharFormat(self._make_markdown_heading_char_format(raw, level))
+                block = block.next()
+            edit.endEditBlock()
+        finally:
+            self._is_internal_change = was_internal
+
     def load_tdoc(self, text):
-        """Parses [Label] links and renders only label text as clickable."""
+        """Parses TDOC links/images and markdown-style headings for display."""
         was_undo_enabled = bool(self.isUndoRedoEnabled())
         if was_undo_enabled:
             self.setUndoRedoEnabled(False)
@@ -4148,37 +4344,13 @@ class TDocEditorWidget(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
 
-        last_pos = 0
-        for match in INLINE_TOKEN_PATTERN.finditer(text):
-            if match.start() < last_pos:
-                continue
-
-            pre_text = text[last_pos:match.start()]
-            if pre_text:
-                cursor.insertText(pre_text, QTextCharFormat())
-
-            raw_image = match.group("image")
-            if raw_image is not None:
-                if "\n" in raw_image or not self._insert_inline_image_from_tag(cursor, raw_image):
-                    cursor.insertText(match.group(0), QTextCharFormat())
-                last_pos = match.end()
-                continue
-            raw_label = match.group("link") or ""
-            if "\n" in raw_label:
-                cursor.insertText(match.group(0), QTextCharFormat())
-                last_pos = match.end()
-                continue
-            shown = link_display_text(raw_label)
-            if not shown:
-                cursor.insertText(match.group(0), QTextCharFormat())
-                last_pos = match.end()
-                continue
-
-            cursor.insertText(shown, self._make_link_char_format(raw_label))
-            last_pos = match.end()
-
-        if last_pos < len(text):
-            cursor.insertText(text[last_pos:], QTextCharFormat())
+        raw_text = str(text or "")
+        lines = raw_text.split("\n")
+        for idx, line in enumerate(lines):
+            raw_line = line[:-1] if line.endswith("\r") else line
+            self._insert_tdoc_line(cursor, raw_line)
+            if idx < len(lines) - 1:
+                cursor.insertText("\n", QTextCharFormat())
 
         cursor.endEditBlock()
         self.document().setModified(False)
@@ -4193,38 +4365,13 @@ class TDocEditorWidget(QTextEdit):
         self._schedule_occurrence_marker_refresh()
 
     def save_tdoc(self):
-        """Serializes document back to plain [Label] TDoc syntax."""
+        """Serializes document back to TDOC syntax."""
         output = []
         doc = self.document()
         block = doc.begin()
 
         while block.isValid():
-            iter_ = block.begin()
-            while not iter_.atEnd():
-                fragment = iter_.fragment()
-                text = fragment.text()
-                fmt = fragment.charFormat()
-
-                if fmt.isImageFormat():
-                    raw = fmt.property(self.IMAGE_RAW_PROPERTY) if fmt.hasProperty(self.IMAGE_RAW_PROPERTY) else ""
-                    raw_text = str(raw or "").strip()
-                    if not raw_text:
-                        try:
-                            raw_text = str(fmt.toImageFormat().name() or "").strip()
-                        except Exception:
-                            raw_text = ""
-                    if raw_text:
-                        output.append(f"![{raw_text}]")
-                    else:
-                        output.append(text)
-                elif fmt.hasProperty(self.LINK_PROPERTY):
-                    raw = fmt.property(self.LINK_RAW_PROPERTY) if fmt.hasProperty(self.LINK_RAW_PROPERTY) else text
-                    raw_text = str(raw) if isinstance(raw, str) else str(text)
-                    output.append(f"[{raw_text}]")
-                else:
-                    output.append(text)
-                iter_ += 1
-
+            output.append(self._serialize_block_to_tdoc(block))
             block = block.next()
             if block.isValid():
                 output.append("\n")
@@ -4577,6 +4724,162 @@ class TDocEditorWidget(QTextEdit):
         self._last_cursor_pos = int(self.textCursor().position())
         return True
 
+    def _heading_span_at_cursor(
+        self,
+        cursor: QTextCursor | None = None,
+    ) -> tuple[int, int, str, int] | None:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if cur.hasSelection():
+            return None
+        pos = int(cur.position())
+
+        left_raw = self._heading_raw_at_doc_pos(pos - 1)
+        right_raw = self._heading_raw_at_doc_pos(pos)
+        if not left_raw and not right_raw:
+            return None
+        raw = str(left_raw or right_raw or "")
+        if not raw:
+            return None
+        probe = pos - 1 if left_raw else pos
+        level = self._heading_level_at_doc_pos(probe)
+        if level <= 0:
+            return None
+
+        probe_block = self.document().findBlock(probe)
+        if not probe_block.isValid():
+            return None
+        block_start = int(probe_block.position())
+        block_end = block_start + len(str(probe_block.text() or ""))
+        if probe < block_start or probe >= block_end:
+            return None
+
+        start = probe
+        while start > block_start:
+            if self._heading_raw_at_doc_pos(start - 1) != raw:
+                break
+            start -= 1
+
+        end = probe + 1
+        while end < block_end:
+            if self._heading_raw_at_doc_pos(end) != raw:
+                break
+            end += 1
+
+        if end <= start:
+            return None
+        return start, end, raw, level
+
+    def _expand_markdown_heading_for_editing(
+        self,
+        cursor: QTextCursor | None = None,
+    ) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        span = self._heading_span_at_cursor(cur)
+        if not span:
+            return False
+        start, end, raw, _level = span
+        pos = int(cur.position())
+        if pos < start or pos > end:
+            return False
+
+        parsed = self._parse_markdown_heading_line(raw)
+        if not parsed:
+            return False
+        _raw_level, title, prefix_len = parsed
+        title_len = len(title)
+        relative = max(0, min(pos - start, end - start))
+        if relative >= title_len:
+            mapped = len(raw)
+        else:
+            mapped = prefix_len + relative
+
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            edit.insertText(raw, QTextCharFormat())
+            edit.endEditBlock()
+
+            new_cursor = self.textCursor()
+            max_pos = max(0, int(self.document().characterCount()) - 1)
+            new_cursor.setPosition(max(0, min(start + mapped, max_pos)))
+            self.setTextCursor(new_cursor)
+        finally:
+            self._is_internal_change = was_internal
+        self._last_cursor_pos = int(self.textCursor().position())
+        return True
+
+    def _collapse_markdown_heading_on_cursor_move(self, old_pos: int, new_pos: int) -> bool:
+        old_i = int(old_pos)
+        new_i = int(new_pos)
+        candidates = [old_i]
+        if new_i > old_i:
+            candidates.append(old_i - 1)
+        elif new_i < old_i:
+            candidates.append(old_i + 1)
+
+        checked_blocks: set[int] = set()
+        for candidate in candidates:
+            if candidate < 0:
+                continue
+            block = self.document().findBlock(candidate)
+            if not block.isValid():
+                continue
+            block_no = int(block.blockNumber())
+            if block_no in checked_blocks:
+                continue
+            checked_blocks.add(block_no)
+
+            # Already-collapsed headings don't need another collapse pass.
+            if self._collapsed_markdown_heading_info_for_block(block):
+                continue
+
+            raw_line = self._serialize_block_to_tdoc(block)
+            parsed = self._parse_markdown_heading_line(raw_line)
+            if not parsed:
+                continue
+
+            level, title, _prefix_len = parsed
+            if not title:
+                continue
+
+            block_start = int(block.position())
+            block_end = block_start + len(str(block.text() or ""))
+            if block_start <= new_i <= block_end:
+                return False
+
+            adjusted_pos = new_i
+            current_len = max(0, block_end - block_start)
+            delta = len(title) - current_len
+            if adjusted_pos > block_end:
+                adjusted_pos += delta
+
+            was_internal = bool(self._is_internal_change)
+            self._is_internal_change = True
+            try:
+                edit = QTextCursor(self.document())
+                edit.beginEditBlock()
+                edit.setPosition(block_start)
+                edit.setPosition(block_end, QTextCursor.KeepAnchor)
+                edit.removeSelectedText()
+                edit.insertText(title, self._make_markdown_heading_char_format(raw_line, level))
+                edit.endEditBlock()
+
+                max_pos = max(0, int(self.document().characterCount()) - 1)
+                safe_pos = max(0, min(adjusted_pos, max_pos))
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(safe_pos)
+                self.setTextCursor(new_cursor)
+            finally:
+                self._is_internal_change = was_internal
+            self._last_cursor_pos = int(self.textCursor().position())
+            return True
+        return False
+
     def _on_cursor_position_changed_for_link_editing(self) -> None:
         if bool(self._is_internal_change):
             self._last_cursor_pos = int(self.textCursor().position())
@@ -4584,7 +4887,11 @@ class TDocEditorWidget(QTextEdit):
         old_pos = int(self._last_cursor_pos)
         new_pos = int(self.textCursor().position())
         if old_pos != new_pos:
+            self._collapse_markdown_heading_on_cursor_move(old_pos, new_pos)
+            new_pos = int(self.textCursor().position())
             self._collapse_bracket_link_on_cursor_move(old_pos, new_pos)
+            new_pos = int(self.textCursor().position())
+        self._expand_markdown_heading_for_editing(self.textCursor())
         self._expand_link_for_editing(self.textCursor())
         self._on_cursor_moved_inline_suggestion()
         self._last_cursor_pos = int(self.textCursor().position())

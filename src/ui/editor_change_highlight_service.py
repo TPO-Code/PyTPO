@@ -297,7 +297,7 @@ class EditorChangeHighlightService(QObject):
         if state == "clean":
             return set()
         if state == "untracked":
-            return self._all_line_numbers(disk_text)
+            return set()
 
         repo_root = self._repo_root_for_path(file_path)
         if not repo_root:
@@ -314,7 +314,7 @@ class EditorChangeHighlightService(QObject):
             self._tracked_cache[key] = bool(tracked)
 
         if not tracked:
-            return self._all_line_numbers(disk_text)
+            return set()
 
         head_text = self._head_text_cache.get(key)
         if key not in self._head_text_cache:
