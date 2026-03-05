@@ -165,6 +165,12 @@ class ExplorerController:
             act_toggle_folders.triggered.connect(
                 lambda: self._set_folders_excluded_bulk(folder_paths, excluded=not all_folders_excluded)
             )
+            repo_root = self._repo_root_for_path(folder_paths[0])
+            if repo_root and all(self._path_has_prefix(path, repo_root) for path in folder_paths):
+                act_track_visible = menu.addAction("Track Visible Files in Selected Folders")
+                act_track_visible.triggered.connect(
+                    lambda: self._track_visible_untracked_paths_in_git(folder_paths, repo_root=repo_root)
+                )
 
     def _copy_tree_paths(self, path: str | None):
         selected = self._selected_tree_paths()
@@ -718,6 +724,14 @@ class ExplorerController:
         )
         act_toggle_excluded.triggered.connect(lambda: self._toggle_folder_excluded(folder_path))
 
+        repo_root = self._repo_root_for_path(folder_path)
+        if repo_root and self._path_has_prefix(folder_path, repo_root):
+            menu.addSeparator()
+            act_track_visible = menu.addAction("Track Visible Files in Git")
+            act_track_visible.triggered.connect(
+                lambda: self._track_visible_untracked_paths_in_git([folder_path], repo_root=repo_root)
+            )
+
         menu.addSeparator()
 
         act_refresh = menu.addAction("Refresh")
@@ -1043,6 +1057,100 @@ class ExplorerController:
             return not self.git_service.is_tracked_path(root, rel_paths[0])
         except Exception:
             return False
+
+    def _is_path_visible_in_explorer(self, path: str, *, is_dir: bool) -> bool:
+        cpath = self._canonical_path(path)
+        if not self._path_has_prefix(cpath, self.project_root):
+            return False
+        if cpath != self.project_root and self._is_tree_path_excluded(cpath, is_dir):
+            return False
+        parent = self._canonical_path(os.path.dirname(cpath))
+        while parent and parent != cpath:
+            if parent == self.project_root:
+                break
+            if self._is_tree_path_excluded(parent, True):
+                return False
+            next_parent = self._canonical_path(os.path.dirname(parent))
+            if next_parent == parent:
+                break
+            parent = next_parent
+        return True
+
+    def _collect_visible_files_under_folder(self, folder_path: str) -> list[str]:
+        root = self._canonical_path(folder_path)
+        if not os.path.isdir(root):
+            return []
+        if not self._is_path_visible_in_explorer(root, is_dir=True):
+            return []
+
+        collected: list[str] = []
+        for current_root, dir_names, file_names in os.walk(root, topdown=True):
+            current = self._canonical_path(current_root)
+            if current != root and not self._is_path_visible_in_explorer(current, is_dir=True):
+                dir_names[:] = []
+                continue
+
+            kept_dirs: list[str] = []
+            for dirname in dir_names:
+                candidate_dir = self._canonical_path(os.path.join(current, dirname))
+                if self._is_path_visible_in_explorer(candidate_dir, is_dir=True):
+                    kept_dirs.append(dirname)
+            dir_names[:] = kept_dirs
+
+            for filename in file_names:
+                file_path = self._canonical_path(os.path.join(current, filename))
+                if self._is_path_visible_in_explorer(file_path, is_dir=False):
+                    collected.append(file_path)
+
+        collected.sort(key=str.lower)
+        return collected
+
+    def _track_visible_untracked_paths_in_git(self, paths: list[str], *, repo_root: str | None = None) -> None:
+        canonical_targets = self._filter_nested_paths([self._canonical_path(p) for p in paths if isinstance(p, str)])
+        if not canonical_targets:
+            QMessageBox.information(self.ide, "Git Track", "No folder selected.")
+            return
+
+        root = repo_root or self._repo_root_for_path(canonical_targets[0])
+        if not root:
+            QMessageBox.information(self.ide, "Git Track", "No Git repository found for this selection.")
+            return
+
+        visible_files: list[str] = []
+        seen: set[str] = set()
+        for target in canonical_targets:
+            if not self._path_has_prefix(target, root):
+                continue
+            if os.path.isdir(target):
+                candidates = self._collect_visible_files_under_folder(target)
+                for candidate in candidates:
+                    key = candidate.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    visible_files.append(candidate)
+                continue
+            if os.path.isfile(target) and self._is_path_visible_in_explorer(target, is_dir=False):
+                key = target.lower()
+                if key not in seen:
+                    seen.add(key)
+                    visible_files.append(target)
+
+        if not visible_files:
+            QMessageBox.information(self.ide, "Git Track", "No visible files found under the selected folder.")
+            return
+
+        allow_fallback = len(visible_files) <= 80
+        trackable = [
+            path
+            for path in visible_files
+            if self._is_untracked_git_path(path, repo_root=root, allow_fallback=allow_fallback)
+        ]
+        if not trackable:
+            QMessageBox.information(self.ide, "Git Track", "No visible untracked files found under the selected folder.")
+            return
+
+        self.track_paths_in_git(trackable)
 
     def _prompt_simple_name(
         self,
