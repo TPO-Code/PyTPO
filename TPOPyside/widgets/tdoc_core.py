@@ -73,6 +73,10 @@ FRONTMATTER_SCHEMA_RULE_PATTERN = re.compile(
     r"^frontmatter_schema\s*:\s*(?P<path>.*?)\s*$",
     re.IGNORECASE,
 )
+INDEX_GROUP_BY_RULE_PATTERN = re.compile(
+    r"^index_group_by\s*:\s*(?P<mode>.*?)\s*$",
+    re.IGNORECASE,
+)
 FRONTMATTER_KV_PATTERN = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<hashes>#{1,3})[ \t]+(?P<title>.+?)\s*$")
 MARKDOWN_BULLET_PATTERN = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[\*-])[ \t]+(?P<body>.*)$")
@@ -136,6 +140,32 @@ _TDOC_FRONTMATTER_GENERIC_VALUE_SUGGESTIONS = [
     "true",
     "false",
 ]
+_THEME_EDITOR_SEARCH_TOP_MARGIN_PROP = "theme.editor.search.top_margin_min"
+_THEME_EDITOR_OVERVIEW_GAP_PROP = "theme.editor.overview.gap"
+_THEME_EDITOR_SEARCH_TOP_MARGIN_DEFAULT = 30
+_THEME_EDITOR_OVERVIEW_GAP_DEFAULT = 1
+_THEME_PX_RE = re.compile(r"^\s*(-?\d+)\s*(px)?\s*$", re.IGNORECASE)
+
+
+def _coerce_theme_px(value: object, *, default: int, minimum: int = 0) -> int:
+    floor = max(0, int(minimum))
+    fallback = max(floor, int(default))
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return max(floor, int(value))
+    if isinstance(value, float):
+        return max(floor, int(round(value)))
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    match = _THEME_PX_RE.fullmatch(text)
+    if not match:
+        return fallback
+    try:
+        return max(floor, int(match.group(1)))
+    except Exception:
+        return fallback
 
 
 def _build_search_line_edit(editor: "TDocEditorWidget", parent: QWidget, *, role: str) -> QLineEdit:
@@ -500,6 +530,40 @@ class TDocProjectIndex:
         return raw
 
     @staticmethod
+    def _parse_index_group_by_rule(line):
+        m = INDEX_GROUP_BY_RULE_PATTERN.match(str(line or ""))
+        if not m:
+            return None
+        raw = str(m.group("mode") or "").strip().lower()
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            raw = raw[1:-1].strip().lower()
+        return raw
+
+    @staticmethod
+    def _index_group_by_config_from_lines(lines):
+        mode = "none"
+        issues: list[dict] = []
+        for idx, raw in enumerate(lines if isinstance(lines, list) else [], start=1):
+            line = str(raw or "").strip()
+            if not line or line.startswith("#"):
+                continue
+            parsed = TDocProjectIndex._parse_index_group_by_rule(line)
+            if parsed is None:
+                continue
+            if parsed not in {"none", "folder"}:
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "message": "Rule 'index_group_by:' supports only 'none' or 'folder'.",
+                        "line": int(idx),
+                        "file": PROJECT_MARKER_FILENAME,
+                    }
+                )
+                continue
+            mode = parsed
+        return mode, issues
+
+    @staticmethod
     def _frontmatter_schema_config_from_lines(lines):
         path_value = ""
         line_no = 0
@@ -628,6 +692,16 @@ class TDocProjectIndex:
         }
 
     @staticmethod
+    def _relative_parent_folder(rel_path):
+        text = str(rel_path or "").replace("\\", "/").strip()
+        if not text:
+            return "."
+        parent = str(Path(text).parent).replace("\\", "/").strip()
+        if not parent or parent == ".":
+            return "."
+        return parent
+
+    @staticmethod
     def load_frontmatter_schema(root_path, *, content_overrides=None):
         normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
         marker = TDocProjectIndex.marker_path(root_path)
@@ -720,6 +794,10 @@ class TDocProjectIndex:
                 continue
             rule, _patterns = TDocProjectIndex._parse_rule_line(line)
             if rule:
+                continue
+            if TDocProjectIndex._parse_frontmatter_schema_rule(line) is not None:
+                continue
+            if TDocProjectIndex._parse_index_group_by_rule(line) is not None:
                 continue
             if not TDocProjectIndex._is_section_header(line):
                 continue
@@ -878,6 +956,10 @@ class TDocProjectIndex:
             if schema_rule is not None:
                 idx += 1
                 continue
+            index_group_rule = TDocProjectIndex._parse_index_group_by_rule(line)
+            if index_group_rule is not None:
+                idx += 1
+                continue
 
             if TDocProjectIndex._is_section_header(line):
                 section_match = SECTION_HEADER_PATTERN.match(line)
@@ -950,6 +1032,12 @@ class TDocProjectIndex:
             if rule:
                 idx += 1
                 continue
+            if TDocProjectIndex._parse_frontmatter_schema_rule(stripped) is not None:
+                idx += 1
+                continue
+            if TDocProjectIndex._parse_index_group_by_rule(stripped) is not None:
+                idx += 1
+                continue
 
             if TDocProjectIndex._is_section_header(stripped):
                 idx += 1
@@ -983,6 +1071,10 @@ class TDocProjectIndex:
 
         rule, _ = TDocProjectIndex._parse_rule_line(stripped)
         if rule:
+            return ""
+        if TDocProjectIndex._parse_frontmatter_schema_rule(stripped) is not None:
+            return ""
+        if TDocProjectIndex._parse_index_group_by_rule(stripped) is not None:
             return ""
         if TDocProjectIndex._is_section_header(stripped):
             return ""
@@ -1068,6 +1160,14 @@ class TDocProjectIndex:
 
             rule, _ = TDocProjectIndex._parse_rule_line(stripped)
             if rule:
+                new_lines.append(raw)
+                idx += 1
+                continue
+            if TDocProjectIndex._parse_frontmatter_schema_rule(stripped) is not None:
+                new_lines.append(raw)
+                idx += 1
+                continue
+            if TDocProjectIndex._parse_index_group_by_rule(stripped) is not None:
                 new_lines.append(raw)
                 idx += 1
                 continue
@@ -1369,6 +1469,18 @@ class TDocProjectIndex:
                         {
                             "severity": "warning",
                             "message": "Rule 'frontmatter_schema:' requires a JSON path value.",
+                            "line": idx + 1,
+                        }
+                    )
+                idx += 1
+                continue
+            index_group_rule = TDocProjectIndex._parse_index_group_by_rule(line)
+            if index_group_rule is not None:
+                if index_group_rule not in {"none", "folder"}:
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": "Rule 'index_group_by:' supports only 'none' or 'folder'.",
                             "line": idx + 1,
                         }
                     )
@@ -1753,6 +1865,33 @@ class TDocProjectIndex:
         return rows
 
     @staticmethod
+    def _group_refs_by_folder(refs):
+        grouped = defaultdict(lambda: defaultdict(set))
+        for row in refs:
+            if not isinstance(row, (tuple, list)) or len(row) < 2:
+                continue
+            rel_path = str(row[0] or "")
+            line_no = row[1]
+            try:
+                ln = max(1, int(line_no))
+            except Exception:
+                continue
+            folder = TDocProjectIndex._relative_parent_folder(rel_path)
+            grouped[folder][rel_path].add(ln)
+
+        rows = []
+        folder_order = sorted(
+            grouped.keys(),
+            key=lambda name: (0 if str(name) == "." else 1, str(name).casefold()),
+        )
+        for folder in folder_order:
+            files = []
+            for rel_path in sorted(grouped[folder].keys(), key=str.casefold):
+                files.append((rel_path, sorted(grouped[folder][rel_path])))
+            rows.append((folder, files))
+        return rows
+
+    @staticmethod
     def build_index(root_path):
         """Generates index.tdoc at project root if .tdocproject marker exists.
 
@@ -1781,6 +1920,7 @@ class TDocProjectIndex:
         except Exception:
             marker_lines = []
         section_header_warnings = TDocProjectIndex._section_header_capitalization_warnings(marker_lines)
+        index_group_mode, index_group_warnings = TDocProjectIndex._index_group_by_config_from_lines(marker_lines)
 
         lines = ["# Index", ""]
         indent = " " * 4
@@ -1789,26 +1929,66 @@ class TDocProjectIndex:
             lines.append(f"{indent}No symbols indexed yet.")
         else:
             section_to_symbols = defaultdict(list)
-            for symbol in sorted(symbol_refs.keys(), key=str.casefold):
+            section_order: list[str] = []
+            seen_symbols: set[str] = set()
+            for symbol in symbol_to_aliases.keys():
+                if symbol not in symbol_refs:
+                    continue
                 section = symbol_to_section.get(symbol) or "Uncategorized"
+                if section not in section_to_symbols:
+                    section_order.append(section)
+                section_to_symbols[section].append(symbol)
+                seen_symbols.add(symbol)
+
+            for symbol in sorted(symbol_refs.keys(), key=str.casefold):
+                if symbol in seen_symbols:
+                    continue
+                section = symbol_to_section.get(symbol) or "Uncategorized"
+                if section not in section_to_symbols:
+                    section_order.append(section)
                 section_to_symbols[section].append(symbol)
 
-            for section in sorted(section_to_symbols.keys(), key=str.casefold):
+            for section in section_order:
                 lines.append(f"## {section}")
                 for symbol in section_to_symbols[section]:
                     refs = sorted(symbol_refs[symbol], key=lambda x: (x[0].casefold(), x[1]))
                     aliases = symbol_to_aliases.get(symbol, [symbol])
                     metadata = symbol_to_metadata.get(symbol, {})
                     lines.append(f"{indent}[{symbol}]")
-                    lines.append(f"{indent * 2}Aliases: " + ", ".join(f"[{alias}]" for alias in aliases))
-                    if metadata:
-                        lines.append(
-                            f"{indent * 2}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items())
-                        )
-                    lines.append(f"{indent * 2}References:")
-                    for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
-                        line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
-                        lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
+                    alias_links: list[str] = []
+                    alias_seen: set[str] = set()
+                    for alias in aliases:
+                        alias_text = str(alias or "").strip()
+                        if not alias_text:
+                            continue
+                        alias_key = alias_text.casefold()
+                        if alias_key == symbol.casefold() or alias_key in alias_seen:
+                            continue
+                        alias_seen.add(alias_key)
+                        alias_links.append(f"[{alias_text}]")
+                    if alias_links:
+                        lines.append(f"{indent * 2}Aliases: " + ", ".join(alias_links))
+                    if isinstance(metadata, dict) and metadata:
+                        metadata_items = []
+                        for key, value in metadata.items():
+                            meta_key = str(key or "").strip()
+                            meta_value = str(value or "").strip()
+                            if not meta_key or not meta_value:
+                                continue
+                            metadata_items.append(f"{meta_key}={meta_value}")
+                        if metadata_items:
+                            lines.append(f"{indent * 2}Metadata: " + "; ".join(metadata_items))
+                    if index_group_mode == "folder":
+                        for folder, folder_files in TDocProjectIndex._group_refs_by_folder(refs):
+                            folder_label = "(root)" if folder == "." else folder
+                            lines.append(f"{indent * 2}Folder: {folder_label}")
+                            for rel_path, line_numbers in folder_files:
+                                line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                                lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
+                    else:
+                        for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
+                            line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                            lines.append(f"{indent * 2}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
@@ -1818,29 +1998,50 @@ class TDocProjectIndex:
                 for unresolved in sorted(unresolved_refs.keys(), key=str.casefold):
                     refs = sorted(unresolved_refs[unresolved], key=lambda x: (x[0].casefold(), x[1]))
                     lines.append(f"{indent}[{unresolved}]")
-                    lines.append(f"{indent * 2}References:")
-                    for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
-                        line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
-                        lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
+                    if index_group_mode == "folder":
+                        for folder, folder_files in TDocProjectIndex._group_refs_by_folder(refs):
+                            folder_label = "(root)" if folder == "." else folder
+                            lines.append(f"{indent * 2}Folder: {folder_label}")
+                            for rel_path, line_numbers in folder_files:
+                                line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                                lines.append(f"{indent * 3}[{rel_path}]: {line_links}")
+                    else:
+                        for rel_path, line_numbers in TDocProjectIndex._group_refs_by_file(refs):
+                            line_links = ", ".join(f"[{ln}|{rel_path}#L{ln}]" for ln in line_numbers)
+                            lines.append(f"{indent * 2}[{rel_path}]: {line_links}")
                     lines.append("")
                 lines.append("")
 
         if doc_metadata:
             lines.append("## Documents")
-            for rel_path in sorted(doc_metadata.keys(), key=str.casefold):
-                metadata = doc_metadata[rel_path]
-                lines.append(f"{indent}[{rel_path}]")
-                if metadata:
-                    lines.append(f"{indent * 2}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items()))
-                else:
-                    lines.append(f"{indent * 2}Metadata: (none)")
-                lines.append(f"{indent * 2}Indexing: " + ("on" if is_index_enabled(metadata) else "off"))
+            if index_group_mode == "folder":
+                docs_by_folder = defaultdict(list)
+                for rel_path in sorted(doc_metadata.keys(), key=str.casefold):
+                    folder = TDocProjectIndex._relative_parent_folder(rel_path)
+                    docs_by_folder[folder].append(rel_path)
+                for folder in sorted(docs_by_folder.keys(), key=lambda name: (0 if name == "." else 1, name.casefold())):
+                    folder_label = "(root)" if folder == "." else folder
+                    lines.append(f"{indent}Folder: {folder_label}")
+                    for rel_path in docs_by_folder[folder]:
+                        metadata = doc_metadata[rel_path]
+                        lines.append(f"{indent * 2}[{rel_path}]")
+                        if metadata:
+                            lines.append(f"{indent * 3}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items()))
+                        lines.append(f"{indent * 3}Indexing: " + ("on" if is_index_enabled(metadata) else "off"))
+            else:
+                for rel_path in sorted(doc_metadata.keys(), key=str.casefold):
+                    metadata = doc_metadata[rel_path]
+                    lines.append(f"{indent}[{rel_path}]")
+                    if metadata:
+                        lines.append(f"{indent * 2}Metadata: " + "; ".join(f"{k}={v}" for k, v in metadata.items()))
+                    lines.append(f"{indent * 2}Indexing: " + ("on" if is_index_enabled(metadata) else "off"))
             lines.append("")
             lines.append("")
 
-        if section_header_warnings:
+        project_warnings = list(section_header_warnings) + list(index_group_warnings)
+        if project_warnings:
             lines.append("## Project Warnings")
-            for issue in section_header_warnings:
+            for issue in project_warnings:
                 lines.append(
                     f"{indent}{PROJECT_MARKER_FILENAME}#L{issue['line']} {issue['message']}"
                 )
@@ -3184,10 +3385,28 @@ class TDocEditorWidget(QTextEdit):
     def _replace_query(self) -> str:
         return str(self._search_bar.replace_edit.text() or "")
 
+    def _theme_search_top_margin_min(self) -> int:
+        app = QApplication.instance()
+        value = app.property(_THEME_EDITOR_SEARCH_TOP_MARGIN_PROP) if app is not None else None
+        return _coerce_theme_px(
+            value,
+            default=_THEME_EDITOR_SEARCH_TOP_MARGIN_DEFAULT,
+            minimum=0,
+        )
+
+    def _theme_overview_gap(self) -> int:
+        app = QApplication.instance()
+        value = app.property(_THEME_EDITOR_OVERVIEW_GAP_PROP) if app is not None else None
+        return _coerce_theme_px(
+            value,
+            default=_THEME_EDITOR_OVERVIEW_GAP_DEFAULT,
+            minimum=0,
+        )
+
     def _search_top_margin(self) -> int:
         if not self._search_bar.isVisible():
             return 0
-        return max(30, int(self._search_bar.sizeHint().height()))
+        return max(self._theme_search_top_margin_min(), int(self._search_bar.sizeHint().height()))
 
     def overviewMarkerAreaWidth(self) -> int:
         if not bool(self._overview_cfg.get("enabled", True)):
@@ -3552,7 +3771,7 @@ class TDocEditorWidget(QTextEdit):
         vp = self.viewport().geometry()
         self.overviewMarkerArea.setGeometry(
             QRect(
-                vp.right() + 1,
+                vp.right() + self._theme_overview_gap(),
                 vp.top(),
                 width,
                 max(0, vp.height()),

@@ -14,10 +14,15 @@ from src.services.theme_compiler import (
     compile_qsst_file_with_tokens,
 )
 from src.ui.theme_runtime import (
+    DEFAULT_EDITOR_OVERVIEW_GAP,
+    DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN,
     DEFAULT_SETTINGS_COLOR_SWATCH_HEIGHT,
     DEFAULT_SETTINGS_COLOR_SWATCH_WIDTH,
     coerce_metric_px,
+    coerce_metric_px_min,
+    refresh_editor_viewport_widgets,
     refresh_settings_color_swatch_widgets,
+    set_editor_viewport_spacing,
     set_settings_color_swatch_size,
 )
 
@@ -134,6 +139,24 @@ class ThemeController:
         height = coerce_metric_px(tokens.get("components.settings.color_swatch_height"), default=height)
         return width, height
 
+    @staticmethod
+    def _editor_viewport_spacing(tokens: dict[str, Any] | None) -> tuple[int, int]:
+        search_top_margin = DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN
+        overview_gap = DEFAULT_EDITOR_OVERVIEW_GAP
+        if not isinstance(tokens, dict):
+            return search_top_margin, overview_gap
+        search_top_margin = coerce_metric_px_min(
+            tokens.get("components.editor.search_top_margin_min"),
+            default=search_top_margin,
+            minimum=0,
+        )
+        overview_gap = coerce_metric_px_min(
+            tokens.get("components.editor.overview_gap"),
+            default=overview_gap,
+            minimum=0,
+        )
+        return search_top_margin, overview_gap
+
     def available_themes(self) -> list[str]:
         return [name for name, _ in self._theme_candidates()]
 
@@ -195,6 +218,13 @@ class ThemeController:
             app=app,
         )
         refresh_settings_color_swatch_widgets(app=app, width=swatch_width, height=swatch_height)
+        editor_search_top_margin, editor_overview_gap = self._editor_viewport_spacing(tokens)
+        set_editor_viewport_spacing(
+            search_top_margin_min=editor_search_top_margin,
+            overview_gap=editor_overview_gap,
+            app=app,
+        )
+        refresh_editor_viewport_widgets(app=app)
         if resolved_name != self.ide.theme_name:
             self.ide.theme_name = resolved_name
             self.settings_manager.set("theme", resolved_name, "ide")

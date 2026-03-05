@@ -1444,6 +1444,7 @@ def _detect_context(source_text: str, line: int, column: int, prefix: str) -> di
 
 _TDOCPROJECT_RULE_VALUE_RE = re.compile(r"^\s*(?P<rule>include|ignore)\s*:\s*(?P<value>[^#]*)$")
 _TDOCPROJECT_FRONTMATTER_RULE_RE = re.compile(r"^\s*frontmatter_schema\s*:\s*(?P<value>[^#]*)$")
+_TDOCPROJECT_INDEX_GROUP_RULE_RE = re.compile(r"^\s*index_group_by\s*:\s*(?P<value>[^#]*)$")
 _TDOCPROJECT_SECTION_HEADER_RE = re.compile(r"^\s*(?P<section>[^=#:\n][^=#\n]*?)\s*:\s*$")
 _TDOCPROJECT_METADATA_KEY_RE = re.compile(r"(?:^|;)\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=")
 _TDOCPROJECT_DEFAULT_SECTION_SUGGESTIONS = [
@@ -1487,6 +1488,12 @@ def _detect_tdocproject_context(source_text: str, line: int, column: int, prefix
             "prefix": leaf_prefix,
             "path_prefix": path_prefix,
         }
+    index_group_m = _TDOCPROJECT_INDEX_GROUP_RULE_RE.match(left)
+    if index_group_m:
+        return {
+            "mode": "index_group_value",
+            "prefix": str(index_group_m.group("value") or "").strip().lower(),
+        }
     rule_m = _TDOCPROJECT_RULE_VALUE_RE.match(left)
     if rule_m:
         return {
@@ -1508,7 +1515,11 @@ def _extract_tdocproject_section_names(source_text: str) -> list[str]:
         line = str(raw or "").strip()
         if not line or line.startswith("#"):
             continue
-        if _TDOCPROJECT_RULE_VALUE_RE.match(line) or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(line):
+        if (
+            _TDOCPROJECT_RULE_VALUE_RE.match(line)
+            or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(line)
+            or _TDOCPROJECT_INDEX_GROUP_RULE_RE.match(line)
+        ):
             continue
         match = _TDOCPROJECT_SECTION_HEADER_RE.match(line)
         if not match:
@@ -1532,7 +1543,11 @@ def _extract_tdocproject_metadata_keys(source_text: str) -> list[str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if _TDOCPROJECT_RULE_VALUE_RE.match(stripped) or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(stripped):
+        if (
+            _TDOCPROJECT_RULE_VALUE_RE.match(stripped)
+            or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(stripped)
+            or _TDOCPROJECT_INDEX_GROUP_RULE_RE.match(stripped)
+        ):
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         if ";" not in line and indent <= 0:
@@ -1647,6 +1662,11 @@ def _fallback_tdocproject_candidates(payload: _CompletionPayload, context: dict,
         _add("index.tdoc", kind="text", detail="single document")
         return out[: max_items * 2]
 
+    if mode == "index_group_value":
+        _add("none", kind="keyword", detail="group references by file path")
+        _add("folder", kind="keyword", detail="group references/documents by folder")
+        return out[: max_items * 2]
+
     if mode == "metadata":
         for key in keys:
             _add(f"{key}=", kind="property", detail="symbol metadata")
@@ -1656,6 +1676,7 @@ def _fallback_tdocproject_candidates(payload: _CompletionPayload, context: dict,
     _add("include:", insert_text="include: ", kind="keyword", detail="index include rule")
     _add("ignore:", insert_text="ignore: ", kind="keyword", detail="index ignore rule")
     _add("frontmatter_schema:", insert_text="frontmatter_schema: ", kind="keyword", detail="frontmatter schema rule")
+    _add("index_group_by:", insert_text="index_group_by: ", kind="keyword", detail="index grouping mode")
     for section in sections:
         _add(f"{section}:", kind="class", detail="section header")
     _add("Symbol Name", kind="snippet", detail="canonical symbol")

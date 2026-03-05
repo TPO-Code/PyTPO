@@ -2123,7 +2123,9 @@ class PythonIDE(Window):
         has_runnable = self._has_runnable_target()
         has_buildable = bool(project_loaded and self.execution_controller.can_build_current_file())
         has_build_and_run = bool(project_loaded and self.execution_controller.can_build_and_run_current_file())
-        has_open_tdoc = bool(project_loaded and self._open_tdoc_roots())
+        active_doc_widget = self._current_document_widget()
+        active_doc_path = self._document_widget_path(active_doc_widget)
+        has_active_tdoc = bool(project_loaded and self._is_tdoc_related_path(active_doc_path))
 
         if self._act_build_current is not None:
             self._act_build_current.setEnabled(has_buildable)
@@ -2181,8 +2183,8 @@ class PythonIDE(Window):
             self._toolbar_build_run_btn.setEnabled(has_build_and_run)
             self._toolbar_build_run_btn.setVisible(has_build_and_run)
         if self._toolbar_tdoc_index_btn is not None:
-            self._toolbar_tdoc_index_btn.setEnabled(has_open_tdoc)
-            self._toolbar_tdoc_index_btn.setVisible(has_open_tdoc)
+            self._toolbar_tdoc_index_btn.setEnabled(has_active_tdoc)
+            self._toolbar_tdoc_index_btn.setVisible(has_active_tdoc)
         if self._run_build_config_menu is not None:
             show_build_menu = bool(project_loaded and (has_buildable or has_build_and_run))
             self._run_build_config_menu.menuAction().setVisible(show_build_menu)
@@ -3747,6 +3749,76 @@ class PythonIDE(Window):
         self._focus_document_widget(widget)
         return True
 
+    @staticmethod
+    def _tdoc_marker_symbol_span(line_text: str, symbol: str) -> tuple[int, int] | None:
+        raw_line = str(line_text or "")
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            return None
+        rule, _ = TDocProjectIndex._parse_rule_line(stripped)
+        if rule:
+            return None
+        if TDocProjectIndex._parse_frontmatter_schema_rule(stripped) is not None:
+            return None
+        if TDocProjectIndex._parse_index_group_by_rule(stripped) is not None:
+            return None
+        if TDocProjectIndex._is_section_header(stripped):
+            return None
+
+        metadata_sep = raw_line.find(";")
+        base_end = metadata_sep if metadata_sep >= 0 else len(raw_line)
+        base = raw_line[:base_end]
+        if not base.strip():
+            return None
+
+        eq_idx = base.find("=")
+        symbol_part = base[:eq_idx] if eq_idx >= 0 else base
+        left = len(symbol_part) - len(symbol_part.lstrip())
+        right = len(symbol_part.rstrip())
+        if right <= left:
+            return None
+
+        target = str(symbol or "").strip()
+        if target:
+            low = base.casefold()
+            idx = low.find(target.casefold())
+            if idx >= 0:
+                end = idx + len(target)
+                if end > idx:
+                    return idx, end
+        return left, right
+
+    def _navigate_to_tdoc_marker_symbol_location(self, file_path: str, line: int, symbol: str) -> bool:
+        cpath = self._canonical_path(file_path)
+        if os.path.exists(cpath):
+            self.open_file(cpath)
+
+        widget = self._find_open_document_for_path(cpath)
+        if widget is None:
+            return False
+
+        line_num = max(1, int(line or 1))
+        code_editor = self._editor_from_document_widget(widget)
+        if not isinstance(code_editor, EditorWidget):
+            return self._navigate_to_problem_location(cpath, line_num, 1)
+
+        block = code_editor.document().findBlockByNumber(line_num - 1)
+        if not block.isValid():
+            block = code_editor.document().lastBlock()
+
+        cursor = QTextCursor(block)
+        span = self._tdoc_marker_symbol_span(block.text(), symbol)
+        if span is not None:
+            start_col, end_col = span
+            start_abs = int(block.position()) + max(0, int(start_col))
+            end_abs = int(block.position()) + max(int(start_col), int(end_col))
+            cursor.setPosition(start_abs)
+            cursor.setPosition(end_abs, QTextCursor.MoveMode.KeepAnchor)
+        code_editor.setTextCursor(cursor)
+        code_editor.centerCursor()
+        self._focus_document_widget(widget)
+        return True
+
     def _on_problem_activated(self, file_path: str, line: int, col: int):
         self.diagnostics_controller._on_problem_activated(file_path, line, col)
 
@@ -4976,7 +5048,7 @@ class PythonIDE(Window):
             )
             return
 
-        if not self._navigate_to_problem_location(marker_path, int(line_no), 1):
+        if not self._navigate_to_tdoc_marker_symbol_location(marker_path, int(line_no), canonical_symbol or query):
             self.open_file(marker_path)
         shown = str(canonical_symbol or query).strip()
         self.statusBar().showMessage(f"Opened .tdocproject definition for '{shown}'.", 2200)

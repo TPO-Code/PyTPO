@@ -125,7 +125,7 @@ menu_bar_item_padding = "5px 10px"
 menu_item_padding = "6px 12px"
 menu_padding = "4px"
 button_padding = "7px 12px"
-input_padding = "5px 8px"
+input_padding = "5px 1px"
 checkbox_spacing = "8px"
 groupbox_margin_top = "12px"
 groupbox_padding = "5px"
@@ -192,6 +192,11 @@ button_border = "0px"
 button_color="transparent"
 color_swatch_width = "20px"
 color_swatch_height = "20px"
+
+[components.editor]
+padding = "${spacing.input_padding}"
+search_top_margin_min = "30px"
+overview_gap = "1px"
 
 [components.terminal]
 font_family = '"Consolas"'
@@ -457,12 +462,20 @@ properties.background = "${colors.bg_button_disabled}"
 properties.border-color = "${colors.border_button_disabled}"
 
 [[rules]]
-selector = "QLineEdit, QComboBox, QSpinBox, QTextEdit, QPlainTextEdit, QListWidget, QTreeWidget"
+selector = "QLineEdit, QComboBox, QSpinBox, QListWidget, QTreeWidget"
 properties.background = "${colors.bg_input}"
 properties.color = "${colors.text_input}"
 properties.border = "${metrics.border_width} solid ${colors.border_input}"
 properties.border-radius = "${metrics.radius_control}"
 properties.padding = "${spacing.input_padding}"
+
+[[rules]]
+selector = "QTextEdit, QPlainTextEdit"
+properties.background = "${colors.bg_input}"
+properties.color = "${colors.text_input}"
+properties.border = "${metrics.border_width} solid ${colors.border_input}"
+properties.border-radius = "${metrics.radius_control}"
+properties.padding = "${components.editor.padding}"
 
 [[rules]]
 selector = "QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QTreeWidget:focus"

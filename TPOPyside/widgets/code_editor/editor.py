@@ -93,6 +93,33 @@ from TPOPyside.widgets.editor_change_regions import (
     resolve_change_region_layer,
 )
 
+_THEME_EDITOR_SEARCH_TOP_MARGIN_PROP = "theme.editor.search.top_margin_min"
+_THEME_EDITOR_OVERVIEW_GAP_PROP = "theme.editor.overview.gap"
+_THEME_EDITOR_SEARCH_TOP_MARGIN_DEFAULT = 30
+_THEME_EDITOR_OVERVIEW_GAP_DEFAULT = 1
+_THEME_PX_RE = re.compile(r"^\s*(-?\d+)\s*(px)?\s*$", re.IGNORECASE)
+
+
+def _coerce_theme_px(value: object, *, default: int, minimum: int = 0) -> int:
+    floor = max(0, int(minimum))
+    fallback = max(floor, int(default))
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, int):
+        return max(floor, int(value))
+    if isinstance(value, float):
+        return max(floor, int(round(value)))
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    match = _THEME_PX_RE.fullmatch(text)
+    if not match:
+        return fallback
+    try:
+        return max(floor, int(match.group(1)))
+    except Exception:
+        return fallback
+
 
 def leading_whitespace(line: str) -> str:
     text = str(line or "")
@@ -1453,10 +1480,28 @@ class CodeEditor(QPlainTextEdit):
     def _replace_query(self) -> str:
         return str(self._search_bar.replace_edit.text() or "")
 
+    def _theme_search_top_margin_min(self) -> int:
+        app = QApplication.instance()
+        value = app.property(_THEME_EDITOR_SEARCH_TOP_MARGIN_PROP) if app is not None else None
+        return _coerce_theme_px(
+            value,
+            default=_THEME_EDITOR_SEARCH_TOP_MARGIN_DEFAULT,
+            minimum=0,
+        )
+
+    def _theme_overview_gap(self) -> int:
+        app = QApplication.instance()
+        value = app.property(_THEME_EDITOR_OVERVIEW_GAP_PROP) if app is not None else None
+        return _coerce_theme_px(
+            value,
+            default=_THEME_EDITOR_OVERVIEW_GAP_DEFAULT,
+            minimum=0,
+        )
+
     def _search_top_margin(self) -> int:
         if not self._search_bar.isVisible():
             return 0
-        return max(30, int(self._search_bar.sizeHint().height()))
+        return max(self._theme_search_top_margin_min(), int(self._search_bar.sizeHint().height()))
 
     def _apply_viewport_margins(self):
         top_margin = self._search_top_margin()
@@ -1485,7 +1530,7 @@ class CodeEditor(QPlainTextEdit):
         vp = self.viewport().geometry()
         self.overviewMarkerArea.setGeometry(
             QRect(
-                vp.right() + 1,
+                vp.right() + self._theme_overview_gap(),
                 vp.top(),
                 width,
                 max(0, vp.height()),

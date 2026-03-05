@@ -30,6 +30,7 @@ Supported lines:
 - comments: lines starting with `#`
 - include/ignore rules: `include: pattern1 | pattern2`, `ignore: pattern1 | pattern2`
 - frontmatter schema rule: `frontmatter_schema: frontmatter.schema.json`
+- index grouping rule: `index_group_by: none|folder`
 - section headers: `Section Name:`
 - symbol definitions:
   - `Canonical Symbol`
@@ -234,16 +235,19 @@ Generated content is placed below a dashed separator:
   - `Documents`
   - `Project Warnings` (including section-capitalization warnings)
   - `Frontmatter Warnings`
-- References are grouped by file path. Each file row links to the file, and line numbers are emitted as titled links.
+- Symbols keep `.tdocproject` definition order within each section.
+- `Aliases:` excludes the canonical symbol and is omitted when no aliases exist.
+- `Metadata:` is omitted when no metadata entries exist.
+- References are grouped by file path by default.
+- If `.tdocproject` sets `index_group_by: folder`, references and document listings are grouped by folder for easier large-project scanning.
 
 Example structure (with clickable link markup preserved):
 
 ```txt
 ## Characters
     [Ari Vale]
-        Aliases: [Ari Vale], [Ari], [A. Vale]
-        References:
-            [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6], [9|demo/chapter_01.tdoc#L9]
+        Aliases: [Ari], [A. Vale]
+        [demo/chapter_01.tdoc]: [6|demo/chapter_01.tdoc#L6], [9|demo/chapter_01.tdoc#L9]
 ```
 
 ## Problems panel integration and quick fixes
