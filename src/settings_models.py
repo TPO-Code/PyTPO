@@ -243,6 +243,7 @@ class IdeGitSettings(TypedDict, total=False):
 
 
 class IdeEditorSettings(TypedDict, total=False):
+    syntax_highlighting: "IdeSyntaxHighlightingSettings"
     spellcheck: "IdeSpellcheckSettings"
     background_color: str
     background_image_path: str
@@ -270,6 +271,11 @@ class IdeSpellcheckSettings(TypedDict, total=False):
     debounce_ms: int
     check_identifiers_in_code: bool
     max_highlights: int
+
+
+class IdeSyntaxHighlightingSettings(TypedDict, total=False):
+    global_tokens: dict[str, str]
+    language_overrides: dict[str, dict[str, str]]
 
 
 class IdeFileDialogSettings(TypedDict, total=False):
@@ -520,6 +526,10 @@ def default_ide_settings() -> IdeSettings:
             "untracked_color": "#c8c8c8",
         },
         "editor": {
+            "syntax_highlighting": {
+                "global_tokens": {},
+                "language_overrides": {},
+            },
             "spellcheck": {
                 "enabled": False,
                 "color": "#66C07A",

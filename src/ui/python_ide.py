@@ -70,6 +70,7 @@ from src.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from src.ui.dialogs.file_dialog_bridge import get_save_file_name
 from src.ui.dialogs.terminal_commands_dialog import TerminalCommandsDialog
 from src.ui.settings_dialog import SettingsDialog as ScopedSettingsDialog, create_default_settings_schema
+from src.ui.syntax_highlighting_runtime import configure_syntax_highlighting_runtime
 
 from src.ui.editor_workspace import EditorTabs, EditorWidget, EditorWorkspace
 from src.ui.lint_manager import LintManager
@@ -312,6 +313,7 @@ class PythonIDE(Window):
             project_persistent=not self.no_project_mode,
         )
         self.settings_manager.load_all()
+        configure_syntax_highlighting_runtime(self.settings_manager)
         self._settings_load_errors: dict[str, str] = {}
 
         use_native_chrome = bool(
@@ -6291,8 +6293,38 @@ class PythonIDE(Window):
     def open_project_config(self):
         self.open_file(self.project_config_path)
 
+    @staticmethod
+    def _rehighlight_editor_widget(widget: object | None) -> None:
+        if widget is None:
+            return
+        apply_fn = getattr(widget, "_apply_highlighter", None)
+        if callable(apply_fn):
+            try:
+                apply_fn()
+                return
+            except Exception:
+                pass
+        highlighter = getattr(widget, "_highlighter", None)
+        if highlighter is None:
+            return
+        refresh = getattr(highlighter, "rehighlight", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
+
+    def _refresh_syntax_highlighting_runtime(self) -> None:
+        configure_syntax_highlighting_runtime(self.settings_manager)
+        workspace = getattr(self, "editor_workspace", None)
+        if workspace is not None and callable(getattr(workspace, "all_editors", None)):
+            for editor in workspace.all_editors():
+                self._rehighlight_editor_widget(editor)
+        self._rehighlight_editor_widget(getattr(self, "commit_md_editor", None))
+
     def _refresh_runtime_settings_from_manager(self):
         self.config = self.settings_manager.export_legacy_config()
+        self._refresh_syntax_highlighting_runtime()
         self._apply_application_identity()
         self._set_editor_font_size(
             int(self.settings_manager.get("font_size", scope_preference="ide", default=10)),

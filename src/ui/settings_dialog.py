@@ -54,6 +54,7 @@ from src.ui.settings.clangd_repair_settings_page import ClangdRepairSettingsPage
 from src.ui.settings.project_maintenance_page import ProjectMaintenancePage
 from src.ui.settings.python_run_configs_settings_page import PythonRunConfigsSettingsPage
 from src.ui.settings.rust_run_configs_settings_page import RustRunConfigsSettingsPage
+from src.ui.settings.syntax_highlighting_settings_page import SyntaxHighlightingSettingsPage
 from src.ui.theme_runtime import apply_settings_color_swatch_size
 
 FieldType = Literal[
@@ -75,6 +76,7 @@ FieldType = Literal[
     "build_configs_editor",
     "python_run_configs_editor",
     "rust_run_configs_editor",
+    "syntax_highlighting_editor",
     "project_maintenance_tools",
     "clangd_repair_tools",
 ]
@@ -141,6 +143,7 @@ PANEL_FIELD_TYPES: set[str] = {
     "build_configs_editor",
     "python_run_configs_editor",
     "rust_run_configs_editor",
+    "syntax_highlighting_editor",
     "project_maintenance_tools",
     "clangd_repair_tools",
 }
@@ -385,6 +388,7 @@ class SettingsDialog(DialogWindow):
             "ide-editor-ux": 110,
             "ide-keybindings": 111,
             "ide-file-templates": 112,
+            "ide-syntax-highlighting": 113,
             "ide-run": 120,
             "ide-linting": 130,
             "ide-ai-assist": 131,
@@ -580,18 +584,18 @@ class SettingsDialog(DialogWindow):
             form.setHorizontalSpacing(14)
             form.setVerticalSpacing(10)
 
-            for field in section.fields:
-                binding = self._create_field_binding(field)
+            for schema_field in section.fields:
+                binding = self._create_field_binding(schema_field)
                 page_bindings.append(binding)
-                binding.on_change(lambda *_args, scope=field.scope: self._mark_dirty(scope))
+                binding.on_change(lambda *_args, scope=schema_field.scope: self._mark_dirty(scope))
 
-                if field.type == "checkbox" or field.type in PANEL_FIELD_TYPES:
+                if schema_field.type == "checkbox" or schema_field.type in PANEL_FIELD_TYPES:
                     form.addRow(binding.widget)
                 else:
-                    label = QLabel(field.label)
-                    if field.description:
-                        label.setToolTip(field.description)
-                        binding.widget.setToolTip(field.description)
+                    label = QLabel(schema_field.label)
+                    if schema_field.description:
+                        label.setToolTip(schema_field.description)
+                        binding.widget.setToolTip(schema_field.description)
                     form.addRow(label, binding.widget)
 
             section_layout.addLayout(form)
@@ -709,6 +713,21 @@ class SettingsDialog(DialogWindow):
 
         if field.type == "rust_run_configs_editor":
             page = RustRunConfigsSettingsPage(manager=self.manager, parent=self)
+            return FieldBinding(
+                key=field.key,
+                scope=field.scope,
+                widget=page,
+                getter=lambda: None,
+                setter=lambda _value: None,
+                on_change=lambda _cb: None,
+                validate=lambda: [],
+                persist=False,
+                has_pending_changes=page.has_pending_settings_changes,
+                apply_changes=page.apply_settings_changes,
+            )
+
+        if field.type == "syntax_highlighting_editor":
+            page = SyntaxHighlightingSettingsPage(manager=self.manager, scope=field.scope, parent=self)
             return FieldBinding(
                 key=field.key,
                 scope=field.scope,
@@ -1296,11 +1315,11 @@ class SettingsDialog(DialogWindow):
             for section in spec.sections:
                 field_tokens.append(section.title)
                 field_tokens.append(section.description)
-                for field in section.fields:
-                    field_tokens.append(field.label)
-                    field_tokens.append(field.key)
-                    field_tokens.append(field.scope)
-                    field_tokens.append(field.description)
+                for schema_field in section.fields:
+                    field_tokens.append(schema_field.label)
+                    field_tokens.append(schema_field.key)
+                    field_tokens.append(schema_field.scope)
+                    field_tokens.append(schema_field.description)
             haystack = " ".join(page_tokens + field_tokens).lower()
             return query in haystack
 
@@ -2816,6 +2835,28 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                             ),
                         ],
                     ),
+                ],
+            ),
+            SchemaPage(
+                id="ide-syntax-highlighting",
+                category="Editor",
+                title="Syntax Highlighting",
+                scope="ide",
+                description="Customize syntax token colors globally or per language.",
+                keywords=["syntax", "highlighting", "colors", "theme", "tokens"],
+                sections=[
+                    SchemaSection(
+                        title="Syntax Colors",
+                        fields=[
+                            SchemaField(
+                                id="ide-syntax-highlighting-editor",
+                                key="editor.syntax_highlighting",
+                                label="Syntax Highlighting Colors",
+                                type="syntax_highlighting_editor",
+                                scope="ide",
+                            )
+                        ],
+                    )
                 ],
             ),
             SchemaPage(

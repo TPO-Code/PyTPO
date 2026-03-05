@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping
 
 from src.ai.settings_schema import normalize_ai_settings
+from src.services.syntax_highlighting_config import normalize_syntax_highlighting_settings
 from src.settings_models import (
     SettingsPaths,
     SettingsScope,
@@ -1373,6 +1374,9 @@ class SettingsManager:
                 seen_wrap_types.add(key)
                 clean_wrap_types.append(key)
         editor_cfg["word_wrap_enabled_file_types"] = clean_wrap_types
+        editor_cfg["syntax_highlighting"] = normalize_syntax_highlighting_settings(
+            editor_cfg.get("syntax_highlighting")
+        )
 
         spell_cfg = editor_cfg.get("spellcheck")
         if not isinstance(spell_cfg, dict):

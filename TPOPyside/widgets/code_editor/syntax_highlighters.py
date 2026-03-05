@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtGui import QBrush, QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QTextBlockUserData
 
@@ -26,6 +26,223 @@ TODO_BOX_RE = re.compile(
 
 _transparent_hash_fmt = QTextCharFormat()
 _transparent_hash_fmt.setForeground(QBrush(QColor(0, 0, 0, 0)))  # fully transparent
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$")
+
+SyntaxColorResolver = Callable[[str, str, str], str | None]
+_syntax_color_resolver: SyntaxColorResolver | None = None
+
+SYNTAX_LANGUAGE_LABELS: dict[str, str] = {
+    "python": "Python",
+    "html": "HTML/XML",
+    "javascript": "JavaScript",
+    "php": "PHP",
+    "cpp": "C/C++",
+    "json": "JSON",
+    "toml": "TOML/QSST",
+    "rust": "Rust",
+    "css": "CSS/SCSS/LESS",
+    "shell": "Shell",
+    "markdown": "Markdown",
+    "todo": "Todo",
+}
+
+SYNTAX_LANGUAGE_ALIASES: dict[str, str] = {
+    "python": "python",
+    "html": "html",
+    "xml": "html",
+    "javascript": "javascript",
+    "javascriptreact": "javascript",
+    "php": "php",
+    "c": "cpp",
+    "cpp": "cpp",
+    "make": "cpp",
+    "json": "json",
+    "jsonc": "json",
+    "toml": "toml",
+    "rust": "rust",
+    "css": "css",
+    "scss": "css",
+    "less": "css",
+    "shell": "shell",
+    "bash": "shell",
+    "zsh": "shell",
+    "markdown": "markdown",
+    "todo": "todo",
+}
+
+SYNTAX_TOKEN_DEFAULTS: dict[str, dict[str, str]] = {
+    "python": {
+        "keyword": "#569Cff",
+        "soft_keyword": "#4FC1FF",
+        "builtin": "#4EC9B0",
+        "exception": "#DCDCAA",
+        "decorator": "#C586C0",
+        "definition_keyword": "#569Cff",
+        "definition_name": "#DCDCAA",
+        "operator": "#D4D4D4",
+        "bracket": "#D7BA7D",
+        "string": "#CE9178",
+        "fstring_expression": "#FFD580",
+        "comment": "#6A9955",
+        "comment_tag": "#FFB86C",
+        "number": "#B5CEA8",
+    },
+    "html": {
+        "tag": "#4EC9B0",
+        "attribute": "#9CDCFE",
+        "value": "#CE9178",
+        "comment": "#6A9955",
+    },
+    "javascript": {
+        "keyword": "#569Cff",
+        "string": "#CE9178",
+        "comment": "#6A9955",
+        "number": "#B5CEA8",
+        "function": "#DCDCAA",
+    },
+    "php": {
+        "keyword": "#569Cff",
+        "variable": "#9CDCFE",
+        "string": "#CE9178",
+        "comment": "#6A9955",
+        "tag": "#569Cff",
+    },
+    "cpp": {
+        "keyword": "#569Cff",
+        "preprocessor": "#C586C0",
+        "string": "#CE9178",
+        "number": "#B5CEA8",
+        "comment": "#6A9955",
+    },
+    "json": {
+        "key": "#9CDCFE",
+        "string": "#CE9178",
+        "number": "#B5CEA8",
+    },
+    "toml": {
+        "key": "#9CDCFE",
+        "table": "#4EC9B0",
+        "string": "#CE9178",
+        "number": "#B5CEA8",
+        "literal": "#569Cff",
+        "date": "#DCDCAA",
+        "comment": "#6A9955",
+    },
+    "rust": {
+        "keyword": "#569Cff",
+        "string": "#CE9178",
+        "number": "#B5CEA8",
+        "macro": "#DCDCAA",
+        "attribute": "#C586C0",
+        "comment": "#6A9955",
+    },
+    "css": {
+        "selector_id": "#D7BA7D",
+        "selector_class": "#4EC9B0",
+        "selector_tag": "#D7BA7D",
+        "property": "#9CDCFE",
+        "value": "#CE9178",
+        "comment": "#6A9955",
+    },
+    "shell": {
+        "keyword": "#569Cff",
+        "variable": "#9CDCFE",
+        "string": "#CE9178",
+        "comment": "#6A9955",
+        "shebang": "#C586C0",
+    },
+    "markdown": {
+        "heading_1": "#4FC1FF",
+        "heading_2": "#61AFEF",
+        "heading_3": "#C586C0",
+        "heading_4": "#D7BA7D",
+        "heading_5": "#B5CEA8",
+        "heading_6": "#9CDCFE",
+        "blockquote": "#6A9955",
+        "list_marker": "#D7BA7D",
+        "horizontal_rule": "#808080",
+        "inline_code": "#D7BA7D",
+        "emphasis": "#CE9178",
+        "link_text": "#4FC1FF",
+        "link_url": "#9CDCFE",
+        "image": "#C586C0",
+        "autolink": "#4FC1FF",
+        "comment": "#6A9955",
+        "fence": "#569CD6",
+        "code_block": "#DCDCAA",
+    },
+    "todo": {
+        "checkbox_open": "#DCDCAA",
+        "checkbox_done": "#6A9955",
+        "task_text": "#D4D4D4",
+        "bullet": "#C586C0",
+        "comment": "#6A9955",
+        "header": "#4FC1FF",
+        "tag": "#9CDCFE",
+        "priority": "#CE9178",
+    },
+}
+
+
+def set_syntax_color_resolver(resolver: SyntaxColorResolver | None) -> None:
+    global _syntax_color_resolver
+    _syntax_color_resolver = resolver
+
+
+def canonicalize_syntax_language(language_id: str) -> str:
+    raw = str(language_id or "").strip().lower()
+    return SYNTAX_LANGUAGE_ALIASES.get(raw, raw)
+
+
+def syntax_token_defaults() -> dict[str, dict[str, str]]:
+    return {lang: dict(tokens) for lang, tokens in SYNTAX_TOKEN_DEFAULTS.items()}
+
+
+def syntax_language_labels() -> dict[str, str]:
+    return dict(SYNTAX_LANGUAGE_LABELS)
+
+
+def _normalized_hex(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text or not _HEX_COLOR_RE.fullmatch(text):
+        return None
+    return text
+
+
+def _resolve_syntax_color(language: str, token: str, default: str) -> str:
+    canonical_language = canonicalize_syntax_language(language)
+    fallback = _normalized_hex(default) or "#ffffff"
+    resolver = _syntax_color_resolver
+    if resolver is None:
+        return fallback
+    try:
+        resolved = resolver(canonical_language, str(token or "").strip(), fallback)
+    except Exception:
+        return fallback
+    return _normalized_hex(resolved) or fallback
+
+
+def _fmt(
+    language: str,
+    token: str,
+    default_color: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    underline: bool = False,
+    family: str = "",
+) -> QTextCharFormat:
+    fmt = QTextCharFormat()
+    fmt.setForeground(QColor(_resolve_syntax_color(language, token, default_color)))
+    if bold:
+        fmt.setFontWeight(QFont.Bold)
+    if italic:
+        fmt.setFontItalic(True)
+    if underline:
+        fmt.setFontUnderline(True)
+    if family:
+        fmt.setFontFamily(family)
+    return fmt
 
 
 # ---------------- Syntax Highlighters ----------------
@@ -49,51 +266,25 @@ class PythonHighlighter(QSyntaxHighlighter):
     STATE_TRIPLE_SINGLE_F = 3
     STATE_TRIPLE_DOUBLE_F = 4
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "python")
 
         # ---------- formats ----------
-        self.fmt_kw = QTextCharFormat()
-        self.fmt_kw.setForeground(QColor("#569Cff"))
-        self.fmt_kw.setFontWeight(QFont.Bold)
-
-        self.fmt_soft_kw = QTextCharFormat()
-        self.fmt_soft_kw.setForeground(QColor("#4FC1FF"))
-        self.fmt_soft_kw.setFontWeight(QFont.Bold)
-
-        self.fmt_builtin = QTextCharFormat()
-        self.fmt_builtin.setForeground(QColor("#4EC9B0"))
-
-        self.fmt_exception = QTextCharFormat()
-        self.fmt_exception.setForeground(QColor("#DCDCAA"))
-
-        self.fmt_decorator = QTextCharFormat()
-        self.fmt_decorator.setForeground(QColor("#C586C0"))
-
-        self.fmt_defclass_kw = QTextCharFormat()
-        self.fmt_defclass_kw.setForeground(QColor("#569Cff"))
-        self.fmt_defclass_kw.setFontWeight(QFont.Bold)
-
-        self.fmt_defclass_name = QTextCharFormat()
-        self.fmt_defclass_name.setForeground(QColor("#DCDCAA"))
-        self.fmt_defclass_name.setFontWeight(QFont.Bold)
-
-        self.fmt_string = QTextCharFormat()
-        self.fmt_string.setForeground(QColor("#CE9178"))
-
-        self.fmt_fexpr = QTextCharFormat()
-        self.fmt_fexpr.setForeground(QColor("#FFD580"))  # warm highlight inside {...}
-
-        self.fmt_comment = QTextCharFormat()
-        self.fmt_comment.setForeground(QColor("#6A9955"))
-        self.fmt_comment.setFontItalic(True)
-
-        self.fmt_comment_tag = QTextCharFormat()
-        self.fmt_comment_tag.setForeground(QColor("#FFB86C"))
-        self.fmt_comment_tag.setFontWeight(QFont.Bold)
-
-        self.fmt_number = QTextCharFormat()
-        self.fmt_number.setForeground(QColor("#B5CEA8"))
+        self.fmt_kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
+        self.fmt_soft_kw = _fmt(self._language_id, "soft_keyword", "#4FC1FF", bold=True)
+        self.fmt_builtin = _fmt(self._language_id, "builtin", "#4EC9B0")
+        self.fmt_exception = _fmt(self._language_id, "exception", "#DCDCAA")
+        self.fmt_decorator = _fmt(self._language_id, "decorator", "#C586C0")
+        self.fmt_defclass_kw = _fmt(self._language_id, "definition_keyword", "#569Cff", bold=True)
+        self.fmt_defclass_name = _fmt(self._language_id, "definition_name", "#DCDCAA", bold=True)
+        self.fmt_operator = _fmt(self._language_id, "operator", "#D4D4D4")
+        self.fmt_bracket = _fmt(self._language_id, "bracket", "#D7BA7D")
+        self.fmt_string = _fmt(self._language_id, "string", "#CE9178")
+        self.fmt_fexpr = _fmt(self._language_id, "fstring_expression", "#FFD580")
+        self.fmt_comment = _fmt(self._language_id, "comment", "#6A9955", italic=True)
+        self.fmt_comment_tag = _fmt(self._language_id, "comment_tag", "#FFB86C", bold=True)
+        self.fmt_number = _fmt(self._language_id, "number", "#B5CEA8")
 
         # ---------- regex sets ----------
         self.rules: list[tuple[re.Pattern, QTextCharFormat]] = []
@@ -141,6 +332,10 @@ class PythonHighlighter(QSyntaxHighlighter):
         self.class_pat = re.compile(r"\b(class)\s+([A-Za-z_]\w*)")
         self.comment_pat = re.compile(r"#.*$")
         self.comment_tag_pat = re.compile(r"\b(TODO|FIXME|NOTE|HACK|BUG|XXX)\b")
+        self.operator_pat = re.compile(
+            r"(?:\*\*=?|//=?|<<=?|>>=?|:=|==|!=|<=|>=|->|\+=|-=|\*=|/=|%=|@=?|&=|\|=|\^=|[+\-*/%&|^~<>!=:@])"
+        )
+        self.bracket_pat = re.compile(r"[\[\]\(\)\{\}]")
 
         self.number_pat = re.compile(
             r"\b("
@@ -194,6 +389,12 @@ class PythonHighlighter(QSyntaxHighlighter):
             ns, ne = m.span(2)
             self.setFormat(offset + ks, ke - ks, self.fmt_defclass_kw)
             self.setFormat(offset + ns, ne - ns, self.fmt_defclass_name)
+
+        for m in self.operator_pat.finditer(text):
+            self.setFormat(offset + m.start(), m.end() - m.start(), self.fmt_operator)
+
+        for m in self.bracket_pat.finditer(text):
+            self.setFormat(offset + m.start(), m.end() - m.start(), self.fmt_bracket)
 
     def _highlight_fexpr_regions(self, text: str, base_offset: int):
         # lightweight brace parser for f-string { ... } regions
@@ -342,12 +543,13 @@ class PythonHighlighter(QSyntaxHighlighter):
 
 
 class HtmlHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        tag = QTextCharFormat(); tag.setForeground(QColor("#4EC9B0"))
-        attr = QTextCharFormat(); attr.setForeground(QColor("#9CDCFE"))
-        val = QTextCharFormat(); val.setForeground(QColor("#CE9178"))
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955")); com.setFontItalic(True)
+        self._language_id = canonicalize_syntax_language(language_id or "html")
+        tag = _fmt(self._language_id, "tag", "#4EC9B0")
+        attr = _fmt(self._language_id, "attribute", "#9CDCFE")
+        val = _fmt(self._language_id, "value", "#CE9178")
+        com = _fmt(self._language_id, "comment", "#6A9955", italic=True)
         self.rules = [
             (re.compile(r"</?\\w+\\b"), tag),
             (re.compile(r"\\b\\w+(?=\\s*=)"), attr),
@@ -363,28 +565,29 @@ class HtmlHighlighter(QSyntaxHighlighter):
 
 
 class JavaScriptHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        kw = QTextCharFormat(); kw.setForeground(QColor("#569Cff")); kw.setFontWeight(QFont.Bold)
+        self._language_id = canonicalize_syntax_language(language_id or "javascript")
+        kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
         self.rules = [(re.compile(r"\\b" + w + r"\\b"), kw) for w in (
             "break","case","catch","class","const","continue","debugger","default","delete","do",
             "else","export","extends","finally","for","function","if","import","in","instanceof","let",
             "new","return","super","switch","this","throw","try","typeof","var","void","while","with",
             "yield","true","false","null","async","await"
         )]
-        strf = QTextCharFormat(); strf.setForeground(QColor("#CE9178"))
+        strf = _fmt(self._language_id, "string", "#CE9178")
         self.rules += [
             (re.compile(r'"[^"\\\\]*(\\\\.[^"\\\\]*)*"'), strf),
             (re.compile(r"'[^'\\\\]*(\\\\.[^'\\\\]*)*'"), strf),
             (re.compile(r"`[^`\\\\]*(\\\\.[^`\\\\]*)*`"), strf),
         ]
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955"))
+        com = _fmt(self._language_id, "comment", "#6A9955")
         self.rules += [
             (re.compile(r"//[^\n]*"), com), (re.compile(r"/\\*.*?\\*/"), com),
         ]
-        num = QTextCharFormat(); num.setForeground(QColor("#B5CEA8"))
+        num = _fmt(self._language_id, "number", "#B5CEA8")
         self.rules.append((re.compile(r"\\b\\d+(\\.\\d+)?\\b"), num))
-        fn = QTextCharFormat(); fn.setForeground(QColor("#DCDCAA"))
+        fn = _fmt(self._language_id, "function", "#DCDCAA")
         self.rules.append((re.compile(r"\\b\\w+(?=\\()"), fn))
     def highlightBlock(self, text):
         for pat, fmt in self.rules:
@@ -394,9 +597,10 @@ class JavaScriptHighlighter(QSyntaxHighlighter):
 
 
 class PhpHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        kw = QTextCharFormat(); kw.setForeground(QColor("#569Cff")); kw.setFontWeight(QFont.Bold)
+        self._language_id = canonicalize_syntax_language(language_id or "php")
+        kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
         kws = (
             "__halt_compiler","abstract","and","array","as","break","callable","case","catch","class",
             "clone","const","continue","declare","default","die","do","echo","else","elseif","empty",
@@ -407,18 +611,18 @@ class PhpHighlighter(QSyntaxHighlighter):
             "throw","trait","try","unset","use","var","while","xor","yield","true","false","null"
         )
         self.rules = [(re.compile(r"\\b" + w + r"\\b"), kw) for w in kws]
-        var = QTextCharFormat(); var.setForeground(QColor("#9CDCFE"))
+        var = _fmt(self._language_id, "variable", "#9CDCFE")
         self.rules.append((re.compile(r"\\$\\w+\\b"), var))
-        strf = QTextCharFormat(); strf.setForeground(QColor("#CE9178"))
+        strf = _fmt(self._language_id, "string", "#CE9178")
         self.rules += [
             (re.compile(r'"[^"\\\\]*(\\\\.[^"\\\\]*)*"'), strf),
             (re.compile(r"'[^'\\\\]*(\\\\.[^'\\\\]*)*'"), strf),
         ]
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955"))
+        com = _fmt(self._language_id, "comment", "#6A9955")
         self.rules += [
             (re.compile(r"//[^\n]*"), com), (re.compile(r"#[^\n]*"), com), (re.compile(r"/\\*.*?\\*/"), com)
         ]
-        tag = QTextCharFormat(); tag.setForeground(QColor("#569Cff")); tag.setFontWeight(QFont.Bold)
+        tag = _fmt(self._language_id, "tag", "#569Cff", bold=True)
         self.rules.append((re.compile(r"<\\?php|\\?>"), tag))
     def highlightBlock(self, text):
         for pat, fmt in self.rules:
@@ -428,11 +632,10 @@ class PhpHighlighter(QSyntaxHighlighter):
 
 
 class CppHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        kw = QTextCharFormat()
-        kw.setForeground(QColor("#569Cff"))
-        kw.setFontWeight(QFont.Bold)
+        self._language_id = canonicalize_syntax_language(language_id or "cpp")
+        kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
         keywords = (
             "alignas", "alignof", "asm", "auto", "bool", "break", "case", "catch", "char",
             "char8_t", "char16_t", "char32_t", "class", "concept", "const", "consteval",
@@ -448,19 +651,16 @@ class CppHighlighter(QSyntaxHighlighter):
         )
         self.rules = [(re.compile(rf"\b{re.escape(w)}\b"), kw) for w in keywords]
 
-        pre = QTextCharFormat()
-        pre.setForeground(QColor("#C586C0"))
+        pre = _fmt(self._language_id, "preprocessor", "#C586C0")
         self.rules.append((re.compile(r"^\s*#.*"), pre))
 
-        strf = QTextCharFormat()
-        strf.setForeground(QColor("#CE9178"))
+        strf = _fmt(self._language_id, "string", "#CE9178")
         self.rules += [
             (re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), strf),
             (re.compile(r"'[^'\\]*(\\.[^'\\]*)*'"), strf),
         ]
 
-        num = QTextCharFormat()
-        num.setForeground(QColor("#B5CEA8"))
+        num = _fmt(self._language_id, "number", "#B5CEA8")
         self.rules.append(
             (
                 re.compile(
@@ -475,8 +675,7 @@ class CppHighlighter(QSyntaxHighlighter):
             )
         )
 
-        com = QTextCharFormat()
-        com.setForeground(QColor("#6A9955"))
+        com = _fmt(self._language_id, "comment", "#6A9955")
         self.rules += [
             (re.compile(r"//[^\n]*"), com),
             (re.compile(r"/\*.*?\*/"), com),
@@ -489,11 +688,12 @@ class CppHighlighter(QSyntaxHighlighter):
 
 
 class JsonHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        key = QTextCharFormat(); key.setForeground(QColor("#9CDCFE"))
-        strf = QTextCharFormat(); strf.setForeground(QColor("#CE9178"))
-        num = QTextCharFormat(); num.setForeground(QColor("#B5CEA8"))
+        self._language_id = canonicalize_syntax_language(language_id or "json")
+        key = _fmt(self._language_id, "key", "#9CDCFE")
+        strf = _fmt(self._language_id, "string", "#CE9178")
+        num = _fmt(self._language_id, "number", "#B5CEA8")
         self.rules = [
             (re.compile(r'"[^"\\\\]*(\\\\.[^"\\\\]*)*"(?=\s*:)'), key),
             (re.compile(r'"[^"\\\\]*(\\\\.[^"\\\\]*)*"'), strf),
@@ -507,13 +707,13 @@ class JsonHighlighter(QSyntaxHighlighter):
 
 
 class TomlHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "toml")
 
         self.rules: list[tuple[re.Pattern, QTextCharFormat]] = []
 
-        key = QTextCharFormat()
-        key.setForeground(QColor("#9CDCFE"))
+        key = _fmt(self._language_id, "key", "#9CDCFE")
         self.rules.extend(
             [
                 (re.compile(r"^\s*[A-Za-z0-9_.-]+\s*(?=\=)"), key),
@@ -522,9 +722,7 @@ class TomlHighlighter(QSyntaxHighlighter):
             ]
         )
 
-        table = QTextCharFormat()
-        table.setForeground(QColor("#4EC9B0"))
-        table.setFontWeight(QFont.Bold)
+        table = _fmt(self._language_id, "table", "#4EC9B0", bold=True)
         self.rules.extend(
             [
                 (re.compile(r"\[\[[^\]]+\]\]"), table),
@@ -532,8 +730,7 @@ class TomlHighlighter(QSyntaxHighlighter):
             ]
         )
 
-        string = QTextCharFormat()
-        string.setForeground(QColor("#CE9178"))
+        string = _fmt(self._language_id, "string", "#CE9178")
         self.rules.extend(
             [
                 (re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), string),
@@ -541,25 +738,21 @@ class TomlHighlighter(QSyntaxHighlighter):
             ]
         )
 
-        number = QTextCharFormat()
-        number.setForeground(QColor("#B5CEA8"))
+        number = _fmt(self._language_id, "number", "#B5CEA8")
         self.rules.extend(
             [
                 (re.compile(r"\b-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b"), number),
             ]
         )
 
-        literal = QTextCharFormat()
-        literal.setForeground(QColor("#569Cff"))
-        literal.setFontWeight(QFont.Bold)
+        literal = _fmt(self._language_id, "literal", "#569Cff", bold=True)
         self.rules.extend(
             [
                 (re.compile(r"\b(?:true|false)\b"), literal),
             ]
         )
 
-        date = QTextCharFormat()
-        date.setForeground(QColor("#DCDCAA"))
+        date = _fmt(self._language_id, "date", "#DCDCAA")
         self.rules.extend(
             [
                 (
@@ -573,9 +766,7 @@ class TomlHighlighter(QSyntaxHighlighter):
             ]
         )
 
-        comment = QTextCharFormat()
-        comment.setForeground(QColor("#6A9955"))
-        comment.setFontItalic(True)
+        comment = _fmt(self._language_id, "comment", "#6A9955", italic=True)
         self.rules.append((re.compile(r"#[^\n]*"), comment))
 
     def highlightBlock(self, text):
@@ -586,9 +777,10 @@ class TomlHighlighter(QSyntaxHighlighter):
 
 
 class RustHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        kw = QTextCharFormat(); kw.setForeground(QColor("#569Cff")); kw.setFontWeight(QFont.Bold)
+        self._language_id = canonicalize_syntax_language(language_id or "rust")
+        kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
         self.rules = [(re.compile(r"\b" + w + r"\b"), kw) for w in (
             "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
             "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
@@ -599,14 +791,14 @@ class RustHighlighter(QSyntaxHighlighter):
             "typeof", "unsized", "virtual", "yield", "try",
         )]
 
-        strf = QTextCharFormat(); strf.setForeground(QColor("#CE9178"))
+        strf = _fmt(self._language_id, "string", "#CE9178")
         self.rules += [
             (re.compile(r'r#*"(?:[^"\\]|\\.)*"#*'), strf),
             (re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), strf),
             (re.compile(r"'[^'\\]*(\\.[^'\\]*)*'"), strf),
         ]
 
-        num = QTextCharFormat(); num.setForeground(QColor("#B5CEA8"))
+        num = _fmt(self._language_id, "number", "#B5CEA8")
         self.rules += [
             (
                 re.compile(
@@ -621,13 +813,13 @@ class RustHighlighter(QSyntaxHighlighter):
             ),
         ]
 
-        macro = QTextCharFormat(); macro.setForeground(QColor("#DCDCAA"))
+        macro = _fmt(self._language_id, "macro", "#DCDCAA")
         self.rules += [(re.compile(r"\b[A-Za-z_]\w*!\b"), macro)]
 
-        attr = QTextCharFormat(); attr.setForeground(QColor("#C586C0"))
+        attr = _fmt(self._language_id, "attribute", "#C586C0")
         self.rules += [(re.compile(r"#\s*!\[[^\]]*\]|#\s*\[[^\]]*\]"), attr)]
 
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955"))
+        com = _fmt(self._language_id, "comment", "#6A9955")
         self.rules += [
             (re.compile(r"//[^\n]*"), com),
             (re.compile(r"/\*.*?\*/"), com),
@@ -641,14 +833,15 @@ class RustHighlighter(QSyntaxHighlighter):
 
 
 class CssHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
-        idf = QTextCharFormat(); idf.setForeground(QColor("#D7BA7D"))
-        clsf = QTextCharFormat(); clsf.setForeground(QColor("#4EC9B0"))
-        tagf = QTextCharFormat(); tagf.setForeground(QColor("#D7BA7D"))
-        prop = QTextCharFormat(); prop.setForeground(QColor("#9CDCFE"))
-        val = QTextCharFormat(); val.setForeground(QColor("#CE9178"))
-        com = QTextCharFormat(); com.setForeground(QColor("#6A9955")); com.setFontItalic(True)
+        self._language_id = canonicalize_syntax_language(language_id or "css")
+        idf = _fmt(self._language_id, "selector_id", "#D7BA7D")
+        clsf = _fmt(self._language_id, "selector_class", "#4EC9B0")
+        tagf = _fmt(self._language_id, "selector_tag", "#D7BA7D")
+        prop = _fmt(self._language_id, "property", "#9CDCFE")
+        val = _fmt(self._language_id, "value", "#CE9178")
+        com = _fmt(self._language_id, "comment", "#6A9955", italic=True)
         self.rules = [
             (re.compile(r"/\\*.*?\\*/"), com),
             (re.compile(r"#[A-Za-z0-9_-]+"), idf),
@@ -667,15 +860,14 @@ class CssHighlighter(QSyntaxHighlighter):
         hide_hash_for_colors(self, text)
 
 class BashHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "shell")
 
         self.rules: list[tuple[re.Pattern, QTextCharFormat]] = []
 
         # --- Keywords / builtins ---
-        kw = QTextCharFormat()
-        kw.setForeground(QColor("#569Cff"))
-        kw.setFontWeight(QFont.Bold)
+        kw = _fmt(self._language_id, "keyword", "#569Cff", bold=True)
 
         keywords = (
             "if", "then", "else", "elif", "fi",
@@ -693,8 +885,7 @@ class BashHighlighter(QSyntaxHighlighter):
             self.rules.append((re.compile(r"\b" + re.escape(w) + r"\b"), kw))
 
         # --- Variables ---
-        var = QTextCharFormat()
-        var.setForeground(QColor("#9CDCFE"))
+        var = _fmt(self._language_id, "variable", "#9CDCFE")
 
         # $VAR
         self.rules.append(
@@ -715,24 +906,20 @@ class BashHighlighter(QSyntaxHighlighter):
         )
 
         # --- Strings ---
-        strf = QTextCharFormat()
-        strf.setForeground(QColor("#CE9178"))
+        strf = _fmt(self._language_id, "string", "#CE9178")
         self.rules += [
             (re.compile(r'"[^"\\]*(\\.[^"\\]*)*"'), strf),
             (re.compile(r"'[^'\\]*(\\.[^'\\]*)*'"), strf),
         ]
 
         # --- Comments (# ... end of line) ---
-        com = QTextCharFormat()
-        com.setForeground(QColor("#6A9955"))
-        com.setFontItalic(True)
+        com = _fmt(self._language_id, "comment", "#6A9955", italic=True)
         self.rules.append(
             (re.compile(r"#[^\n]*"), com)
         )
 
         # --- Shebang line ---
-        shebang = QTextCharFormat()
-        shebang.setForeground(QColor("#C586C0"))
+        shebang = _fmt(self._language_id, "shebang", "#C586C0")
         self.rules.append(
             (re.compile(r"^#!.*$"), shebang)
         )
@@ -761,90 +948,33 @@ class MarkdownBlockData(QTextBlockUserData):
         
 class MarkdownHighlighter(QSyntaxHighlighter):
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "markdown")
 
         # -----------------------------
         # Core formats
         # -----------------------------
-        self.fmt_h1 = QTextCharFormat()
-        self.fmt_h1.setForeground(QColor("#4FC1FF"))
-        self.fmt_h1.setFontWeight(QFont.Bold)
-
-        self.fmt_h2 = QTextCharFormat()
-        self.fmt_h2.setForeground(QColor("#61AFEF"))
-        self.fmt_h2.setFontWeight(QFont.Bold)
-
-        self.fmt_h3 = QTextCharFormat()
-        self.fmt_h3.setForeground(QColor("#C586C0"))
-        self.fmt_h3.setFontWeight(QFont.Bold)
-
-        self.fmt_h4 = QTextCharFormat()
-        self.fmt_h4.setForeground(QColor("#D7BA7D"))
-        self.fmt_h4.setFontWeight(QFont.Bold)
-
-        self.fmt_h5 = QTextCharFormat()
-        self.fmt_h5.setForeground(QColor("#B5CEA8"))
-        self.fmt_h5.setFontWeight(QFont.Bold)
-
-        self.fmt_h6 = QTextCharFormat()
-        self.fmt_h6.setForeground(QColor("#9CDCFE"))
-        self.fmt_h6.setFontWeight(QFont.Bold)
-
-        self.fmt_blockquote = QTextCharFormat()
-        self.fmt_blockquote.setForeground(QColor("#6A9955"))
-        self.fmt_blockquote.setFontItalic(True)
-
-        self.fmt_list = QTextCharFormat()
-        self.fmt_list.setForeground(QColor("#D7BA7D"))
-        self.fmt_list.setFontWeight(QFont.Bold)
-
-        self.fmt_hr = QTextCharFormat()
-        self.fmt_hr.setForeground(QColor("#808080"))
-        self.fmt_hr.setFontWeight(QFont.Bold)
-
-        self.fmt_inline_code = QTextCharFormat()
-        self.fmt_inline_code.setForeground(QColor("#D7BA7D"))
-        self.fmt_inline_code.setFontFamily("monospace")
-
-        self.fmt_bold = QTextCharFormat()
-        self.fmt_bold.setForeground(QColor("#CE9178"))
-        self.fmt_bold.setFontWeight(QFont.Bold)
-
-        self.fmt_italic = QTextCharFormat()
-        self.fmt_italic.setForeground(QColor("#CE9178"))
-        self.fmt_italic.setFontItalic(True)
-
-        self.fmt_bold_italic = QTextCharFormat()
-        self.fmt_bold_italic.setForeground(QColor("#CE9178"))
-        self.fmt_bold_italic.setFontWeight(QFont.Bold)
-        self.fmt_bold_italic.setFontItalic(True)
-
-        self.fmt_link_text = QTextCharFormat()
-        self.fmt_link_text.setForeground(QColor("#4FC1FF"))
-        self.fmt_link_text.setFontUnderline(True)
-
-        self.fmt_link_url = QTextCharFormat()
-        self.fmt_link_url.setForeground(QColor("#9CDCFE"))
-
-        self.fmt_image = QTextCharFormat()
-        self.fmt_image.setForeground(QColor("#C586C0"))
-
-        self.fmt_autolink = QTextCharFormat()
-        self.fmt_autolink.setForeground(QColor("#4FC1FF"))
-        self.fmt_autolink.setFontUnderline(True)
-
-        self.fmt_comment = QTextCharFormat()
-        self.fmt_comment.setForeground(QColor("#6A9955"))
-        self.fmt_comment.setFontItalic(True)
-
-        self.fmt_fence = QTextCharFormat()
-        self.fmt_fence.setForeground(QColor("#569CD6"))
-        self.fmt_fence.setFontWeight(QFont.Bold)
-
-        self.fmt_code_block_fallback = QTextCharFormat()
-        self.fmt_code_block_fallback.setForeground(QColor("#DCDCAA"))
-        self.fmt_code_block_fallback.setFontFamily("monospace")
+        self.fmt_h1 = _fmt(self._language_id, "heading_1", "#4FC1FF", bold=True)
+        self.fmt_h2 = _fmt(self._language_id, "heading_2", "#61AFEF", bold=True)
+        self.fmt_h3 = _fmt(self._language_id, "heading_3", "#C586C0", bold=True)
+        self.fmt_h4 = _fmt(self._language_id, "heading_4", "#D7BA7D", bold=True)
+        self.fmt_h5 = _fmt(self._language_id, "heading_5", "#B5CEA8", bold=True)
+        self.fmt_h6 = _fmt(self._language_id, "heading_6", "#9CDCFE", bold=True)
+        self.fmt_blockquote = _fmt(self._language_id, "blockquote", "#6A9955", italic=True)
+        self.fmt_list = _fmt(self._language_id, "list_marker", "#D7BA7D", bold=True)
+        self.fmt_hr = _fmt(self._language_id, "horizontal_rule", "#808080", bold=True)
+        self.fmt_inline_code = _fmt(self._language_id, "inline_code", "#D7BA7D", family="monospace")
+        self.fmt_bold = _fmt(self._language_id, "emphasis", "#CE9178", bold=True)
+        self.fmt_italic = _fmt(self._language_id, "emphasis", "#CE9178", italic=True)
+        self.fmt_bold_italic = _fmt(self._language_id, "emphasis", "#CE9178", bold=True, italic=True)
+        self.fmt_link_text = _fmt(self._language_id, "link_text", "#4FC1FF", underline=True)
+        self.fmt_link_url = _fmt(self._language_id, "link_url", "#9CDCFE")
+        self.fmt_image = _fmt(self._language_id, "image", "#C586C0")
+        self.fmt_autolink = _fmt(self._language_id, "autolink", "#4FC1FF", underline=True)
+        self.fmt_comment = _fmt(self._language_id, "comment", "#6A9955", italic=True)
+        self.fmt_fence = _fmt(self._language_id, "fence", "#569CD6", bold=True)
+        self.fmt_code_block_fallback = _fmt(self._language_id, "code_block", "#DCDCAA", family="monospace")
 
         # -----------------------------
         # Regexes
@@ -1019,7 +1149,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             self.setFormat(0, len(text), self.fmt_code_block_fallback)
             return -1
 
-        delegate = delegate_cls(None)
+        delegate = delegate_cls(None, language_id=mapped_language)
 
         applied_formats: list[tuple[int, int, QTextCharFormat]] = []
         current_state = {"value": -1}
@@ -1190,38 +1320,29 @@ class TodoHighlighter(QSyntaxHighlighter):
     TAG_RE = re.compile(r'(?<!\w)@[A-Za-z_][\w-]*')
     PRIORITY_RE = re.compile(r'(?<!\w)!{1,3}(?!\w)')
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, language_id: str | None = None):
         super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "todo")
 
         # Task checkbox format
-        self.fmt_box_open = QTextCharFormat()
-        self.fmt_box_open.setForeground(QColor("#DCDCAA"))  # [ ]
-
-        self.fmt_box_done = QTextCharFormat()
-        self.fmt_box_done.setForeground(QColor("#6A9955"))  # [x] / [✔]
+        self.fmt_box_open = _fmt(self._language_id, "checkbox_open", "#DCDCAA")
+        self.fmt_box_done = _fmt(self._language_id, "checkbox_done", "#6A9955")
 
         # Rest of task text
-        self.fmt_task_text = QTextCharFormat()
-        self.fmt_task_text.setForeground(QColor("#D4D4D4"))
+        self.fmt_task_text = _fmt(self._language_id, "task_text", "#D4D4D4")
 
         # Optional bullet
-        self.fmt_bullet = QTextCharFormat()
-        self.fmt_bullet.setForeground(QColor("#C586C0"))
+        self.fmt_bullet = _fmt(self._language_id, "bullet", "#C586C0")
 
         # Comments
-        self.fmt_comment = QTextCharFormat()
-        self.fmt_comment.setForeground(QColor("#6A9955"))
+        self.fmt_comment = _fmt(self._language_id, "comment", "#6A9955")
 
         # Headers
-        self.fmt_header = QTextCharFormat()
-        self.fmt_header.setForeground(QColor("#4FC1FF"))
+        self.fmt_header = _fmt(self._language_id, "header", "#4FC1FF")
 
         # Tags / priority
-        self.fmt_tag = QTextCharFormat()
-        self.fmt_tag.setForeground(QColor("#9CDCFE"))
-
-        self.fmt_priority = QTextCharFormat()
-        self.fmt_priority.setForeground(QColor("#CE9178"))
+        self.fmt_tag = _fmt(self._language_id, "tag", "#9CDCFE")
+        self.fmt_priority = _fmt(self._language_id, "priority", "#CE9178")
 
     def highlightBlock(self, text: str) -> None:
         # 1) Comment line wins immediately
@@ -1326,9 +1447,11 @@ def _clear_editor_highlighter(editor: "CodeEditor") -> None:
 def set_language_highlighter(editor: "CodeEditor", language_id: str) -> None:
     _clear_editor_highlighter(editor)
 
-    highlighter_cls = LANGUAGE_HIGHLIGHTER_MAP.get(str(language_id or "").strip().lower())
+    raw_language = str(language_id or "").strip().lower()
+    highlighter_cls = LANGUAGE_HIGHLIGHTER_MAP.get(raw_language)
     if highlighter_cls is None:
         return
+    canonical_language = canonicalize_syntax_language(raw_language)
 
     doc = editor.document()
     # Keep one syntax highlighter per document to avoid stale/duplicate
@@ -1343,7 +1466,10 @@ def set_language_highlighter(editor: "CodeEditor", language_id: str) -> None:
                 child.deleteLater()
             except Exception:
                 pass
-    editor._highlighter = highlighter_cls(doc)
+    try:
+        editor._highlighter = highlighter_cls(doc, language_id=canonical_language)
+    except TypeError:
+        editor._highlighter = highlighter_cls(doc)
 
 
 def ensure_highlighter(editor: "CodeEditor") -> None:
@@ -1364,6 +1490,12 @@ def set_highlighter_for_file(editor, file_path: str) -> None:
 
 __all__ = [
     "LANGUAGE_HIGHLIGHTER_MAP",
+    "SYNTAX_TOKEN_DEFAULTS",
+    "SYNTAX_LANGUAGE_LABELS",
+    "canonicalize_syntax_language",
+    "set_syntax_color_resolver",
+    "syntax_language_labels",
+    "syntax_token_defaults",
     "ensure_highlighter",
     "set_language_highlighter",
     "set_highlighter_for_file",
@@ -1377,5 +1509,6 @@ __all__ = [
     "RustHighlighter",
     "CssHighlighter",
     "BashHighlighter",
+    "MarkdownHighlighter",
     "TodoHighlighter",
 ]
