@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, Signal
+from src.services.language_id import language_id_for_path
 
 
 @dataclass
@@ -941,6 +942,38 @@ class CompletionManager(QObject):
         cfg = payload.completion_cfg
         max_items = int(cfg.get("max_items", 500))
         case_sensitive = bool(cfg.get("case_sensitive", False))
+        language_id = language_id_for_path(payload.file_path, default="plaintext")
+
+        if language_id == "tdocproject":
+            context = _detect_tdocproject_context(
+                source_text=payload.source_text,
+                line=payload.line,
+                column=payload.column,
+                prefix=payload.prefix,
+            )
+            items = _fallback_tdocproject_candidates(
+                payload=payload,
+                context=context,
+                max_items=max(max_items * 4, 120),
+            )
+            ranked = _rank_items(
+                items=items,
+                prefix=payload.prefix,
+                context=context,
+                case_sensitive=case_sensitive,
+                recency=payload.recency,
+                max_items=max_items,
+            )
+            return {
+                "result_type": "completion",
+                "file_path": payload.file_path,
+                "token": payload.token,
+                "items": ranked,
+                "backend": "tdocproject",
+                "missing_backend": "",
+                "interpreter": payload.interpreter,
+                "reason": payload.reason,
+            }
 
         context = _detect_context(
             source_text=payload.source_text,
@@ -1407,6 +1440,234 @@ def _detect_context(source_text: str, line: int, column: int, prefix: str) -> di
         return {"mode": "attribute", "import_module": "", "prefix": ""}
 
     return {"mode": "normal", "import_module": "", "prefix": prefix}
+
+
+_TDOCPROJECT_RULE_VALUE_RE = re.compile(r"^\s*(?P<rule>include|ignore)\s*:\s*(?P<value>[^#]*)$")
+_TDOCPROJECT_FRONTMATTER_RULE_RE = re.compile(r"^\s*frontmatter_schema\s*:\s*(?P<value>[^#]*)$")
+_TDOCPROJECT_SECTION_HEADER_RE = re.compile(r"^\s*(?P<section>[^=#:\n][^=#\n]*?)\s*:\s*$")
+_TDOCPROJECT_METADATA_KEY_RE = re.compile(r"(?:^|;)\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=")
+_TDOCPROJECT_DEFAULT_SECTION_SUGGESTIONS = [
+    "Characters",
+    "Locations",
+    "Concepts",
+    "Guides",
+    "References",
+]
+_TDOCPROJECT_DEFAULT_METADATA_KEYS = [
+    "doc",
+    "role",
+    "tags",
+    "status",
+    "owner",
+]
+
+
+def _detect_tdocproject_context(source_text: str, line: int, column: int, prefix: str) -> dict:
+    lines = source_text.splitlines()
+    line_text = lines[line - 1] if 1 <= line <= len(lines) else ""
+    col = max(0, min(len(line_text), int(column)))
+    left = line_text[:col]
+    stripped = left.lstrip()
+
+    if stripped.startswith("#"):
+        return {"mode": "comment", "prefix": prefix}
+    frontmatter_m = _TDOCPROJECT_FRONTMATTER_RULE_RE.match(left)
+    if frontmatter_m:
+        raw_value = str(frontmatter_m.group("value") or "").lstrip()
+        if raw_value.startswith('"') or raw_value.startswith("'"):
+            raw_value = raw_value[1:]
+        raw_value = raw_value.replace("\\", "/")
+        if "/" in raw_value:
+            path_prefix, leaf_prefix = raw_value.rsplit("/", 1)
+            path_prefix = f"{path_prefix}/"
+        else:
+            path_prefix, leaf_prefix = "", raw_value
+        return {
+            "mode": "frontmatter_schema_value",
+            "prefix": leaf_prefix,
+            "path_prefix": path_prefix,
+        }
+    rule_m = _TDOCPROJECT_RULE_VALUE_RE.match(left)
+    if rule_m:
+        return {
+            "mode": "rule_value",
+            "rule": str(rule_m.group("rule") or "").strip().lower(),
+            "prefix": prefix,
+        }
+    if ";" in left:
+        return {"mode": "metadata", "prefix": prefix}
+    if stripped.endswith(":") and "=" not in stripped:
+        return {"mode": "section_header", "prefix": prefix}
+    return {"mode": "normal", "prefix": prefix}
+
+
+def _extract_tdocproject_section_names(source_text: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (source_text or "").splitlines():
+        line = str(raw or "").strip()
+        if not line or line.startswith("#"):
+            continue
+        if _TDOCPROJECT_RULE_VALUE_RE.match(line) or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(line):
+            continue
+        match = _TDOCPROJECT_SECTION_HEADER_RE.match(line)
+        if not match:
+            continue
+        section = str(match.group("section") or "").strip()
+        if not section:
+            continue
+        key = section.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(section)
+    return out
+
+
+def _extract_tdocproject_metadata_keys(source_text: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (source_text or "").splitlines():
+        line = str(raw or "")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _TDOCPROJECT_RULE_VALUE_RE.match(stripped) or _TDOCPROJECT_FRONTMATTER_RULE_RE.match(stripped):
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        if ";" not in line and indent <= 0:
+            continue
+        for match in _TDOCPROJECT_METADATA_KEY_RE.finditer(line):
+            key = str(match.group("key") or "").strip().lower()
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _fallback_tdocproject_candidates(payload: _CompletionPayload, context: dict, max_items: int) -> list[dict]:
+    mode = str(context.get("mode") or "normal")
+    file_sections = _extract_tdocproject_section_names(payload.source_text)
+    metadata_keys = _extract_tdocproject_metadata_keys(payload.source_text)
+
+    sections = list(_TDOCPROJECT_DEFAULT_SECTION_SUGGESTIONS)
+    for section in file_sections:
+        if section.casefold() not in {item.casefold() for item in sections}:
+            sections.append(section)
+
+    keys = list(_TDOCPROJECT_DEFAULT_METADATA_KEYS)
+    for key in metadata_keys:
+        if key.casefold() not in {item.casefold() for item in keys}:
+            keys.append(key)
+
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(
+        label: str,
+        *,
+        insert_text: str | None = None,
+        kind: str = "name",
+        detail: str = "",
+    ) -> None:
+        shown = str(label or "").strip()
+        text = str(insert_text if insert_text is not None else shown)
+        if not shown or not text.strip():
+            return
+        key = (shown, text)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            {
+                "label": shown,
+                "insert_text": text,
+                "kind": kind,
+                "detail": detail,
+                "source": "tdocproject",
+                "source_scope": "current_file",
+            }
+        )
+
+    if mode == "frontmatter_schema_value":
+        path_prefix = str(context.get("path_prefix") or "").replace("\\", "/")
+        if path_prefix.startswith("./"):
+            path_prefix = path_prefix[2:]
+        if path_prefix.startswith("/"):
+            path_prefix = path_prefix.lstrip("/")
+        search_rel = path_prefix.rstrip("/")
+        base_dir = os.path.dirname(payload.file_path) if payload.file_path else payload.project_root
+        search_dir = os.path.join(base_dir, search_rel) if search_rel else base_dir
+        seen_labels: set[str] = set()
+        try:
+            if os.path.isdir(search_dir):
+                for entry in sorted(os.listdir(search_dir), key=lambda item: str(item).casefold()):
+                    name = str(entry or "").strip()
+                    if not name:
+                        continue
+                    abs_candidate = os.path.join(search_dir, name)
+                    rel_candidate = f"{search_rel}/{name}" if search_rel else name
+                    if os.path.isdir(abs_candidate):
+                        if name.casefold() in seen_labels:
+                            continue
+                        seen_labels.add(name.casefold())
+                        _add(
+                            name,
+                            insert_text=f"{rel_candidate}/",
+                            kind="folder",
+                            detail="directory",
+                        )
+                        continue
+                    if not name.lower().endswith(".json"):
+                        continue
+                    if name.casefold() in seen_labels:
+                        continue
+                    seen_labels.add(name.casefold())
+                    _add(
+                        name,
+                        insert_text=rel_candidate,
+                        kind="file",
+                        detail="json schema",
+                    )
+        except Exception:
+            pass
+        if not out:
+            _add("frontmatter.schema.json", kind="file", detail="json schema")
+            _add("schemas", insert_text="schemas/", kind="folder", detail="directory")
+        return out[: max_items * 2]
+
+    if mode == "rule_value":
+        _add("**/*.tdoc", kind="text", detail="glob pattern")
+        _add("docs/**/*.tdoc", kind="text", detail="glob pattern")
+        _add("guides/**/*.tdoc", kind="text", detail="glob pattern")
+        _add("drafts/**/*.tdoc", kind="text", detail="glob pattern")
+        _add("index.tdoc", kind="text", detail="single document")
+        return out[: max_items * 2]
+
+    if mode == "metadata":
+        for key in keys:
+            _add(f"{key}=", kind="property", detail="symbol metadata")
+        _add("key=value", kind="snippet", detail="metadata template")
+        return out[: max_items * 2]
+
+    _add("include:", insert_text="include: ", kind="keyword", detail="index include rule")
+    _add("ignore:", insert_text="ignore: ", kind="keyword", detail="index ignore rule")
+    _add("frontmatter_schema:", insert_text="frontmatter_schema: ", kind="keyword", detail="frontmatter schema rule")
+    for section in sections:
+        _add(f"{section}:", kind="class", detail="section header")
+    _add("Symbol Name", kind="snippet", detail="canonical symbol")
+    _add("Symbol Name = Alias 1 | Alias 2", kind="snippet", detail="canonical + aliases")
+    _add("Symbol Name ; key=value", kind="snippet", detail="symbol metadata")
+    _add(
+        "Symbol Name = Alias 1 | Alias 2 ; key=value",
+        kind="snippet",
+        detail="aliases + metadata",
+    )
+    _add("# Comment", kind="snippet", detail="comment line")
+    return out[: max_items * 2]
 
 
 def _annotate_jedi_items(items: list[dict]) -> list[dict]:

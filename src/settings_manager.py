@@ -217,6 +217,98 @@ def _normalize_file_templates_config(
         return fallback_norm
     return []
 
+
+def _ensure_builtin_tdoc_file_templates(templates: object) -> list[dict[str, Any]]:
+    items = [dict(node) for node in templates] if isinstance(templates, list) else []
+    if not items:
+        return []
+
+    group_index = -1
+    group_children: list[dict[str, Any]] = []
+    for idx, node in enumerate(items):
+        if not isinstance(node, dict):
+            continue
+        label = str(node.get("label") or "").strip()
+        if label.casefold() != "tdoc":
+            continue
+        children = node.get("children")
+        if isinstance(children, list):
+            group_index = idx
+            group_children = [dict(child) for child in children if isinstance(child, dict)]
+            break
+
+    if group_index < 0:
+        group_index = len(items)
+        group_children = []
+        items.append({"label": "TDOC", "children": group_children})
+
+    normalized_children = [dict(child) for child in group_children if isinstance(child, dict)]
+    existing_labels = {
+        str(child.get("label") or "").strip().casefold()
+        for child in normalized_children
+        if isinstance(child, dict)
+    }
+
+    defaults = [
+        {
+            "label": "TDOC Document",
+            "mode": "prompt",
+            "fixed_name": "",
+            "default_extension": ".tdoc",
+            "content": "",
+        },
+        {
+            "label": "TDOC Project Marker",
+            "mode": "fixed",
+            "fixed_name": ".tdocproject",
+            "default_extension": "",
+            "content": "# TDOC symbol definitions\n\n",
+        },
+        {
+            "label": "Frontmatter Schema",
+            "mode": "fixed",
+            "fixed_name": "frontmatter.schema.json",
+            "default_extension": "",
+            "content": (
+                "{\n"
+                "  \"properties\": {\n"
+                "    \"title\": { \"type\": \"string\" },\n"
+                "    \"status\": { \"enum\": [\"draft\", \"review\", \"final\"] },\n"
+                "    \"index\": { \"enum\": [\"on\", \"off\"] }\n"
+                "  },\n"
+                "  \"required\": [\"title\", \"status\"],\n"
+                "  \"additionalProperties\": false\n"
+                "}\n"
+            ),
+        },
+    ]
+
+    # Migrate prior built-in location that forced schema creation under `.tdoc/`.
+    # Keep user-defined templates intact unless they match the old built-in path.
+    for idx, child in enumerate(normalized_children):
+        if not isinstance(child, dict):
+            continue
+        label_key = str(child.get("label") or "").strip().casefold()
+        if label_key != "frontmatter schema":
+            continue
+        fixed_name = str(child.get("fixed_name") or "").strip().replace("\\", "/")
+        if fixed_name in {".tdoc/frontmatter.schema.json", "./.tdoc/frontmatter.schema.json"}:
+            updated = dict(child)
+            updated["mode"] = "fixed"
+            updated["fixed_name"] = "frontmatter.schema.json"
+            updated["default_extension"] = ""
+            normalized_children[idx] = updated
+
+    for template in defaults:
+        label_key = str(template.get("label") or "").strip().casefold()
+        if label_key in existing_labels:
+            continue
+        normalized_children.append(deepcopy(template))
+        existing_labels.add(label_key)
+
+    items[group_index] = {"label": "TDOC", "children": normalized_children}
+    return items
+
 IDE_KEY_ALIASES: dict[str, str] = {
     "theme": "theme",
     "font_size": "font_size",
@@ -1356,6 +1448,7 @@ class SettingsManager:
             data.get("file_templates"),
             fallback=file_templates_default if isinstance(file_templates_default, list) else [],
         )
+        data["file_templates"] = _ensure_builtin_tdoc_file_templates(data.get("file_templates"))
 
         defaults = data.get("defaults")
         if not isinstance(defaults, dict):

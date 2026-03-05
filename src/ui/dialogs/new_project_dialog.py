@@ -16,20 +16,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.services.project_templates import (
+    ProjectTemplate,
+    load_project_templates,
+    render_project_template_files,
+)
 from src.settings_manager import SettingsManager
 from src.ui.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory
 
 
 _INVALID_FOLDER_CHARS_RE = re.compile(r'[\\/:*?"<>|]')
-_TEMPLATE_CHOICES: tuple[tuple[str, str, str], ...] = (
-    ("python-app", "Python Application", "src/main.py + pyproject.toml + Python .gitignore"),
-    ("python-package", "Python Package", "src/<package>/ + tests/ + build-ready pyproject.toml"),
-    ("rust-bin", "Rust Binary", "Cargo.toml + src/main.rs + Rust .gitignore"),
-    ("cpp-cmake", "C++ (CMake)", "CMakeLists.txt + src/main.cpp + C/C++ .gitignore"),
-    ("empty", "Empty Project", "README.md only"),
-)
-_TEMPLATE_IDS = {item[0] for item in _TEMPLATE_CHOICES}
 
 
 class NewProjectDialog(DialogWindow):
@@ -51,7 +48,11 @@ class NewProjectDialog(DialogWindow):
         self.created_project_path: str | None = None
         self.created_project_name: str | None = None
         self.created_project_post_create_note: str | None = None
+        self._template_catalog: list[ProjectTemplate] = []
+        self._template_by_id: dict[str, ProjectTemplate] = {}
+        self._template_load_warnings: list[str] = []
 
+        self._load_template_catalog()
         self._build_ui()
         self._load_initial_values()
         self._refresh_create_enabled()
@@ -77,8 +78,8 @@ class NewProjectDialog(DialogWindow):
         self.folder_name_edit.setPlaceholderText("my-project")
 
         self.template_combo = QComboBox()
-        for template_id, label, _description in _TEMPLATE_CHOICES:
-            self.template_combo.addItem(label, template_id)
+        for template in self._template_catalog:
+            self.template_combo.addItem(template.label, template.template_id)
 
         self.template_description_label = QLabel("")
         self.template_description_label.setWordWrap(True)
@@ -115,6 +116,14 @@ class NewProjectDialog(DialogWindow):
         self.cancel_btn.clicked.connect(self.reject)
         self.create_btn.clicked.connect(self._create_clicked)
 
+    def _load_template_catalog(self) -> None:
+        result = load_project_templates(self._manager.paths.ide_app_dir)
+        self._template_catalog = list(result.templates)
+        self._template_by_id = {item.template_id: item for item in self._template_catalog}
+        self._template_load_warnings = list(result.warnings)
+        for warning in self._template_load_warnings:
+            print(f"Project template warning: {warning}")
+
     def _load_initial_values(self) -> None:
         create_in = str(
             self._manager.get("projects.last_create_in", scope_preference="ide", default=self._default_create_in) or ""
@@ -133,11 +142,13 @@ class NewProjectDialog(DialogWindow):
         preferred = str(
             self._manager.get("projects.last_new_project_template", scope_preference="ide", default="") or ""
         ).strip()
-        if preferred not in _TEMPLATE_IDS:
+        if preferred not in self._template_by_id:
             pref_interpreter = str(self._manager.get("defaults.interpreter", scope_preference="ide", default="python") or "")
             preferred = self._default_template_for_interpreter(pref_interpreter)
         self._set_template(preferred)
         self._on_template_changed()
+        if self._template_load_warnings:
+            self._set_status("Some project template files were ignored. See console output for details.", error=False)
 
     def _on_project_name_changed(self, text: str) -> None:
         if not self._folder_name_touched:
@@ -246,8 +257,8 @@ class NewProjectDialog(DialogWindow):
 
     def _set_template(self, template_id: str) -> None:
         target = str(template_id or "").strip()
-        if target not in _TEMPLATE_IDS:
-            target = "python-app"
+        if target not in self._template_by_id:
+            target = self._fallback_template_id()
         for idx in range(self.template_combo.count()):
             candidate = str(self.template_combo.itemData(idx) or "").strip()
             if candidate == target:
@@ -257,26 +268,35 @@ class NewProjectDialog(DialogWindow):
 
     def _current_template_id(self) -> str:
         selected = str(self.template_combo.currentData() or "").strip()
-        if selected in _TEMPLATE_IDS:
+        if selected in self._template_by_id:
             return selected
-        return "python-app"
+        return self._fallback_template_id()
 
-    @staticmethod
-    def _template_description(template_id: str) -> str:
+    def _template_description(self, template_id: str) -> str:
         target = str(template_id or "").strip()
-        for candidate_id, _label, description in _TEMPLATE_CHOICES:
-            if candidate_id == target:
-                return description
+        template = self._template_by_id.get(target)
+        if isinstance(template, ProjectTemplate):
+            return str(template.description or "Project template")
         return "Project template"
 
-    @staticmethod
-    def _default_template_for_interpreter(interpreter: str) -> str:
+    def _fallback_template_id(self) -> str:
+        if "python-app" in self._template_by_id:
+            return "python-app"
+        if self._template_catalog:
+            return str(self._template_catalog[0].template_id or "")
+        return "empty"
+
+    def _default_template_for_interpreter(self, interpreter: str) -> str:
         text = str(interpreter or "").strip().lower()
         if "rust" in text:
-            return "rust-bin"
-        if "c++" in text or "cpp" in text or "clang" in text:
-            return "cpp-cmake"
-        return "python-app"
+            candidate = "rust-bin"
+        elif "c++" in text or "cpp" in text or "clang" in text:
+            candidate = "cpp-cmake"
+        else:
+            candidate = "python-app"
+        if candidate in self._template_by_id:
+            return candidate
+        return self._fallback_template_id()
 
     def _apply_template(self, target: Path, *, project_name: str, folder_name: str, template_id: str) -> None:
         files = self._template_files(template_id, project_name=project_name, folder_name=folder_name)
@@ -302,102 +322,26 @@ class NewProjectDialog(DialogWindow):
         module_name = self._derive_python_module_name(folder_slug)
         cargo_name = self._derive_cargo_name(folder_slug)
         cmake_name = self._derive_cmake_identifier(project_title)
+        template = self._template_by_id.get(str(template_id or "").strip())
+        if template is None:
+            template = self._template_by_id.get(self._fallback_template_id())
+        if isinstance(template, ProjectTemplate):
+            rendered = render_project_template_files(
+                template,
+                {
+                    "project_name": project_title,
+                    "project_title": project_title,
+                    "folder_name": str(folder_name or "").strip(),
+                    "folder_slug": folder_slug,
+                    "module_name": module_name,
+                    "cargo_name": cargo_name,
+                    "cmake_name": cmake_name,
+                },
+            )
+            if rendered:
+                return rendered
 
-        if template_id == "empty":
-            return {
-                "README.md": f"# {project_title}\n\nProject created with PyTPO.\n",
-            }
-
-        if template_id == "python-package":
-            return {
-                ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.pytest_cache/\n.tide/\n.pytpo/\n",
-                "README.md": f"# {project_title}\n\nPython package template generated by PyTPO.\n",
-                "pyproject.toml": (
-                    "[build-system]\n"
-                    'requires = ["hatchling"]\n'
-                    'build-backend = "hatchling.build"\n\n'
-                    "[project]\n"
-                    f'name = "{folder_slug}"\n'
-                    'version = "0.1.0"\n'
-                    f'description = "{project_title}"\n'
-                    'readme = "README.md"\n'
-                    'requires-python = ">=3.10"\n'
-                    "dependencies = []\n\n"
-                    "[tool.hatch.build.targets.wheel]\n"
-                    f'packages = ["src/{module_name}"]\n'
-                ),
-                f"src/{module_name}/__init__.py": '__all__ = ["main"]\n__version__ = "0.1.0"\n',
-                f"src/{module_name}/main.py": (
-                    "def main() -> None:\n"
-                    f'    print("Hello from {module_name}")\n\n'
-                    'if __name__ == "__main__":\n'
-                    "    main()\n"
-                ),
-                "tests/test_smoke.py": (
-                    f"from {module_name}.main import main\n\n\n"
-                    "def test_smoke() -> None:\n"
-                    "    assert callable(main)\n"
-                ),
-            }
-
-        if template_id == "rust-bin":
-            return {
-                ".gitignore": "/target/\n.tide/\n.pytpo/\n",
-                "README.md": f"# {project_title}\n\nRust binary template generated by PyTPO.\n",
-                "Cargo.toml": (
-                    "[package]\n"
-                    f'name = "{cargo_name}"\n'
-                    'version = "0.1.0"\n'
-                    'edition = "2021"\n\n'
-                    "[dependencies]\n"
-                ),
-                "src/main.rs": (
-                    "fn main() {\n"
-                    f'    println!("Hello from {cargo_name}!");\n'
-                    "}\n"
-                ),
-            }
-
-        if template_id == "cpp-cmake":
-            return {
-                ".gitignore": "/build/\n.tide/\n.pytpo/\n",
-                "README.md": f"# {project_title}\n\nC++ CMake template generated by PyTPO.\n",
-                "CMakeLists.txt": (
-                    "cmake_minimum_required(VERSION 3.16)\n"
-                    f"project({cmake_name} LANGUAGES CXX)\n\n"
-                    "set(CMAKE_CXX_STANDARD 17)\n"
-                    "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
-                    "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)\n\n"
-                    f"add_executable({cmake_name} src/main.cpp)\n"
-                ),
-                "src/main.cpp": (
-                    "#include <iostream>\n\n"
-                    "int main() {\n"
-                    '    std::cout << "Hello from CMake template!" << std::endl;\n'
-                    "    return 0;\n"
-                    "}\n"
-                ),
-            }
-
-        return {
-            ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.tide/\n.pytpo/\n",
-            "README.md": f"# {project_title}\n\nPython application template generated by PyTPO.\n",
-            "pyproject.toml": (
-                "[project]\n"
-                f'name = "{folder_slug}"\n'
-                'version = "0.1.0"\n'
-                f'description = "{project_title}"\n'
-                'readme = "README.md"\n'
-                'requires-python = ">=3.10"\n'
-                "dependencies = []\n"
-            ),
-            "src/main.py": (
-                "def main() -> None:\n"
-                f'    print("Hello from {folder_slug}")\n\n'
-                'if __name__ == "__main__":\n'
-                "    main()\n"
-            ),
-        }
+        return {"README.md": f"# {project_title}\n\nProject created with PyTPO.\n"}
 
     def _post_create_template_setup(self, *, target: Path, template_id: str) -> str | None:
         if str(template_id or "").strip() != "cpp-cmake":

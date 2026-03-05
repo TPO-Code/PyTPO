@@ -29,6 +29,7 @@ Supported lines:
 
 - comments: lines starting with `#`
 - include/ignore rules: `include: pattern1 | pattern2`, `ignore: pattern1 | pattern2`
+- frontmatter schema rule: `frontmatter_schema: frontmatter.schema.json`
 - section headers: `Section Name:`
 - symbol definitions:
   - `Canonical Symbol`
@@ -92,6 +93,54 @@ index: on
 
 `index: off` excludes a document from symbol-reference indexing.
 
+Frontmatter editor support:
+
+- Frontmatter is folded by default when opening a `.tdoc` document.
+- Right-click inside a `.tdoc` document and use `Fold Frontmatter` / `Unfold Frontmatter` to toggle frontmatter visibility while editing.
+- TDOC completion inside frontmatter supports key/value suggestions.
+- If `.tdocproject` defines `frontmatter_schema`, completion keys/enum values are driven by that schema.
+
+Folding behavior:
+
+- TDOC uses gutter fold markers for foldable regions.
+- Frontmatter, markdown heading sections, fenced code blocks, and list blocks are foldable.
+- Clicking a fold marker toggles that region.
+
+### Frontmatter schema via `.tdocproject`
+
+You can define frontmatter rules by adding this line to `.tdocproject`:
+
+```txt
+frontmatter_schema: frontmatter.schema.json
+```
+
+You can create this schema file from Project Explorer:
+
+- `New File` -> `TDOC` -> `Frontmatter Schema`
+  - creates `frontmatter.schema.json` in the selected folder
+
+Schema path should be relative to TDOC root. JSON schema supports:
+
+- `properties` (key definitions)
+- per-key `enum` (value suggestions/validation)
+- per-key `const` (single allowed value)
+- `required` (required frontmatter keys)
+- `additionalProperties` (set to `false` to warn on unknown keys)
+
+Minimal example:
+
+```json
+{
+  "properties": {
+    "title": { "type": "string" },
+    "status": { "enum": ["draft", "review", "final"] },
+    "index": { "enum": ["on", "off"] }
+  },
+  "required": ["title", "status"],
+  "additionalProperties": false
+}
+```
+
 ## Markdown headings in `.tdoc`
 
 TDOC documents support markdown-style ATX headings:
@@ -106,11 +155,45 @@ Behavior:
 - When the caret is outside the heading line, the markers are hidden and the line is rendered as a heading.
 - Rendered heading levels use different font sizes (H1 > H2 > H3).
 - Saving preserves the original raw heading markup.
+- Heading text can include TDOC links (for example `# [SourDough Discard Crumpets]`), and those links remain clickable while rendered as a heading.
 
 Notes:
 
 - Heading parsing is line-based and expects heading markers at the start of the line (optionally with up to 3 leading spaces).
 - A space is required after the heading markers (for example `## Title`).
+
+## Markdown lists in `.tdoc`
+
+TDOC documents support markdown-style lists:
+
+- unordered list markers: `*` and `-`
+- ordered/numbered list markers: `1.`, `2.`, `3.` ...
+
+Unordered list examples:
+
+- `* Item`
+- `- Item`
+- `    * Nested Item`
+- `    - Nested Item`
+
+Ordered list example:
+
+- `1. First`
+- `2. Second`
+- `3. Third`
+
+Behavior:
+
+- Unordered list markers are shown while editing the line.
+- When the caret is outside an unordered list line, the marker is rendered as a bullet glyph (`•`).
+- Ordered list markers remain visible and are validated for sequence continuity.
+- List text can include TDOC links, and those links remain clickable.
+- Saving preserves the original raw list markup.
+
+Notes:
+
+- Unordered list parsing is line-based and expects `*` or `-` followed by at least one space.
+- Numbered-list diagnostics warn when sequence values are skipped and include a `Renumber numbered list` quick fix.
 
 ## Navigation
 
@@ -169,10 +252,13 @@ TDOC diagnostics are reported in the same Problems panel used by other languages
 
 - missing `.tdocproject`
 - malformed/invalid `.tdocproject` entries
+- invalid/missing `frontmatter_schema` configuration or schema JSON load errors
 - unresolved symbols
 - frontmatter warnings
+- frontmatter schema warnings (missing required keys, unknown keys when disallowed, invalid enum values)
 - section capitalization warnings
 - missing inline image files (`![...]` / `![caption|...]`)
+- numbered-list sequence gaps (for example `1.`, `3.` with missing `2.`)
 
 TDOC quick fixes from Problems context menu:
 
@@ -180,6 +266,8 @@ TDOC quick fixes from Problems context menu:
   - appends the unresolved symbol at end of `.tdocproject`
 - `Capitalize section '<section>'`
   - rewrites the warned section header in `.tdocproject`
+- `Renumber numbered list`
+  - rewrites the affected numbered list block in the `.tdoc` document to a continuous sequence
 
 ## TDOC in-editor symbol actions
 

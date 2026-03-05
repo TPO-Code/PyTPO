@@ -541,6 +541,103 @@ def markdown_fold_ranges(source_text: str) -> list[tuple[int, int]]:
 
     return _normalize_fold_ranges(ranges, line_count)
 
+
+_TDOC_LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[\*-]|\d+[.)])[ \t]+(?P<body>.*)$")
+_TDOC_ATX_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+.*$")
+
+
+def _tdoc_frontmatter_fold_ranges(source_text: str) -> list[tuple[int, int]]:
+    lines = str(source_text or "").splitlines()
+    if not lines:
+        return []
+
+    start_idx: int | None = None
+    idx = 0
+    while idx < len(lines) and idx < 64:
+        normalized = str(lines[idx] or "").lstrip("\ufeff").strip()
+        if not normalized:
+            idx += 1
+            continue
+        if normalized != "---":
+            return []
+        start_idx = idx
+        idx += 1
+        break
+    if start_idx is None:
+        return []
+
+    scanned = 0
+    while idx < len(lines) and scanned < 1024:
+        normalized = str(lines[idx] or "").lstrip("\ufeff").strip()
+        if normalized == "---":
+            start_line = int(start_idx + 1)
+            end_line = int(idx + 1)
+            if end_line > start_line:
+                return [(start_line, end_line)]
+            return []
+        idx += 1
+        scanned += 1
+    return []
+
+
+def _tdoc_list_fold_ranges(source_text: str) -> list[tuple[int, int]]:
+    lines = str(source_text or "").splitlines()
+    ranges: list[tuple[int, int]] = []
+
+    def indent_width(text: str) -> int:
+        cols = 0
+        for ch in str(text or ""):
+            if ch == " ":
+                cols += 1
+            elif ch == "\t":
+                cols += 4
+            else:
+                break
+        return cols
+
+    i = 0
+    while i < len(lines):
+        line = str(lines[i] or "")
+        match = _TDOC_LIST_ITEM_RE.match(line)
+        if not match:
+            i += 1
+            continue
+        base_indent = indent_width(str(match.group("indent") or ""))
+        start = i
+        j = i + 1
+        while j < len(lines):
+            current = str(lines[j] or "")
+            stripped = current.strip()
+            if not stripped:
+                break
+            if _TDOC_ATX_HEADING_RE.match(current):
+                break
+            current_match = _TDOC_LIST_ITEM_RE.match(current)
+            current_indent = indent_width(current)
+            if current_match:
+                if current_indent < base_indent:
+                    break
+                j += 1
+                continue
+            if current_indent > base_indent:
+                j += 1
+                continue
+            break
+        if (j - start) > 1:
+            ranges.append((int(start + 1), int(j)))
+        i = max(j, i + 1)
+    return ranges
+
+
+def tdoc_fold_ranges(source_text: str) -> list[tuple[int, int]]:
+    text = str(source_text or "")
+    line_count = len(text.splitlines())
+    ranges: list[tuple[int, int]] = []
+    ranges.extend(_tdoc_frontmatter_fold_ranges(text))
+    ranges.extend(markdown_fold_ranges(text))
+    ranges.extend(_tdoc_list_fold_ranges(text))
+    return _normalize_fold_ranges(ranges, line_count)
+
 LANGUAGE_FOLD_PROVIDERS: dict[str, FoldProvider] = {
     "c": cpp_fold_ranges,
     "cpp": cpp_fold_ranges,
@@ -550,6 +647,7 @@ LANGUAGE_FOLD_PROVIDERS: dict[str, FoldProvider] = {
     "rust": rust_fold_ranges,
     "todo": todo_fold_ranges,
     "markdown": markdown_fold_ranges,
+    "tdoc": tdoc_fold_ranges,
 }
 
 
@@ -615,4 +713,5 @@ __all__ = [
     "rust_fold_ranges",
     "todo_fold_ranges",
     "markdown_fold_ranges",
+    "tdoc_fold_ranges",
 ]

@@ -8,7 +8,8 @@ import pkgutil
 import re
 import weakref
 
-from PySide6.QtGui import QCursor, QTextCursor
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import QMenu
 
 from src.services.ast_query import (
@@ -731,6 +732,257 @@ class DiagnosticsController:
             2600,
         )
 
+    def _on_problem_create_tdoc_missing_image_requested(self, diag_obj: object):
+        diag = diag_obj if isinstance(diag_obj, dict) else None
+        rel_image = self._tdoc_missing_image_path_from_diagnostic(diag)
+        if not rel_image:
+            self.ide.statusBar().showMessage("Selected problem is not a TDOC missing-image warning.", 2200)
+            return
+
+        file_path = str((diag or {}).get("file_path") or "").strip()
+        root_seed = file_path or self.project_context.project_root
+        root = self._canonical_path(
+            resolve_tdoc_root_for_path(root_seed, project_root=self.project_context.project_root)
+        )
+        marker_path = self._canonical_path(os.path.join(root, PROJECT_MARKER_FILENAME))
+        if not os.path.isfile(marker_path):
+            self.ide.statusBar().showMessage("No .tdocproject found for this TDOC diagnostic.", 2400)
+            return
+
+        rel_image = str(rel_image).strip()
+        if (
+            not rel_image
+            or rel_image.startswith("~")
+            or os.path.isabs(rel_image)
+            or re.match(r"^[A-Za-z]:[\\/]", rel_image)
+        ):
+            self.ide.statusBar().showMessage("Missing image path must be relative to the TDOC project root.", 2600)
+            return
+
+        rel_image_norm = os.path.normpath(rel_image.replace("\\", "/"))
+        if rel_image_norm in {"", "."}:
+            self.ide.statusBar().showMessage("Missing image path is invalid.", 2600)
+            return
+
+        abs_image = self._canonical_path(os.path.join(root, rel_image_norm))
+        if not self._path_has_prefix(abs_image, root):
+            self.ide.statusBar().showMessage("Missing image path resolves outside the TDOC project root.", 2600)
+            return
+        if os.path.exists(abs_image):
+            shown = os.path.relpath(abs_image, root).replace(os.sep, "/")
+            self.ide.statusBar().showMessage(f"Image already exists: {shown}", 2200)
+            return
+
+        ext = os.path.splitext(abs_image)[1].lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+            self.ide.statusBar().showMessage(
+                "Placeholder image quick fix supports .png, .jpg, .jpeg, .bmp, or .webp paths.",
+                3000,
+            )
+            return
+
+        parent = os.path.dirname(abs_image)
+        try:
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not create image folder: {exc}", 2600)
+            return
+
+        try:
+            self._write_placeholder_image(abs_image)
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not create placeholder image: {exc}", 2800)
+            return
+
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+        self._reload_open_tdoc_documents_for_root(root)
+        self._refresh_tdoc_diagnostics_for_path(file_path or marker_path)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+        shown = os.path.relpath(abs_image, root).replace(os.sep, "/")
+        self.ide.statusBar().showMessage(f"Created placeholder image '{shown}'.", 2600)
+
+    def _on_problem_renumber_tdoc_numbered_list_requested(self, diag_obj: object):
+        diag = diag_obj if isinstance(diag_obj, dict) else None
+        if not self._is_tdoc_numbered_list_gap_diagnostic(diag):
+            self.ide.statusBar().showMessage("Selected problem is not a TDOC numbered-list sequencing warning.", 2200)
+            return
+
+        file_path = str((diag or {}).get("file_path") or "").strip()
+        if not file_path:
+            self.ide.statusBar().showMessage("Diagnostic is missing file path.", 2200)
+            return
+        cpath = self._canonical_path(file_path)
+        if not os.path.isfile(cpath):
+            self.ide.statusBar().showMessage(f"File not available: {cpath}", 2200)
+            return
+
+        try:
+            line_num = int((diag or {}).get("line") or 0)
+        except Exception:
+            line_num = 0
+        if line_num <= 0:
+            self.ide.statusBar().showMessage("Diagnostic is missing line information.", 2200)
+            return
+
+        root = self._canonical_path(
+            resolve_tdoc_root_for_path(cpath, project_root=self.project_context.project_root)
+        )
+        if not self._save_dirty_tdoc_documents_for_root(root):
+            return
+
+        try:
+            original_text = open(cpath, "r", encoding="utf-8").read()
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not read TDOC file: {exc}", 2600)
+            return
+
+        lines = original_text.splitlines()
+        status, changed, start_idx, end_idx = self._renumber_tdoc_numbered_list_at_line(lines, line_num - 1)
+        if status == "not-list":
+            self.ide.statusBar().showMessage("Target line is no longer part of a numbered list.", 2400)
+            return
+        if status != "ok":
+            self.ide.statusBar().showMessage("Could not identify a numbered list to renumber.", 2400)
+            return
+        if changed <= 0:
+            self.ide.statusBar().showMessage("Numbered list is already sequential.", 2200)
+            return
+
+        updated_text = "\n".join(lines)
+        if original_text.endswith("\n"):
+            updated_text += "\n"
+        try:
+            with open(cpath, "w", encoding="utf-8") as handle:
+                handle.write(updated_text)
+        except Exception as exc:
+            self.ide.statusBar().showMessage(f"Could not update TDOC file: {exc}", 2600)
+            return
+
+        self._reload_open_tdoc_documents_for_root(root)
+        self._refresh_tdoc_diagnostics_for_path(cpath)
+        self.refresh_subtree(root)
+        self.schedule_git_status_refresh(delay_ms=90)
+        self.ide.statusBar().showMessage(
+            f"Renumbered numbered list on lines {start_idx + 1}-{end_idx + 1}.",
+            2600,
+        )
+
+    def _renumber_tdoc_numbered_list_at_line(
+        self,
+        lines: list[str],
+        line_idx: int,
+    ) -> tuple[str, int, int, int]:
+        if not isinstance(lines, list):
+            return "invalid", 0, -1, -1
+        idx = int(line_idx)
+        if idx < 0 or idx >= len(lines):
+            return "invalid", 0, -1, -1
+
+        pattern = re.compile(
+            r"^(?P<indent>[ \t]*)(?P<number>\d+)(?P<marker>[.)])(?P<space>[ \t]+)(?P<body>.*)$"
+        )
+        anchor = pattern.match(str(lines[idx] or ""))
+        if not anchor:
+            return "not-list", 0, -1, -1
+
+        indent = str(anchor.group("indent") or "")
+        marker = str(anchor.group("marker") or ".")
+        start = idx
+        while start > 0:
+            prev_match = pattern.match(str(lines[start - 1] or ""))
+            if not prev_match:
+                break
+            if str(prev_match.group("indent") or "") != indent:
+                break
+            if str(prev_match.group("marker") or ".") != marker:
+                break
+            start -= 1
+
+        end = idx
+        while end + 1 < len(lines):
+            next_match = pattern.match(str(lines[end + 1] or ""))
+            if not next_match:
+                break
+            if str(next_match.group("indent") or "") != indent:
+                break
+            if str(next_match.group("marker") or ".") != marker:
+                break
+            end += 1
+
+        first_match = pattern.match(str(lines[start] or ""))
+        if not first_match:
+            return "invalid", 0, -1, -1
+        try:
+            start_number = int(first_match.group("number") or 0)
+        except Exception:
+            return "invalid", 0, -1, -1
+
+        changed = 0
+        for offset, row_idx in enumerate(range(start, end + 1)):
+            item_match = pattern.match(str(lines[row_idx] or ""))
+            if not item_match:
+                continue
+            try:
+                current_number = int(item_match.group("number") or 0)
+            except Exception:
+                continue
+            expected_number = start_number + offset
+            if current_number == expected_number:
+                continue
+            lines[row_idx] = (
+                f"{item_match.group('indent')}{expected_number}{item_match.group('marker')}"
+                f"{item_match.group('space')}{item_match.group('body')}"
+            )
+            changed += 1
+
+        return "ok", changed, start, end
+
+    def _write_placeholder_image(self, abs_path: str) -> None:
+        width = 1280
+        height = 720
+        image = QImage(width, height, QImage.Format_ARGB32)
+        image.fill(QColor("#EEF2F5"))
+
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(QColor("#B2BCC7"), 4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(2, 2, width - 4, height - 4)
+
+            title_font = QFont()
+            title_font.setPointSize(22)
+            title_font.setBold(True)
+            painter.setFont(title_font)
+            painter.setPen(QColor("#3C4A5A"))
+            painter.drawText(
+                QRect(40, (height // 2) - 86, width - 80, 42),
+                int(Qt.AlignmentFlag.AlignCenter),
+                "Missing Image Placeholder",
+            )
+
+            body_font = QFont()
+            body_font.setPointSize(14)
+            painter.setFont(body_font)
+            painter.drawText(
+                QRect(40, (height // 2) - 28, width - 80, 30),
+                int(Qt.AlignmentFlag.AlignCenter),
+                os.path.basename(abs_path),
+            )
+            painter.drawText(
+                QRect(40, (height // 2) + 8, width - 80, 30),
+                int(Qt.AlignmentFlag.AlignCenter),
+                f"{width}x{height}",
+            )
+        finally:
+            painter.end()
+
+        if not image.save(abs_path):
+            raise OSError("unsupported image extension or image codec unavailable")
+
     def _apply_import_candidate_to_editor(self, ed: EditorWidget, candidate: dict, symbol: str) -> str:
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             self.ide.statusBar().showMessage(f"Could not apply import fix for '{symbol}'.", 2600)
@@ -855,6 +1107,41 @@ class DiagnosticsController:
         if not match:
             return ""
         return str(match.group(1) or "").strip()
+
+    def _tdoc_missing_image_path_from_diagnostic(self, diag: dict | None) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(
+            r"^Missing image file\s+['\"](.+?)['\"]\s+used at\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
+
+    def _is_tdoc_numbered_list_gap_diagnostic(self, diag: dict | None) -> bool:
+        if not isinstance(diag, dict):
+            return False
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return False
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return False
+        return bool(
+            re.search(
+                r"^Numbered list item\s+\d+\s+is out of sequence\s+\(expected\s+\d+\)\s+at\b",
+                message,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _symbol_used_as_module(self, source_text: str, diag: dict | None, symbol: str) -> bool:
         return symbol_used_as_module(source_text, diag, symbol)

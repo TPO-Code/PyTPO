@@ -443,6 +443,42 @@ def default_ide_settings() -> IdeSettings:
                 },
             ],
         },
+        {
+            "label": "TDOC",
+            "children": [
+                {
+                    "label": "TDOC Document",
+                    "mode": "prompt",
+                    "fixed_name": "",
+                    "default_extension": ".tdoc",
+                    "content": "",
+                },
+                {
+                    "label": "TDOC Project Marker",
+                    "mode": "fixed",
+                    "fixed_name": ".tdocproject",
+                    "default_extension": "",
+                    "content": "# TDOC symbol definitions\n\n",
+                },
+                {
+                    "label": "Frontmatter Schema",
+                    "mode": "fixed",
+                    "fixed_name": "frontmatter.schema.json",
+                    "default_extension": "",
+                    "content": (
+                        "{\n"
+                        "  \"properties\": {\n"
+                        "    \"title\": { \"type\": \"string\" },\n"
+                        "    \"status\": { \"enum\": [\"draft\", \"review\", \"final\"] },\n"
+                        "    \"index\": { \"enum\": [\"on\", \"off\"] }\n"
+                        "  },\n"
+                        "  \"required\": [\"title\", \"status\"],\n"
+                        "  \"additionalProperties\": false\n"
+                        "}\n"
+                    ),
+                },
+            ],
+        },
     ]
     defaults: IdeSettings = {
         "theme": "Default",

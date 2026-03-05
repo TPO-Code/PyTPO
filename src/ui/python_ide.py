@@ -1113,6 +1113,12 @@ class PythonIDE(Window):
         self.problems_panel.removeUnusedImportRequested.connect(self._on_problem_remove_unused_import_requested)
         self.problems_panel.addTdocSymbolRequested.connect(self._on_problem_add_tdoc_symbol_requested)
         self.problems_panel.capitalizeTdocSectionRequested.connect(self._on_problem_capitalize_tdoc_section_requested)
+        self.problems_panel.createTdocMissingImageRequested.connect(
+            self._on_problem_create_tdoc_missing_image_requested
+        )
+        self.problems_panel.renumberTdocNumberedListRequested.connect(
+            self._on_problem_renumber_tdoc_numbered_list_requested
+        )
         self.problems_panel.clearFileRequested.connect(self._on_problem_clear_file_requested)
         self.problems_panel.clearAllRequested.connect(self._on_problem_clear_all_requested)
         self.problems_panel.countChanged.connect(self._on_problem_count_changed)
@@ -1900,6 +1906,11 @@ class PythonIDE(Window):
         current = self._current_document_widget()
         if isinstance(current, MarkdownEditorTab):
             return current
+        probe = current if isinstance(current, QWidget) else None
+        while isinstance(probe, QWidget):
+            if isinstance(probe, MarkdownEditorTab):
+                return probe
+            probe = probe.parentWidget()
         commit_editor = self.commit_md_editor
         commit_widget = self.commit_md_widget
         if (
@@ -2851,7 +2862,28 @@ class PythonIDE(Window):
             ),
             None,
         )
-        if unresolved_diag is None and section_cap_diag is None:
+        missing_image_diag = next(
+            (
+                diag
+                for diag in diagnostics
+                if self.diagnostics_controller._tdoc_missing_image_path_from_diagnostic(diag)
+            ),
+            None,
+        )
+        numbered_list_gap_diag = next(
+            (
+                diag
+                for diag in diagnostics
+                if self.diagnostics_controller._is_tdoc_numbered_list_gap_diagnostic(diag)
+            ),
+            None,
+        )
+        if (
+            unresolved_diag is None
+            and section_cap_diag is None
+            and missing_image_diag is None
+            and numbered_list_gap_diag is None
+        ):
             return
 
         menu_obj.addSeparator()
@@ -2872,6 +2904,26 @@ class PythonIDE(Window):
                     lambda _checked=False, d=dict(section_cap_diag): self._on_problem_capitalize_tdoc_section_requested(d)
                 )
                 menu_obj.addAction(act_cap_section)
+
+        if isinstance(missing_image_diag, dict):
+            rel_image = self.diagnostics_controller._tdoc_missing_image_path_from_diagnostic(missing_image_diag)
+            if rel_image:
+                act_create_placeholder = QAction(f"Create placeholder image '{rel_image}'", menu_obj)
+                act_create_placeholder.triggered.connect(
+                    lambda _checked=False, d=dict(missing_image_diag): self._on_problem_create_tdoc_missing_image_requested(
+                        d
+                    )
+                )
+                menu_obj.addAction(act_create_placeholder)
+
+        if isinstance(numbered_list_gap_diag, dict):
+            act_renumber_numbered_list = QAction("Renumber numbered list", menu_obj)
+            act_renumber_numbered_list.triggered.connect(
+                lambda _checked=False, d=dict(numbered_list_gap_diag): self._on_problem_renumber_tdoc_numbered_list_requested(
+                    d
+                )
+            )
+            menu_obj.addAction(act_renumber_numbered_list)
 
     def _tdoc_diagnostics_covering_position(self, *, file_path: str, line: int, column: int) -> list[dict]:
         key = self._canonical_path(file_path)
@@ -3709,6 +3761,12 @@ class PythonIDE(Window):
 
     def _on_problem_capitalize_tdoc_section_requested(self, diag_obj: object):
         self.diagnostics_controller._on_problem_capitalize_tdoc_section_requested(diag_obj)
+
+    def _on_problem_create_tdoc_missing_image_requested(self, diag_obj: object):
+        self.diagnostics_controller._on_problem_create_tdoc_missing_image_requested(diag_obj)
+
+    def _on_problem_renumber_tdoc_numbered_list_requested(self, diag_obj: object):
+        self.diagnostics_controller._on_problem_renumber_tdoc_numbered_list_requested(diag_obj)
 
     def _on_problem_clear_file_requested(self, file_path: str) -> None:
         cpath = self._canonical_path(file_path)
@@ -5052,6 +5110,106 @@ class PythonIDE(Window):
             self.schedule_git_status_refresh(delay_ms=90)
         return True
 
+    @staticmethod
+    def _capture_document_view_state(widget: QWidget | None) -> dict[str, object]:
+        if widget is None:
+            return {}
+        state: dict[str, object] = {}
+
+        cursor_getter = getattr(widget, "textCursor", None)
+        if callable(cursor_getter):
+            try:
+                cur = cursor_getter()
+                state["cursor_pos"] = int(cur.position())
+                if bool(cur.hasSelection()):
+                    state["sel_start"] = int(cur.selectionStart())
+                    state["sel_end"] = int(cur.selectionEnd())
+            except Exception:
+                pass
+
+        v_getter = getattr(widget, "verticalScrollBar", None)
+        if callable(v_getter):
+            try:
+                state["v_scroll"] = int(v_getter().value())
+            except Exception:
+                pass
+
+        h_getter = getattr(widget, "horizontalScrollBar", None)
+        if callable(h_getter):
+            try:
+                state["h_scroll"] = int(h_getter().value())
+            except Exception:
+                pass
+
+        try:
+            state["had_focus"] = bool(widget.hasFocus())
+        except Exception:
+            pass
+        return state
+
+    @staticmethod
+    def _restore_document_view_state(widget: QWidget | None, state: dict[str, object]) -> None:
+        if widget is None or not isinstance(state, dict):
+            return
+
+        doc_obj = None
+        doc_getter = getattr(widget, "document", None)
+        if callable(doc_getter):
+            try:
+                doc_obj = doc_getter()
+            except Exception:
+                doc_obj = None
+
+        max_pos = 0
+        if doc_obj is not None:
+            try:
+                max_pos = max(0, int(doc_obj.characterCount()) - 1)
+            except Exception:
+                max_pos = 0
+
+        cursor_getter = getattr(widget, "textCursor", None)
+        cursor_setter = getattr(widget, "setTextCursor", None)
+        if callable(cursor_getter) and callable(cursor_setter):
+            try:
+                cur = cursor_getter()
+                if "sel_start" in state and "sel_end" in state:
+                    start = max(0, min(int(state.get("sel_start", 0)), max_pos))
+                    end = max(0, min(int(state.get("sel_end", start)), max_pos))
+                    cur.setPosition(start)
+                    cur.setPosition(end, QTextCursor.KeepAnchor)
+                elif "cursor_pos" in state:
+                    pos = max(0, min(int(state.get("cursor_pos", 0)), max_pos))
+                    cur.setPosition(pos)
+                cursor_setter(cur)
+            except Exception:
+                pass
+
+        v_getter = getattr(widget, "verticalScrollBar", None)
+        if callable(v_getter) and "v_scroll" in state:
+            try:
+                vbar = v_getter()
+                target = int(state.get("v_scroll", vbar.value()))
+                target = max(int(vbar.minimum()), min(target, int(vbar.maximum())))
+                vbar.setValue(target)
+            except Exception:
+                pass
+
+        h_getter = getattr(widget, "horizontalScrollBar", None)
+        if callable(h_getter) and "h_scroll" in state:
+            try:
+                hbar = h_getter()
+                target = int(state.get("h_scroll", hbar.value()))
+                target = max(int(hbar.minimum()), min(target, int(hbar.maximum())))
+                hbar.setValue(target)
+            except Exception:
+                pass
+
+        if bool(state.get("had_focus", False)):
+            try:
+                widget.setFocus(Qt.OtherFocusReason)
+            except Exception:
+                pass
+
     def _reload_open_tdoc_documents_for_root(self, root: str) -> None:
         root_c = self._canonical_path(root)
         for widget in self._iter_open_document_widgets():
@@ -5066,6 +5224,7 @@ class PythonIDE(Window):
             if not os.path.exists(cpath):
                 continue
 
+            view_state = self._capture_document_view_state(widget)
             loaded = False
             if isinstance(widget, EditorWidget):
                 try:
@@ -5094,6 +5253,8 @@ class PythonIDE(Window):
 
             if not loaded:
                 continue
+
+            self._restore_document_view_state(widget, view_state)
 
             for tabs in self.editor_workspace.all_tabs():
                 idx = tabs.indexOf(widget)

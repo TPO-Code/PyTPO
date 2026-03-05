@@ -120,12 +120,15 @@ class TDocDocumentWidget(TDocEditorWidget):
         self._symbol_to_section: dict[str, str] = {}
         self._symbol_to_metadata: dict[str, dict[str, str]] = {}
         self._frontmatter_cache: dict[str, tuple[int, int, dict[str, str], list[dict]]] = {}
+        self._frontmatter_schema: dict[str, object] = {}
+        self._frontmatter_schema_issues: list[dict] = []
 
         self.resolve_symbol = self._resolve_symbol_link
         self.resolve_image_path = self._resolve_image_link_target
         self.resolve_link_tooltip = self._resolve_link_tooltip
         self.list_symbol_completion_candidates = self._list_symbol_completion_candidates
         self.list_path_completion_candidates = self._list_path_completion_candidates
+        self.list_frontmatter_completion_candidates = self._list_frontmatter_completion_candidates
 
         if file_path:
             self.load_file(file_path)
@@ -154,6 +157,9 @@ class TDocDocumentWidget(TDocEditorWidget):
         )
         self._symbol_to_section = symbol_to_section if isinstance(symbol_to_section, dict) else {}
         self._symbol_to_metadata = symbol_to_metadata if isinstance(symbol_to_metadata, dict) else {}
+        schema_payload, schema_issues = TDocProjectIndex.load_frontmatter_schema(self._tdoc_root)
+        self._frontmatter_schema = schema_payload if isinstance(schema_payload, dict) else {}
+        self._frontmatter_schema_issues = schema_issues if isinstance(schema_issues, list) else []
 
     def _resolve_symbol_link(self, label: str) -> str:
         if not isinstance(label, str):
@@ -445,6 +451,44 @@ class TDocDocumentWidget(TDocEditorWidget):
             entries.append((rank, candidate.casefold(), candidate))
         entries.sort(key=lambda row: (row[0], row[1]))
         return [row[2] for row in entries[:240]]
+
+    def _list_frontmatter_completion_candidates(
+        self,
+        *,
+        mode: str = "key",
+        key: str = "",
+        query: str = "",
+        existing_keys: list[str] | None = None,
+    ) -> list[str]:
+        _ = query
+        _ = existing_keys
+        self.refresh_project_context()
+        schema = self._frontmatter_schema if isinstance(self._frontmatter_schema, dict) else {}
+        if not schema:
+            return []
+
+        mode_text = str(mode or "key").strip().lower()
+        if mode_text == "value":
+            values_by_key = schema.get("values_by_key")
+            if not isinstance(values_by_key, dict):
+                return []
+            direct = values_by_key.get(str(key or "").strip())
+            if isinstance(direct, list):
+                return [str(item).strip() for item in direct if str(item).strip()]
+            key_cf = str(key or "").strip().casefold()
+            for raw_key, raw_values in values_by_key.items():
+                candidate_key = str(raw_key or "").strip()
+                if candidate_key.casefold() != key_cf:
+                    continue
+                if not isinstance(raw_values, list):
+                    return []
+                return [str(item).strip() for item in raw_values if str(item).strip()]
+            return []
+
+        keys = schema.get("keys")
+        if not isinstance(keys, list):
+            return []
+        return [str(item).strip() for item in keys if str(item).strip()]
 
     def ensure_index_file(self) -> str | None:
         self.refresh_project_context()

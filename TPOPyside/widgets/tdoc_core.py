@@ -4,11 +4,12 @@ Extracted from tdock demo app to avoid runtime dependency on tdock package.
 """
 
 import fnmatch
+import json
 import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from PySide6.QtGui import (
     QColor,
@@ -52,6 +53,7 @@ from TPOPyside.widgets.editor_change_regions import (
     parse_editor_overlay_color,
     resolve_change_region_layer,
 )
+from TPOPyside.widgets.code_editor.code_folding import get_fold_provider, normalize_fold_ranges
 
 PROJECT_MARKER_FILENAME = ".tdocproject"
 INDEX_FILENAME = "index.tdoc"
@@ -67,9 +69,18 @@ ALIAS_LINE_PATTERN = re.compile(r"^(?P<symbol>[^=#]+?)\s*=\s*(?P<aliases>.*)$")
 SECTION_HEADER_PATTERN = re.compile(r"^(?P<section>[^=#].*?)\s*:\s*$")
 FILE_LINK_PATTERN = re.compile(r"^(?P<path>.+?\.tdoc)(?:#L(?P<line>\d+))?$", re.IGNORECASE)
 RULE_LINE_PATTERN = re.compile(r"^(?P<rule>include|ignore)\s*:\s*(?P<patterns>.*)$", re.IGNORECASE)
+FRONTMATTER_SCHEMA_RULE_PATTERN = re.compile(
+    r"^frontmatter_schema\s*:\s*(?P<path>.*?)\s*$",
+    re.IGNORECASE,
+)
 FRONTMATTER_KV_PATTERN = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<hashes>#{1,3})[ \t]+(?P<title>.+?)\s*$")
+MARKDOWN_BULLET_PATTERN = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[\*-])[ \t]+(?P<body>.*)$")
+MARKDOWN_NUMBERED_LIST_PATTERN = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<number>\d+)(?P<marker>[.)])(?P<space>[ \t]+)(?P<body>.*)$"
+)
 _WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+BULLET_GLYPH = "•"
 
 _TDOC_LINT_VISUAL_DEFAULTS = {
     "mode": "squiggle",
@@ -102,6 +113,29 @@ _TDOC_IMAGE_SUFFIXES = {
 _TDOC_COMPLETION_INDEX_ROLE = int(Qt.UserRole)
 _TDOC_COMPLETION_META_ROLE = int(Qt.UserRole) + 1
 _FILE_LINK_EXTENSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+_TDOC_FRONTMATTER_KEY_SUGGESTIONS = [
+    "title",
+    "status",
+    "index",
+    "tags",
+    "summary",
+    "author",
+    "created",
+    "updated",
+]
+_TDOC_FRONTMATTER_VALUE_SUGGESTIONS = {
+    "index": ["on", "off"],
+    "status": ["draft", "review", "final", "published", "archived"],
+}
+_TDOC_FRONTMATTER_GENERIC_VALUE_SUGGESTIONS = [
+    "draft",
+    "review",
+    "final",
+    "on",
+    "off",
+    "true",
+    "false",
+]
 
 
 def _build_search_line_edit(editor: "TDocEditorWidget", parent: QWidget, *, role: str) -> QLineEdit:
@@ -456,6 +490,228 @@ class TDocProjectIndex:
         return rule, patterns
 
     @staticmethod
+    def _parse_frontmatter_schema_rule(line):
+        m = FRONTMATTER_SCHEMA_RULE_PATTERN.match(str(line or ""))
+        if not m:
+            return None
+        raw = str(m.group("path") or "").strip()
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            raw = raw[1:-1].strip()
+        return raw
+
+    @staticmethod
+    def _frontmatter_schema_config_from_lines(lines):
+        path_value = ""
+        line_no = 0
+        issues: list[dict] = []
+        for idx, raw in enumerate(lines if isinstance(lines, list) else [], start=1):
+            line = str(raw or "").strip()
+            if not line or line.startswith("#"):
+                continue
+            parsed = TDocProjectIndex._parse_frontmatter_schema_rule(line)
+            if parsed is None:
+                continue
+            if not parsed:
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "message": "Rule 'frontmatter_schema:' requires a JSON path value.",
+                        "line": int(idx),
+                        "file": PROJECT_MARKER_FILENAME,
+                    }
+                )
+                continue
+            if path_value and parsed != path_value:
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "message": (
+                            f"Multiple frontmatter_schema rules found; using last value '{parsed}'."
+                        ),
+                        "line": int(idx),
+                        "file": PROJECT_MARKER_FILENAME,
+                    }
+                )
+            path_value = parsed
+            line_no = int(idx)
+        return path_value, line_no, issues
+
+    @staticmethod
+    def _normalize_frontmatter_schema_payload(raw_schema):
+        data = raw_schema if isinstance(raw_schema, dict) else {}
+
+        keys_out: list[str] = []
+        seen_keys: set[str] = set()
+        required_out: list[str] = []
+        values_out: dict[str, list[str]] = {}
+
+        props = data.get("properties")
+        if isinstance(props, dict):
+            for raw_key, raw_cfg in props.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                folded = key.casefold()
+                if folded not in seen_keys:
+                    seen_keys.add(folded)
+                    keys_out.append(key)
+                cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+                enums: list[str] = []
+                raw_enum = cfg.get("enum")
+                if isinstance(raw_enum, list):
+                    for item in raw_enum:
+                        text = str(item).strip()
+                        if text:
+                            enums.append(text)
+                elif "const" in cfg:
+                    text = str(cfg.get("const")).strip()
+                    if text:
+                        enums.append(text)
+                if enums:
+                    values_out[key] = enums
+
+        raw_keys = data.get("keys")
+        if isinstance(raw_keys, list):
+            for raw_key in raw_keys:
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                folded = key.casefold()
+                if folded in seen_keys:
+                    continue
+                seen_keys.add(folded)
+                keys_out.append(key)
+
+        raw_values = data.get("values")
+        if isinstance(raw_values, dict):
+            for raw_key, raw_items in raw_values.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                values: list[str] = []
+                if isinstance(raw_items, list):
+                    for item in raw_items:
+                        text = str(item).strip()
+                        if text:
+                            values.append(text)
+                elif raw_items is not None:
+                    text = str(raw_items).strip()
+                    if text:
+                        values.append(text)
+                if values:
+                    values_out[key] = values
+
+        raw_required = data.get("required")
+        if isinstance(raw_required, list):
+            seen_required: set[str] = set()
+            for raw_key in raw_required:
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                folded = key.casefold()
+                if folded in seen_required:
+                    continue
+                seen_required.add(folded)
+                required_out.append(key)
+
+        allow_unknown = True
+        if "allow_unknown_keys" in data:
+            allow_unknown = _coerce_bool(data.get("allow_unknown_keys"), default=True)
+        elif "additionalProperties" in data:
+            allow_unknown = _coerce_bool(data.get("additionalProperties"), default=True)
+
+        return {
+            "keys": keys_out,
+            "required": required_out,
+            "values_by_key": values_out,
+            "allow_unknown_keys": bool(allow_unknown),
+        }
+
+    @staticmethod
+    def load_frontmatter_schema(root_path, *, content_overrides=None):
+        normalized_overrides = TDocProjectIndex._normalize_content_overrides(content_overrides)
+        marker = TDocProjectIndex.marker_path(root_path)
+        issues: list[dict] = []
+        if not marker.exists():
+            return {}, issues
+
+        marker_content, marker_err = TDocProjectIndex._read_text_with_overrides(marker, normalized_overrides)
+        if marker_err is not None:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "message": f"Cannot read {PROJECT_MARKER_FILENAME}: {marker_err}",
+                    "line": None,
+                    "file": PROJECT_MARKER_FILENAME,
+                }
+            )
+            return {}, issues
+
+        marker_lines = str(marker_content or "").splitlines()
+        schema_rel, schema_rule_line, schema_rule_issues = TDocProjectIndex._frontmatter_schema_config_from_lines(
+            marker_lines
+        )
+        issues.extend(schema_rule_issues)
+        if not schema_rel:
+            return {}, issues
+
+        schema_path_obj = Path(str(schema_rel).strip())
+        if schema_path_obj.is_absolute() or str(schema_rel).startswith("~") or _WINDOWS_DRIVE_PATH_PATTERN.match(str(schema_rel)):
+            issues.append(
+                {
+                    "severity": "warning",
+                    "message": "frontmatter_schema should be a path relative to TDOC root.",
+                    "line": int(schema_rule_line) if schema_rule_line else None,
+                    "file": PROJECT_MARKER_FILENAME,
+                }
+            )
+            schema_abs = schema_path_obj.expanduser()
+        else:
+            schema_abs = Path(root_path) / schema_path_obj
+
+        schema_abs_text = str(schema_abs)
+        schema_content, schema_err = TDocProjectIndex._read_text_with_overrides(schema_abs_text, normalized_overrides)
+        if schema_err is not None:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "message": f"Cannot read frontmatter schema '{schema_rel}': {schema_err}",
+                    "line": int(schema_rule_line) if schema_rule_line else None,
+                    "file": PROJECT_MARKER_FILENAME,
+                }
+            )
+            return {}, issues
+
+        try:
+            payload = json.loads(str(schema_content or ""))
+        except Exception as exc:
+            line_no = int(getattr(exc, "lineno", 0) or 0)
+            issues.append(
+                {
+                    "severity": "warning",
+                    "message": f"Invalid frontmatter schema JSON in '{schema_rel}': {exc}",
+                    "line": line_no if line_no > 0 else None,
+                    "file": str(schema_rel).replace("\\", "/"),
+                }
+            )
+            return {}, issues
+
+        if not isinstance(payload, dict):
+            issues.append(
+                {
+                    "severity": "warning",
+                    "message": f"Frontmatter schema '{schema_rel}' must be a JSON object.",
+                    "line": 1,
+                    "file": str(schema_rel).replace("\\", "/"),
+                }
+            )
+            return {}, issues
+
+        normalized = TDocProjectIndex._normalize_frontmatter_schema_payload(payload)
+        normalized["source"] = str(schema_rel).replace("\\", "/")
+        return normalized, issues
+
+    @staticmethod
     def _section_header_capitalization_warnings(lines):
         warnings = []
         for idx, raw in enumerate(lines, start=1):
@@ -526,6 +782,8 @@ class TDocProjectIndex:
             return
 
         for path in root.rglob(f"*{DOC_SUFFIX}"):
+            if not path.is_file():
+                continue
             if path.name == INDEX_FILENAME:
                 continue
             rel_path = str(path.relative_to(root)).replace("\\", "/")
@@ -613,6 +871,11 @@ class TDocProjectIndex:
                     include_patterns.extend(patterns)
                 elif rule == "ignore":
                     ignore_patterns.extend(patterns)
+                idx += 1
+                continue
+
+            schema_rule = TDocProjectIndex._parse_frontmatter_schema_rule(line)
+            if schema_rule is not None:
                 idx += 1
                 continue
 
@@ -1099,6 +1362,19 @@ class TDocProjectIndex:
                 idx += 1
                 continue
 
+            schema_rule = TDocProjectIndex._parse_frontmatter_schema_rule(line)
+            if schema_rule is not None:
+                if not schema_rule:
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": "Rule 'frontmatter_schema:' requires a JSON path value.",
+                            "line": idx + 1,
+                        }
+                    )
+                idx += 1
+                continue
+
             if TDocProjectIndex._is_section_header(line):
                 m = SECTION_HEADER_PATTERN.match(line)
                 section = m.group("section").strip() if m else ""
@@ -1224,6 +1500,19 @@ class TDocProjectIndex:
         ) = TDocProjectIndex.load_aliases(root_path)
         effective_includes = include_patterns_loaded or include_patterns
         effective_ignores = ignore_patterns_loaded or ignore_patterns
+        frontmatter_schema, schema_issues = TDocProjectIndex.load_frontmatter_schema(
+            root_path,
+            content_overrides=normalized_overrides,
+        )
+        for issue in schema_issues:
+            findings.append(
+                {
+                    "severity": str(issue.get("severity") or "warning").strip().lower() or "warning",
+                    "message": str(issue.get("message") or "").strip(),
+                    "line": issue.get("line"),
+                    "file": str(issue.get("file") or "").strip() or None,
+                }
+            )
         _, unresolved_refs, _, frontmatter_issues = TDocProjectIndex.collect_symbol_references(
             root_path,
             alias_to_symbol,
@@ -1258,6 +1547,37 @@ class TDocProjectIndex:
                 finding["end_column"] = int(first[3])
             findings.append(finding)
 
+        raw_schema_keys = frontmatter_schema.get("keys") if isinstance(frontmatter_schema, dict) else []
+        schema_key_names = [
+            str(raw).strip()
+            for raw in (raw_schema_keys if isinstance(raw_schema_keys, list) else [])
+            if str(raw).strip()
+        ]
+        schema_key_set = {name.casefold() for name in schema_key_names}
+        raw_schema_required = frontmatter_schema.get("required") if isinstance(frontmatter_schema, dict) else []
+        schema_required = [
+            str(raw).strip()
+            for raw in (raw_schema_required if isinstance(raw_schema_required, list) else [])
+            if str(raw).strip()
+        ]
+        schema_values_raw = frontmatter_schema.get("values_by_key") if isinstance(frontmatter_schema, dict) else {}
+        schema_values_by_key: dict[str, tuple[str, set[str]]] = {}
+        if isinstance(schema_values_raw, dict):
+            for raw_key, raw_items in schema_values_raw.items():
+                key_name = str(raw_key or "").strip()
+                if not key_name:
+                    continue
+                allowed = {
+                    str(item).strip()
+                    for item in (raw_items if isinstance(raw_items, list) else [])
+                    if str(item).strip()
+                }
+                if allowed:
+                    schema_values_by_key[key_name.casefold()] = (key_name, allowed)
+        allow_unknown_keys = True
+        if isinstance(frontmatter_schema, dict):
+            allow_unknown_keys = _coerce_bool(frontmatter_schema.get("allow_unknown_keys"), default=True)
+
         seen_missing_images = set()
         for path, rel_path in TDocProjectIndex.iter_doc_paths(
             root_path,
@@ -1268,9 +1588,121 @@ class TDocProjectIndex:
             content, _err = TDocProjectIndex._read_text_with_overrides(path, normalized_overrides)
             if content is None:
                 continue
-            _, body_lines, body_start_line, _ = parse_doc_frontmatter(content)
+            metadata, body_lines, body_start_line, _ = parse_doc_frontmatter(content)
+            metadata_map = metadata if isinstance(metadata, dict) else {}
+            metadata_keys_cf = {str(k or "").strip().casefold() for k in metadata_map.keys() if str(k or "").strip()}
+            key_line_map: dict[str, int] = {}
+            raw_lines = str(content or "").splitlines()
+            if raw_lines and raw_lines[0].strip() == "---":
+                for idx_line, raw_line in enumerate(raw_lines[1:], start=2):
+                    if raw_line.strip() == "---":
+                        break
+                    match = FRONTMATTER_KV_PATTERN.match(raw_line)
+                    if not match:
+                        continue
+                    key = str(match.group("key") or "").strip()
+                    if not key:
+                        continue
+                    key_line_map.setdefault(key.casefold(), int(idx_line))
+
+            if schema_required:
+                for req in schema_required:
+                    req_cf = req.casefold()
+                    if req_cf in metadata_keys_cf:
+                        continue
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": f"Missing required frontmatter key '{req}' in {rel_path}.",
+                            "line": int(key_line_map.get(req_cf, 1)),
+                            "file": str(rel_path),
+                        }
+                    )
+
+            if not allow_unknown_keys and schema_key_set:
+                for meta_key in metadata_map.keys():
+                    key_text = str(meta_key or "").strip()
+                    if not key_text:
+                        continue
+                    if key_text.casefold() in schema_key_set:
+                        continue
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": f"Unknown frontmatter key '{key_text}' in {rel_path}.",
+                            "line": int(key_line_map.get(key_text.casefold(), 1)),
+                            "file": str(rel_path),
+                        }
+                    )
+
+            if schema_values_by_key:
+                for meta_key, meta_value in metadata_map.items():
+                    key_cf = str(meta_key or "").strip().casefold()
+                    if not key_cf:
+                        continue
+                    allowed_info = schema_values_by_key.get(key_cf)
+                    if not allowed_info:
+                        continue
+                    key_name, allowed_values = allowed_info
+                    value_text = str(meta_value or "").strip()
+                    if not value_text:
+                        continue
+                    if value_text in allowed_values:
+                        continue
+                    allowed_preview = ", ".join(sorted(allowed_values, key=str.casefold)[:8])
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "message": (
+                                f"Frontmatter key '{key_name}' has invalid value '{value_text}' in {rel_path}. "
+                                f"Expected one of: {allowed_preview}."
+                            ),
+                            "line": int(key_line_map.get(key_cf, 1)),
+                            "file": str(rel_path),
+                        }
+                    )
+
+            active_numbered_list: dict[str, object] | None = None
             for offset, line in enumerate(body_lines):
                 line_no = body_start_line + offset
+                numbered_match = MARKDOWN_NUMBERED_LIST_PATTERN.match(str(line or ""))
+                if numbered_match:
+                    indent = str(numbered_match.group("indent") or "")
+                    marker = str(numbered_match.group("marker") or ".")
+                    try:
+                        current_number = int(numbered_match.group("number") or 0)
+                    except Exception:
+                        current_number = 0
+                    if (
+                        isinstance(active_numbered_list, dict)
+                        and str(active_numbered_list.get("indent") or "") == indent
+                        and str(active_numbered_list.get("marker") or ".") == marker
+                    ):
+                        previous_number = int(active_numbered_list.get("number") or 0)
+                        expected_number = previous_number + 1
+                        if current_number != expected_number:
+                            findings.append(
+                                {
+                                    "severity": "warning",
+                                    "message": (
+                                        f"Numbered list item {current_number} is out of sequence "
+                                        f"(expected {expected_number}) at {rel_path}#L{line_no}."
+                                    ),
+                                    "line": int(line_no),
+                                    "column": int(numbered_match.start("number") + 1),
+                                    "end_line": int(line_no),
+                                    "end_column": int(numbered_match.end("number") + 1),
+                                    "file": str(rel_path),
+                                }
+                            )
+                    active_numbered_list = {
+                        "indent": indent,
+                        "marker": marker,
+                        "number": current_number,
+                    }
+                else:
+                    active_numbered_list = None
+
                 for match in IMAGE_PATTERN.finditer(line):
                     raw = str(match.group("body") or "").strip()
                     if not raw:
@@ -1616,6 +2048,12 @@ class _TDocLineNumberArea(QWidget):
     def paintEvent(self, event):
         self._editor.lineNumberAreaPaintEvent(event)
 
+    def mousePressEvent(self, event):
+        self._editor.lineNumberAreaMousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self._editor.lineNumberAreaMousePressEvent(event)
+
 
 class _TDocCompletionItemDelegate(QStyledItemDelegate):
     def __init__(self, editor: "TDocEditorWidget"):
@@ -1702,6 +2140,8 @@ class TDocEditorWidget(QTextEdit):
     HEADING_MARKDOWN_PROPERTY = QTextCharFormat.UserProperty + 6
     HEADING_LEVEL_PROPERTY = QTextCharFormat.UserProperty + 7
     HEADING_RAW_PROPERTY = QTextCharFormat.UserProperty + 8
+    BULLET_MARKDOWN_PROPERTY = QTextCharFormat.UserProperty + 9
+    BULLET_RAW_PROPERTY = QTextCharFormat.UserProperty + 10
     _default_keybindings: dict[str, dict[str, list[str]]] = {
         "general": {
             "action.find": ["Ctrl+F"],
@@ -1824,15 +2264,30 @@ class TDocEditorWidget(QTextEdit):
         self._completion_refresh_timer.setSingleShot(True)
         self._completion_refresh_timer.setInterval(60)
         self._completion_refresh_timer.timeout.connect(self._refresh_tdoc_completion_popup)
+        self._inline_image_rescale_timer = QTimer(self)
+        self._inline_image_rescale_timer.setSingleShot(True)
+        self._inline_image_rescale_timer.setInterval(90)
+        self._inline_image_rescale_timer.timeout.connect(self._rescale_inline_images_to_viewport)
         self._completion_manual_request = False
         self._completion_refresh_from_text_change = False
         self._completion_auto_trigger = True
         self._completion_auto_min_chars = 2
+        self._frontmatter_visible = False
+        self._frontmatter_fold_gutter_width = 12
+        self._fold_provider: Callable[[str], list[tuple[int, int]]] | None = None
+        self._fold_ranges: dict[int, int] = {}
+        self._folded_starts: set[int] = set()
+        self._fold_refresh_timer = QTimer(self)
+        self._fold_refresh_timer.setSingleShot(True)
+        self._fold_refresh_timer.setInterval(140)
+        self._fold_refresh_timer.timeout.connect(self._refresh_fold_ranges)
 
         self.textChanged.connect(self._on_text_changed_search_refresh)
         self.textChanged.connect(self._schedule_occurrence_marker_refresh)
         self.textChanged.connect(self._on_text_changed_tdoc_completion_refresh)
+        self.textChanged.connect(self._on_text_changed_frontmatter_visibility)
         self.textChanged.connect(self._refresh_line_number_area)
+        self.textChanged.connect(self._schedule_fold_refresh)
         self._completion_popup.itemClicked.connect(lambda _item: self._accept_tdoc_completion())
 
         self.lineNumberArea = _TDocLineNumberArea(self)
@@ -1858,6 +2313,7 @@ class TDocEditorWidget(QTextEdit):
         self.open_symbol = None
         self.list_symbol_completion_candidates = None
         self.list_path_completion_candidates = None
+        self.list_frontmatter_completion_candidates = None
         self.resolve_image_path = None
         self.resolve_symbol = None
         self.resolve_link_tooltip = None
@@ -1871,6 +2327,7 @@ class TDocEditorWidget(QTextEdit):
         self._position_search_bar()
         self.highlightCurrentLine()
         self.updateLineNumberAreaWidth(0)
+        self._apply_fold_provider()
         self._schedule_occurrence_marker_refresh()
         self._rebuild_configured_shortcuts()
 
@@ -2166,11 +2623,123 @@ class TDocEditorWidget(QTextEdit):
         row = (row + int(delta)) % count
         self._completion_popup.setCurrentRow(row)
 
-    def _tdoc_completion_context(self) -> dict | None:
-        cursor = self.textCursor()
-        if cursor.hasSelection():
+    def _frontmatter_block_bounds(self) -> tuple[int, int] | None:
+        doc = self.document()
+        if doc is None:
+            return None
+        start_block = doc.findBlockByNumber(0)
+        if not start_block.isValid():
             return None
 
+        # Tolerate UTF-8 BOM and optional leading blank lines before frontmatter.
+        scanned = 0
+        while start_block.isValid() and scanned < 64:
+            first_line = str(self._serialize_block_to_tdoc(start_block) or "")
+            normalized = first_line.lstrip("\ufeff").strip()
+            if not normalized:
+                start_block = start_block.next()
+                scanned += 1
+                continue
+            if normalized != "---":
+                return None
+            break
+        if not start_block.isValid():
+            return None
+
+        start_no = int(start_block.blockNumber())
+        block = start_block.next()
+        scanned = 0
+        while block.isValid() and scanned < 512:
+            raw = str(self._serialize_block_to_tdoc(block) or "")
+            if raw.lstrip("\ufeff").strip() == "---":
+                return start_no, int(block.blockNumber())
+            block = block.next()
+            scanned += 1
+        return None
+
+    def _frontmatter_existing_keys(self, *, exclude_block_no: int | None = None) -> set[str]:
+        bounds = self._frontmatter_block_bounds()
+        if not bounds:
+            return set()
+        start_no, end_no = bounds
+        keys: set[str] = set()
+        doc = self.document()
+        block = doc.findBlockByNumber(start_no + 1)
+        while block.isValid():
+            block_no = int(block.blockNumber())
+            if block_no >= end_no:
+                break
+            if exclude_block_no is not None and block_no == int(exclude_block_no):
+                block = block.next()
+                continue
+            raw = str(self._serialize_block_to_tdoc(block) or "").strip()
+            if not raw or raw.startswith("#"):
+                block = block.next()
+                continue
+            match = FRONTMATTER_KV_PATTERN.match(raw)
+            if match:
+                key = str(match.group("key") or "").strip().lower()
+                if key:
+                    keys.add(key)
+            block = block.next()
+        return keys
+
+    def _frontmatter_completion_context(self, cursor: QTextCursor) -> dict | None:
+        bounds = self._frontmatter_block_bounds()
+        if not bounds:
+            return None
+        start_no, end_no = bounds
+        block = cursor.block()
+        if not block.isValid():
+            return None
+        block_no = int(block.blockNumber())
+        if block_no <= start_no or block_no >= end_no:
+            return None
+
+        line = str(block.text() or "")
+        col = int(cursor.positionInBlock())
+        if col < 0 or col > len(line):
+            return None
+
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return None
+
+        abs_block_pos = int(block.position())
+        colon_idx = line.find(":")
+        if colon_idx < 0 or col <= colon_idx:
+            prefix = line[:col]
+            leading = len(prefix) - len(prefix.lstrip(" \t"))
+            query = str(prefix[leading:] or "").strip()
+            target_start = abs_block_pos + leading
+            replace_end = abs_block_pos + col
+            line_key = str(line[:colon_idx] if colon_idx >= 0 else prefix).strip().lower()
+            return {
+                "mode": "frontmatter_key",
+                "query": query,
+                "target_start_abs": target_start,
+                "replace_end_abs": replace_end,
+                "line_has_colon": bool(colon_idx >= 0),
+                "line_key": line_key,
+                "existing_keys": sorted(self._frontmatter_existing_keys(exclude_block_no=block_no)),
+            }
+
+        key = str(line[:colon_idx] or "").strip().lower()
+        value_start = colon_idx + 1
+        while value_start < len(line) and line[value_start] in {" ", "\t"}:
+            value_start += 1
+        if col < value_start:
+            col = value_start
+        query = str(line[value_start:col] or "")
+        return {
+            "mode": "frontmatter_value",
+            "query": query,
+            "frontmatter_key": key,
+            "target_start_abs": abs_block_pos + value_start,
+            "replace_end_abs": abs_block_pos + col,
+        }
+
+    def _link_completion_context(self, cursor: QTextCursor) -> dict | None:
         block = cursor.block()
         if not block.isValid():
             return None
@@ -2206,11 +2775,22 @@ class TDocEditorWidget(QTextEdit):
             return None
 
         return {
+            "mode": "link",
             "is_image": is_image,
             "path_only": bool(is_image or "/" in target),
             "query": target,
             "target_start_abs": int(block.position()) + int(target_start_local),
         }
+
+    def _tdoc_completion_context(self) -> dict | None:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return None
+
+        link_ctx = self._link_completion_context(cursor)
+        if isinstance(link_ctx, dict):
+            return link_ctx
+        return self._frontmatter_completion_context(cursor)
 
     def _symbol_completion_candidates(self, prefix: str) -> list[str]:
         provider = self.list_symbol_completion_candidates
@@ -2265,18 +2845,151 @@ class TDocEditorWidget(QTextEdit):
             out.append(text)
         return out
 
+    def _frontmatter_key_completion_candidates(self, ctx: dict) -> list[str]:
+        query = str(ctx.get("query") or "").strip().casefold()
+        existing_raw = ctx.get("existing_keys")
+        existing = {
+            str(raw).strip().lower()
+            for raw in (existing_raw if isinstance(existing_raw, list) else [])
+            if str(raw or "").strip()
+        }
+        line_key = str(ctx.get("line_key") or "").strip().lower()
+        has_colon = bool(ctx.get("line_has_colon", False))
+
+        out: list[str] = []
+        seen: set[str] = set()
+        provider = self.list_frontmatter_completion_candidates
+        provider_had_rows = False
+        if callable(provider):
+            provided = []
+            try:
+                provided = provider(
+                    mode="key",
+                    key="",
+                    query=str(ctx.get("query") or ""),
+                    existing_keys=sorted(existing),
+                )
+            except TypeError:
+                try:
+                    provided = provider("key", str(ctx.get("query") or ""))
+                except Exception:
+                    provided = []
+            except Exception:
+                provided = []
+            for raw in provided if isinstance(provided, list) else []:
+                clean = str(raw or "").strip().lower()
+                if not clean:
+                    continue
+                provider_had_rows = True
+                if query and not clean.startswith(query):
+                    continue
+                if clean in existing and clean != line_key:
+                    continue
+                if clean in seen:
+                    continue
+                seen.add(clean)
+                out.append(clean if has_colon else f"{clean}: ")
+        if not provider_had_rows:
+            for key in _TDOC_FRONTMATTER_KEY_SUGGESTIONS:
+                clean = str(key or "").strip().lower()
+                if not clean:
+                    continue
+                if query and not clean.startswith(query):
+                    continue
+                if clean in existing and clean != line_key:
+                    continue
+                if clean in seen:
+                    continue
+                seen.add(clean)
+                out.append(clean if has_colon else f"{clean}: ")
+        if not out:
+            for key in _TDOC_FRONTMATTER_KEY_SUGGESTIONS:
+                clean = str(key or "").strip().lower()
+                if not clean or clean in seen:
+                    continue
+                seen.add(clean)
+                out.append(clean if has_colon else f"{clean}: ")
+        return out
+
+    def _frontmatter_value_completion_candidates(self, ctx: dict) -> list[str]:
+        key = str(ctx.get("frontmatter_key") or "").strip().lower()
+        query = str(ctx.get("query") or "").strip().casefold()
+        values: list[str] = []
+        provider = self.list_frontmatter_completion_candidates
+        provider_had_rows = False
+        if callable(provider):
+            provided = []
+            try:
+                provided = provider(
+                    mode="value",
+                    key=key,
+                    query=str(ctx.get("query") or ""),
+                    existing_keys=[],
+                )
+            except TypeError:
+                try:
+                    provided = provider("value", key)
+                except Exception:
+                    provided = []
+            except Exception:
+                provided = []
+            for raw in provided if isinstance(provided, list) else []:
+                text = str(raw or "").strip()
+                if text:
+                    provider_had_rows = True
+                    values.append(text)
+        if not provider_had_rows:
+            values.extend(_TDOC_FRONTMATTER_VALUE_SUGGESTIONS.get(key, []))
+        if not values and key.endswith(("_enabled", "_visible", "_active")):
+            values = ["true", "false"]
+        if not values and key.endswith(("_count", "_limit")):
+            values = ["1", "10", "100"]
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if query and not text.casefold().startswith(query):
+                continue
+            folded = text.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            out.append(text)
+        if not out:
+            for raw in _TDOC_FRONTMATTER_GENERIC_VALUE_SUGGESTIONS:
+                text = str(raw or "").strip()
+                if not text:
+                    continue
+                folded = text.casefold()
+                if folded in seen:
+                    continue
+                seen.add(folded)
+                out.append(text)
+        return out
+
     def _collect_tdoc_completion_candidates(self, ctx: dict) -> list[dict]:
+        mode = str(ctx.get("mode") or "link").strip().lower()
         query = str(ctx.get("query") or "")
         is_image = bool(ctx.get("is_image", False))
         path_only = bool(ctx.get("path_only", False))
 
         rows: list[dict] = []
-        if not is_image and not path_only:
-            for text in self._symbol_completion_candidates(query):
-                rows.append({"insert": text, "kind": "symbol"})
+        if mode == "frontmatter_key":
+            for text in self._frontmatter_key_completion_candidates(ctx):
+                rows.append({"insert": text, "kind": "frontmatter-key"})
+        elif mode == "frontmatter_value":
+            for text in self._frontmatter_value_completion_candidates(ctx):
+                rows.append({"insert": text, "kind": "frontmatter-value"})
+        else:
+            if not is_image and not path_only:
+                for text in self._symbol_completion_candidates(query):
+                    rows.append({"insert": text, "kind": "symbol"})
 
-        for text in self._path_completion_candidates(query, image_only=is_image):
-            rows.append({"insert": text, "kind": "path"})
+            for text in self._path_completion_candidates(query, image_only=is_image):
+                rows.append({"insert": text, "kind": "path"})
 
         deduped: list[dict] = []
         seen = set()
@@ -2305,15 +3018,22 @@ class TDocEditorWidget(QTextEdit):
             if not bool(self._completion_auto_trigger):
                 self._hide_tdoc_completion_popup()
                 return
+            mode = str(ctx.get("mode") or "link").strip().lower()
             query = str(ctx.get("query") or "")
-            path_only = bool(ctx.get("path_only", False))
-            min_chars = max(1, int(self._completion_auto_min_chars))
-            auto_len = len(query)
-            if path_only and "/" in query:
-                auto_len = len(query.rsplit("/", 1)[-1])
-            should_auto_show = auto_len >= min_chars
-            if path_only and query.endswith("/") and from_text_change:
-                should_auto_show = True
+            if mode == "frontmatter_value":
+                should_auto_show = bool(from_text_change) or bool(query.strip())
+            elif mode == "frontmatter_key":
+                min_chars = max(1, int(self._completion_auto_min_chars))
+                should_auto_show = len(query.strip()) >= min_chars
+            else:
+                path_only = bool(ctx.get("path_only", False))
+                min_chars = max(1, int(self._completion_auto_min_chars))
+                auto_len = len(query)
+                if path_only and "/" in query:
+                    auto_len = len(query.rsplit("/", 1)[-1])
+                should_auto_show = auto_len >= min_chars
+                if path_only and query.endswith("/") and from_text_change:
+                    should_auto_show = True
             if not should_auto_show:
                 self._hide_tdoc_completion_popup()
                 return
@@ -2341,6 +3061,10 @@ class TDocEditorWidget(QTextEdit):
                 kind_label = "folder"
             elif kind == "path":
                 kind_label = "file"
+            elif kind == "frontmatter-key":
+                kind_label = "fm key"
+            elif kind == "frontmatter-value":
+                kind_label = "fm value"
             else:
                 kind_label = kind
             row = QListWidgetItem(insert)
@@ -2388,7 +3112,7 @@ class TDocEditorWidget(QTextEdit):
             self._hide_tdoc_completion_popup()
             return False
         start = int(ctx.get("target_start_abs") or 0)
-        end = int(self.textCursor().position())
+        end = int(ctx.get("replace_end_abs") or self.textCursor().position())
         if end < start:
             self._hide_tdoc_completion_popup()
             return False
@@ -2410,11 +3134,49 @@ class TDocEditorWidget(QTextEdit):
         finally:
             self._is_internal_change = was_internal
 
-        reopen_for_path = insert_text.endswith("/")
+        reopen_for_path = bool(str(ctx.get("mode") or "link").strip().lower() == "link" and insert_text.endswith("/"))
         self._hide_tdoc_completion_popup()
         if reopen_for_path:
             self._schedule_tdoc_completion_refresh(immediate=True)
         return True
+
+    def is_frontmatter_visible(self) -> bool:
+        start_no = self._frontmatter_start_block_number()
+        if start_no is None:
+            return True
+        return bool(start_no not in self._folded_starts)
+
+    def set_frontmatter_visible(self, visible: bool) -> bool:
+        desired = bool(visible)
+        self._frontmatter_visible = desired
+        changed = bool(desired != self.is_frontmatter_visible())
+        self._apply_frontmatter_visibility()
+        return changed
+
+    def toggle_frontmatter_visibility(self) -> bool:
+        self._frontmatter_visible = not bool(self.is_frontmatter_visible())
+        self._apply_frontmatter_visibility()
+        return bool(self.is_frontmatter_visible())
+
+    def _on_text_changed_frontmatter_visibility(self) -> None:
+        if bool(self._frontmatter_visible):
+            return
+        start_no = self._frontmatter_start_block_number()
+        if start_no is None or start_no in self._folded_starts:
+            return
+        self._apply_frontmatter_visibility()
+
+    def _apply_frontmatter_visibility(self) -> None:
+        start_no = self._frontmatter_start_block_number()
+        if start_no is None:
+            return
+        if self._fold_provider is not None and start_no not in self._fold_ranges:
+            self._refresh_fold_ranges()
+        if self._frontmatter_visible:
+            self._folded_starts.discard(start_no)
+        elif start_no in self._fold_ranges:
+            self._folded_starts.add(start_no)
+        self._apply_fold_visibility()
 
     def _search_query(self) -> str:
         return str(self._search_bar.find_edit.text() or "")
@@ -2435,13 +3197,160 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             return 10
 
+    def _frontmatter_start_block_number(self) -> int | None:
+        bounds = self._frontmatter_block_bounds()
+        if not bounds:
+            return None
+        return int(bounds[0])
+
+    def _apply_fold_provider(self) -> None:
+        self._fold_provider = get_fold_provider("tdoc")
+        if self._fold_provider is None:
+            self._clear_folding()
+            self.updateLineNumberAreaWidth(0)
+            self._refresh_line_number_area()
+            return
+        self._schedule_fold_refresh(immediate=True)
+
+    def _clear_folding(self) -> None:
+        self._fold_refresh_timer.stop()
+        self._fold_ranges = {}
+        self._folded_starts = set()
+        self._set_all_blocks_visible()
+        self._refresh_fold_layout()
+
+    def _schedule_fold_refresh(self, immediate: bool = False) -> None:
+        if self._fold_provider is None:
+            return
+        if immediate:
+            self._fold_refresh_timer.stop()
+            self._refresh_fold_ranges()
+            return
+        self._fold_refresh_timer.start()
+
+    def _refresh_fold_ranges(self) -> None:
+        provider = self._fold_provider
+        if provider is None:
+            self._clear_folding()
+            return
+        try:
+            source_text = self.save_tdoc()
+        except Exception:
+            source_text = self.toPlainText()
+        try:
+            raw_ranges = provider(source_text)
+        except Exception:
+            raw_ranges = []
+
+        line_count = max(1, int(self.document().blockCount()))
+        normalized = normalize_fold_ranges(list(raw_ranges or []), line_count)
+        fold_ranges: dict[int, int] = {}
+        for start_line, end_line in normalized:
+            start_block = int(start_line) - 1
+            end_block = int(end_line) - 1
+            if end_block <= start_block:
+                continue
+            prev = fold_ranges.get(start_block)
+            if prev is None or end_block > prev:
+                fold_ranges[start_block] = end_block
+        self._fold_ranges = fold_ranges
+        self._folded_starts = {line for line in self._folded_starts if line in self._fold_ranges}
+
+        frontmatter_start = self._frontmatter_start_block_number()
+        if frontmatter_start is not None and frontmatter_start in self._fold_ranges:
+            if self._frontmatter_visible:
+                self._folded_starts.discard(frontmatter_start)
+            else:
+                self._folded_starts.add(frontmatter_start)
+        self._apply_fold_visibility()
+
+    def _set_all_blocks_visible(self) -> None:
+        block = self.document().firstBlock()
+        while block.isValid():
+            if not bool(block.isVisible()):
+                block.setVisible(True)
+            if int(block.lineCount()) <= 0:
+                block.setLineCount(1)
+            block = block.next()
+
+    def _apply_fold_visibility(self) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        was_modified = bool(doc.isModified())
+        self._set_all_blocks_visible()
+        for start_block in sorted(self._folded_starts):
+            end_block = self._fold_ranges.get(int(start_block))
+            if end_block is None or int(end_block) <= int(start_block):
+                continue
+            block = doc.findBlockByNumber(int(start_block)).next()
+            while block.isValid() and int(block.blockNumber()) <= int(end_block):
+                block.setVisible(False)
+                block.setLineCount(0)
+                block = block.next()
+        self._refresh_fold_layout(was_modified=was_modified)
+
+    def _refresh_fold_layout(self, *, was_modified: bool | None = None) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        try:
+            doc.markContentsDirty(0, max(1, int(doc.characterCount())))
+        except Exception:
+            pass
+        if was_modified is not None:
+            self._restore_document_modified_state(bool(was_modified))
+        self._refresh_line_number_area()
+        self._refresh_overview_marker_area()
+        self._apply_viewport_margins()
+        self.viewport().update()
+
+    def _toggle_fold_at_block(self, block_number: int) -> bool:
+        block_no = int(block_number)
+        if block_no not in self._fold_ranges:
+            return False
+        if block_no in self._folded_starts:
+            self._folded_starts.discard(block_no)
+        else:
+            self._folded_starts.add(block_no)
+        frontmatter_start = self._frontmatter_start_block_number()
+        if frontmatter_start is not None and block_no == int(frontmatter_start):
+            self._frontmatter_visible = block_no not in self._folded_starts
+        self._apply_fold_visibility()
+        return True
+
+    def _block_number_at_y(self, y: int) -> int:
+        block = self.document().firstBlock()
+        probe_y = int(y)
+        while block.isValid():
+            if not bool(block.isVisible()):
+                block = block.next()
+                continue
+            block_rect = self.cursorRect(QTextCursor(block))
+            top = int(block_rect.top())
+            bottom = int(block_rect.bottom())
+            if top <= probe_y <= bottom:
+                return int(block.blockNumber())
+            if top > probe_y:
+                break
+            block = block.next()
+        return -1
+
     def lineNumberAreaWidth(self) -> int:
+        fold_gutter = self._frontmatter_fold_gutter_width if self._fold_provider is not None else 0
         digits = 1
         max_lines = max(1, int(self.document().blockCount()))
         while max_lines >= 10:
             max_lines //= 10
             digits += 1
-        return 8 + self.fontMetrics().horizontalAdvance("9") * digits + 6
+        return fold_gutter + 8 + self.fontMetrics().horizontalAdvance("9") * digits + 6
+
+    def _frontmatter_fold_marker_rect(self, top: int, line_height: int) -> QRect:
+        gutter_width = max(0, int(self._frontmatter_fold_gutter_width))
+        size = max(7, min(10, max(7, int(line_height) - 4)))
+        x = max(1, int((gutter_width - size) / 2))
+        y = int(top) + max(0, int((line_height - size) / 2))
+        return QRect(x, y, size, size)
 
     def updateLineNumberAreaWidth(self, _value: int = 0) -> None:
         self._apply_viewport_margins()
@@ -2480,10 +3389,16 @@ class TDocEditorWidget(QTextEdit):
 
         current_block_no = int(self.textCursor().blockNumber())
         rect = event.rect()
-        number_right = max(0, self.lineNumberArea.width() - 4)
+        fold_enabled = bool(self._fold_provider is not None)
+        fold_gutter = self._frontmatter_fold_gutter_width if fold_enabled else 0
+        number_left = max(0, int(fold_gutter))
+        number_right = max(0, self.lineNumberArea.width() - number_left - 4)
         block = self.document().firstBlock()
 
         while block.isValid():
+            if not bool(block.isVisible()):
+                block = block.next()
+                continue
             block_cursor = QTextCursor(block)
             block_rect = self.cursorRect(block_cursor)
             top = int(block_rect.top())
@@ -2491,20 +3406,65 @@ class TDocEditorWidget(QTextEdit):
             if top > rect.bottom():
                 break
             if top + height >= rect.top():
-                if int(block.blockNumber()) == current_block_no:
-                    number_color = self._resolved_gutter_number_color(gutter, active=True)
-                else:
-                    number_color = self._resolved_gutter_number_color(gutter, active=False)
+                number_color = self._resolved_gutter_number_color(
+                    gutter,
+                    active=bool(int(block.blockNumber()) == current_block_no),
+                )
                 painter.setPen(number_color)
                 painter.drawText(
-                    0,
+                    number_left,
                     top,
                     number_right,
                     height,
                     Qt.AlignRight | Qt.AlignVCenter,
                     str(int(block.blockNumber()) + 1),
                 )
+                block_no = int(block.blockNumber())
+                if fold_enabled and block_no in self._fold_ranges:
+                    marker_rect = self._frontmatter_fold_marker_rect(top, height)
+                    marker_color = self._resolved_gutter_fold_marker_color(number_color)
+                    path = QPainterPath()
+                    if block_no in self._folded_starts:
+                        path.moveTo(marker_rect.left(), marker_rect.top())
+                        path.lineTo(marker_rect.left(), marker_rect.bottom())
+                        path.lineTo(marker_rect.right(), marker_rect.center().y())
+                    else:
+                        path.moveTo(marker_rect.left(), marker_rect.top())
+                        path.lineTo(marker_rect.right(), marker_rect.top())
+                        path.lineTo(marker_rect.center().x(), marker_rect.bottom())
+                    path.closeSubpath()
+                    painter.save()
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(marker_color)
+                    painter.drawPath(path)
+                    painter.restore()
             block = block.next()
+
+    def lineNumberAreaMousePressEvent(self, event) -> None:
+        button = getattr(event, "button", None)
+        if not callable(button) or button() != Qt.LeftButton:
+            event.ignore()
+            return
+        if self._fold_provider is None:
+            event.ignore()
+            return
+        if hasattr(event, "position"):
+            raw_pos = event.position()
+            pos = raw_pos.toPoint() if hasattr(raw_pos, "toPoint") else QPoint(int(raw_pos.x()), int(raw_pos.y()))
+        else:
+            pos = event.pos()
+        if int(pos.x()) > int(self._frontmatter_fold_gutter_width):
+            event.ignore()
+            return
+        block_no = self._block_number_at_y(int(pos.y()))
+        if block_no < 0 or block_no not in self._fold_ranges:
+            event.ignore()
+            return
+        if self._toggle_fold_at_block(int(block_no)):
+            event.accept()
+            return
+        event.ignore()
 
     def update_overview_marker_settings(self, overview_cfg: dict | None) -> None:
         cfg = overview_cfg if isinstance(overview_cfg, dict) else {}
@@ -3772,6 +4732,14 @@ class TDocEditorWidget(QTextEdit):
             return number_color.lighter(205) if gutter.lightness() < 128 else number_color.darker(215)
         return number_color.lighter(145) if gutter.lightness() < 128 else number_color.darker(180)
 
+    def _resolved_gutter_fold_marker_color(self, fallback: QColor) -> QColor:
+        if self._gutter_fold_marker_color.isValid():
+            return QColor(self._gutter_fold_marker_color)
+        color = QColor(fallback)
+        if not color.isValid():
+            color = self._resolved_gutter_number_color(self._resolved_gutter_background_color(), active=True)
+        return color.lighter(120) if self._resolved_gutter_background_color().lightness() < 128 else color.darker(115)
+
     def _build_editor_background_pixmap(self, size: QSize) -> QPixmap | None:
         source = self._editor_background_source_pixmap
         if source is None or source.isNull() or size.width() <= 0 or size.height() <= 0:
@@ -3874,6 +4842,11 @@ class TDocEditorWidget(QTextEdit):
         self._refresh_line_number_area()
         self._refresh_overview_marker_area()
         self._position_tdoc_completion_popup()
+        self._schedule_inline_image_rescale()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_inline_image_rescale(immediate=True)
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
@@ -4109,6 +5082,93 @@ class TDocEditorWidget(QTextEdit):
             return 720
         return max(96, width - 32)
 
+    def _schedule_inline_image_rescale(self, *, immediate: bool = False) -> None:
+        if immediate:
+            self._inline_image_rescale_timer.start(0)
+            return
+        self._inline_image_rescale_timer.start()
+
+    def _restore_document_modified_state(self, was_modified: bool) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        try:
+            if bool(doc.isModified()) != bool(was_modified):
+                doc.setModified(bool(was_modified))
+        except Exception:
+            pass
+
+    def _rescale_inline_images_to_viewport(self) -> None:
+        doc = self.document()
+        if doc is None:
+            return
+        max_w = self._inline_image_max_width()
+        if max_w <= 0:
+            return
+
+        updates: list[tuple[int, int, QTextImageFormat]] = []
+        block = doc.begin()
+        while block.isValid():
+            iter_ = block.begin()
+            while not iter_.atEnd():
+                fragment = iter_.fragment()
+                if fragment.isValid():
+                    fmt = fragment.charFormat()
+                    if fmt.isImageFormat():
+                        image_fmt = fmt.toImageFormat()
+                        name = str(image_fmt.name() or "").strip()
+                        if name:
+                            pixmap = QPixmap(name)
+                            if not pixmap.isNull():
+                                width = int(pixmap.width())
+                                height = int(pixmap.height())
+                                if width > 0 and height > 0:
+                                    target_w = width
+                                    target_h = height
+                                    if target_w > max_w:
+                                        scale = float(max_w) / float(target_w)
+                                        target_w = max_w
+                                        target_h = max(1, int(round(float(target_h) * scale)))
+                                    current_w = int(round(float(image_fmt.width()))) if image_fmt.width() > 0 else 0
+                                    current_h = int(round(float(image_fmt.height()))) if image_fmt.height() > 0 else 0
+                                    if current_w != target_w or current_h != target_h:
+                                        updated_fmt = QTextImageFormat(image_fmt)
+                                        updated_fmt.setWidth(target_w)
+                                        updated_fmt.setHeight(target_h)
+                                        frag_start = int(fragment.position())
+                                        frag_len = max(1, len(str(fragment.text() or "")))
+                                        updates.append((frag_start, frag_start + frag_len, updated_fmt))
+                iter_ += 1
+            block = block.next()
+
+        if not updates:
+            return
+
+        was_internal = bool(self._is_internal_change)
+        was_undo_enabled = bool(self.isUndoRedoEnabled())
+        was_blocked = bool(self.signalsBlocked())
+        was_modified = bool(doc.isModified())
+        self._is_internal_change = True
+        if was_undo_enabled:
+            self.setUndoRedoEnabled(False)
+        if not was_blocked:
+            self.blockSignals(True)
+        try:
+            edit = QTextCursor(doc)
+            edit.beginEditBlock()
+            for start, end, updated_fmt in updates:
+                edit.setPosition(start)
+                edit.setPosition(end, QTextCursor.KeepAnchor)
+                edit.setCharFormat(updated_fmt)
+            edit.endEditBlock()
+            doc.setModified(was_modified)
+        finally:
+            if not was_blocked:
+                self.blockSignals(False)
+            if was_undo_enabled:
+                self.setUndoRedoEnabled(True)
+            self._is_internal_change = was_internal
+
     def _insert_inline_image_from_tag(self, cursor: QTextCursor, raw_body: str) -> bool:
         caption, rel_path = parse_image_components(raw_body)
         if not rel_path:
@@ -4152,6 +5212,15 @@ class TDocEditorWidget(QTextEdit):
         hashes = str(match.group("hashes") or "")
         return len(hashes), title, int(match.start("title"))
 
+    @staticmethod
+    def _parse_markdown_bullet_line(line: str) -> tuple[str, str, int] | None:
+        match = MARKDOWN_BULLET_PATTERN.match(str(line or ""))
+        if not match:
+            return None
+        indent = str(match.group("indent") or "")
+        body = str(match.group("body") or "")
+        return indent, body, int(match.end("marker") + 1)
+
     def _heading_point_size_for_level(self, level: int) -> float:
         try:
             base = float(self.font().pointSizeF())
@@ -4178,6 +5247,114 @@ class TDocEditorWidget(QTextEdit):
         fmt.setProperty(self.HEADING_LEVEL_PROPERTY, lvl)
         fmt.setProperty(self.HEADING_RAW_PROPERTY, str(raw_heading or ""))
         return fmt
+
+    def _merge_markdown_heading_char_format(
+        self,
+        base_format: QTextCharFormat | None,
+        *,
+        raw_heading: str,
+        level: int,
+    ) -> QTextCharFormat:
+        merged = QTextCharFormat(base_format) if isinstance(base_format, QTextCharFormat) else QTextCharFormat()
+        heading = self._make_markdown_heading_char_format(raw_heading, level)
+        merged.setFont(heading.font())
+        merged.setProperty(self.HEADING_MARKDOWN_PROPERTY, heading.property(self.HEADING_MARKDOWN_PROPERTY))
+        merged.setProperty(self.HEADING_LEVEL_PROPERTY, heading.property(self.HEADING_LEVEL_PROPERTY))
+        merged.setProperty(self.HEADING_RAW_PROPERTY, heading.property(self.HEADING_RAW_PROPERTY))
+        return merged
+
+    def _make_markdown_bullet_char_format(self, raw_bullet: str) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setProperty(self.BULLET_MARKDOWN_PROPERTY, True)
+        fmt.setProperty(self.BULLET_RAW_PROPERTY, str(raw_bullet or ""))
+        return fmt
+
+    def _merge_markdown_bullet_char_format(
+        self,
+        base_format: QTextCharFormat | None,
+        *,
+        raw_bullet: str,
+    ) -> QTextCharFormat:
+        merged = QTextCharFormat(base_format) if isinstance(base_format, QTextCharFormat) else QTextCharFormat()
+        bullet = self._make_markdown_bullet_char_format(raw_bullet)
+        merged.setProperty(self.BULLET_MARKDOWN_PROPERTY, bullet.property(self.BULLET_MARKDOWN_PROPERTY))
+        merged.setProperty(self.BULLET_RAW_PROPERTY, bullet.property(self.BULLET_RAW_PROPERTY))
+        return merged
+
+    def _render_markdown_bullet_as_text(self, raw_line: str) -> str:
+        parsed = self._parse_markdown_bullet_line(raw_line)
+        if not parsed:
+            return str(raw_line or "")
+        indent, body, _prefix_len = parsed
+        return f"{indent}{BULLET_GLYPH} {self._render_inline_tokens_as_text(body)}"
+
+    def _render_inline_tokens_as_text(self, line_text: str) -> str:
+        line = str(line_text or "")
+        output: list[str] = []
+        last_pos = 0
+        for match in INLINE_TOKEN_PATTERN.finditer(line):
+            if match.start() < last_pos:
+                continue
+            if match.start() > last_pos:
+                output.append(line[last_pos:match.start()])
+            raw_image = match.group("image")
+            if raw_image is not None:
+                output.append(match.group(0))
+                last_pos = match.end()
+                continue
+            raw_label = match.group("link") or ""
+            shown = link_display_text(raw_label)
+            output.append(shown if shown else match.group(0))
+            last_pos = match.end()
+        if last_pos < len(line):
+            output.append(line[last_pos:])
+        return "".join(output)
+
+    def _map_inline_display_offset_to_raw_offset(self, raw_text: str, display_offset: int) -> int:
+        line = str(raw_text or "")
+        target = max(0, int(display_offset))
+        display_pos = 0
+        raw_pos = 0
+        last_pos = 0
+        for match in INLINE_TOKEN_PATTERN.finditer(line):
+            if match.start() < last_pos:
+                continue
+            pre_text = line[last_pos:match.start()]
+            if target <= display_pos + len(pre_text):
+                return raw_pos + (target - display_pos)
+            display_pos += len(pre_text)
+            raw_pos += len(pre_text)
+
+            raw_token = str(match.group(0) or "")
+            raw_image = match.group("image")
+            if raw_image is not None:
+                shown = raw_token
+                if target <= display_pos + len(shown):
+                    return raw_pos + (target - display_pos)
+                display_pos += len(shown)
+                raw_pos += len(raw_token)
+                last_pos = match.end()
+                continue
+
+            raw_label = match.group("link") or ""
+            shown = link_display_text(raw_label)
+            if not shown:
+                shown = raw_token
+            if target <= display_pos + len(shown):
+                local = max(0, target - display_pos)
+                if shown == raw_token:
+                    return raw_pos + local
+                if len(raw_token) >= 2:
+                    return raw_pos + 1 + min(local, max(0, len(raw_token) - 2))
+                return raw_pos + min(local, len(raw_token))
+            display_pos += len(shown)
+            raw_pos += len(raw_token)
+            last_pos = match.end()
+
+        tail = line[last_pos:]
+        if target <= display_pos + len(tail):
+            return raw_pos + (target - display_pos)
+        return len(line)
 
     def _insert_inline_tokens_for_plain_line(self, cursor: QTextCursor, line_text: str) -> None:
         line = str(line_text or "")
@@ -4208,12 +5385,111 @@ class TDocEditorWidget(QTextEdit):
         if last_pos < len(line):
             cursor.insertText(line[last_pos:], QTextCharFormat())
 
+    def _insert_inline_tokens_for_heading_line(
+        self,
+        cursor: QTextCursor,
+        title_text: str,
+        *,
+        raw_heading: str,
+        level: int,
+    ) -> None:
+        line = str(title_text or "")
+        heading_plain_fmt = self._merge_markdown_heading_char_format(
+            QTextCharFormat(),
+            raw_heading=raw_heading,
+            level=level,
+        )
+        last_pos = 0
+        for match in INLINE_TOKEN_PATTERN.finditer(line):
+            if match.start() < last_pos:
+                continue
+
+            pre_text = line[last_pos:match.start()]
+            if pre_text:
+                cursor.insertText(pre_text, heading_plain_fmt)
+
+            raw_image = match.group("image")
+            if raw_image is not None:
+                # Keep heading content textual; don't embed inline images in heading runs.
+                cursor.insertText(str(match.group(0) or ""), heading_plain_fmt)
+                last_pos = match.end()
+                continue
+
+            raw_label = match.group("link") or ""
+            shown = link_display_text(raw_label)
+            if shown:
+                link_fmt = self._make_link_char_format(raw_label)
+                heading_link_fmt = self._merge_markdown_heading_char_format(
+                    link_fmt,
+                    raw_heading=raw_heading,
+                    level=level,
+                )
+                cursor.insertText(shown, heading_link_fmt)
+            else:
+                cursor.insertText(str(match.group(0) or ""), heading_plain_fmt)
+            last_pos = match.end()
+
+        if last_pos < len(line):
+            cursor.insertText(line[last_pos:], heading_plain_fmt)
+
+    def _insert_inline_tokens_for_bullet_line(
+        self,
+        cursor: QTextCursor,
+        body_text: str,
+        *,
+        raw_bullet: str,
+        indent: str,
+    ) -> None:
+        line = str(body_text or "")
+        bullet_plain_fmt = self._merge_markdown_bullet_char_format(
+            QTextCharFormat(),
+            raw_bullet=raw_bullet,
+        )
+        cursor.insertText(f"{str(indent or '')}{BULLET_GLYPH} ", bullet_plain_fmt)
+
+        last_pos = 0
+        for match in INLINE_TOKEN_PATTERN.finditer(line):
+            if match.start() < last_pos:
+                continue
+
+            pre_text = line[last_pos:match.start()]
+            if pre_text:
+                cursor.insertText(pre_text, bullet_plain_fmt)
+
+            raw_image = match.group("image")
+            if raw_image is not None:
+                # Keep bullet content textual; don't embed inline images in bullet runs.
+                cursor.insertText(str(match.group(0) or ""), bullet_plain_fmt)
+                last_pos = match.end()
+                continue
+
+            raw_label = match.group("link") or ""
+            shown = link_display_text(raw_label)
+            if shown:
+                link_fmt = self._make_link_char_format(raw_label)
+                bullet_link_fmt = self._merge_markdown_bullet_char_format(
+                    link_fmt,
+                    raw_bullet=raw_bullet,
+                )
+                cursor.insertText(shown, bullet_link_fmt)
+            else:
+                cursor.insertText(str(match.group(0) or ""), bullet_plain_fmt)
+            last_pos = match.end()
+
+        if last_pos < len(line):
+            cursor.insertText(line[last_pos:], bullet_plain_fmt)
+
     def _insert_tdoc_line(self, cursor: QTextCursor, raw_line: str) -> None:
         line = str(raw_line or "")
         parsed_heading = self._parse_markdown_heading_line(line)
         if parsed_heading:
             level, title, _prefix_len = parsed_heading
-            cursor.insertText(title, self._make_markdown_heading_char_format(line, level))
+            self._insert_inline_tokens_for_heading_line(cursor, title, raw_heading=line, level=level)
+            return
+        parsed_bullet = self._parse_markdown_bullet_line(line)
+        if parsed_bullet:
+            indent, body, _prefix_len = parsed_bullet
+            self._insert_inline_tokens_for_bullet_line(cursor, body, raw_bullet=line, indent=indent)
             return
         self._insert_inline_tokens_for_plain_line(cursor, line)
 
@@ -4258,6 +5534,28 @@ class TDocEditorWidget(QTextEdit):
         except Exception:
             return 0
 
+    def _bullet_raw_at_doc_pos(self, pos: int) -> str | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p >= max_pos:
+            return None
+        tc = QTextCursor(doc)
+        tc.setPosition(p)
+        tc.setPosition(p + 1, QTextCursor.KeepAnchor)
+        if not tc.hasSelection():
+            return None
+        selected_text = str(tc.selectedText() or "")
+        if selected_text in {"\n", "\r", "\u2029"}:
+            return None
+        fmt = tc.charFormat()
+        if not fmt.hasProperty(self.BULLET_MARKDOWN_PROPERTY):
+            return None
+        value = fmt.property(self.BULLET_RAW_PROPERTY)
+        if not isinstance(value, str):
+            return None
+        return value
+
     def _collapsed_markdown_heading_info_for_block(self, block) -> tuple[str, int] | None:
         if not block.isValid():
             return None
@@ -4274,10 +5572,28 @@ class TDocEditorWidget(QTextEdit):
                 return None
         return raw, level
 
+    def _collapsed_markdown_bullet_raw_for_block(self, block) -> str | None:
+        if not block.isValid():
+            return None
+        text = str(block.text() or "")
+        if not text:
+            return None
+        start = int(block.position())
+        raw = self._bullet_raw_at_doc_pos(start)
+        if not raw:
+            return None
+        for offset in range(len(text)):
+            if self._bullet_raw_at_doc_pos(start + offset) != raw:
+                return None
+        return raw
+
     def _serialize_block_to_tdoc(self, block) -> str:
         heading_info = self._collapsed_markdown_heading_info_for_block(block)
         if heading_info:
             return str(heading_info[0])
+        bullet_raw = self._collapsed_markdown_bullet_raw_for_block(block)
+        if bullet_raw:
+            return str(bullet_raw)
 
         output: list[str] = []
         iter_ = block.begin()
@@ -4312,6 +5628,7 @@ class TDocEditorWidget(QTextEdit):
         if doc is None:
             return
         was_internal = bool(self._is_internal_change)
+        was_modified = bool(doc.isModified())
         self._is_internal_change = True
         try:
             edit = QTextCursor(doc)
@@ -4321,15 +5638,26 @@ class TDocEditorWidget(QTextEdit):
                 info = self._collapsed_markdown_heading_info_for_block(block)
                 if info:
                     raw, level = info
-                    start = int(block.position())
-                    end = start + len(str(block.text() or ""))
-                    if end > start:
-                        edit.setPosition(start)
-                        edit.setPosition(end, QTextCursor.KeepAnchor)
-                        edit.setCharFormat(self._make_markdown_heading_char_format(raw, level))
+                    iter_ = block.begin()
+                    while not iter_.atEnd():
+                        fragment = iter_.fragment()
+                        frag_text = str(fragment.text() or "")
+                        frag_start = int(fragment.position())
+                        frag_end = frag_start + len(frag_text)
+                        if frag_end > frag_start:
+                            merged = self._merge_markdown_heading_char_format(
+                                fragment.charFormat(),
+                                raw_heading=raw,
+                                level=level,
+                            )
+                            edit.setPosition(frag_start)
+                            edit.setPosition(frag_end, QTextCursor.KeepAnchor)
+                            edit.setCharFormat(merged)
+                        iter_ += 1
                 block = block.next()
             edit.endEditBlock()
         finally:
+            self._restore_document_modified_state(was_modified)
             self._is_internal_change = was_internal
 
     def load_tdoc(self, text):
@@ -4353,6 +5681,15 @@ class TDocEditorWidget(QTextEdit):
                 cursor.insertText("\n", QTextCharFormat())
 
         cursor.endEditBlock()
+        top_cursor = QTextCursor(self.document())
+        top_cursor.setPosition(0)
+        self.setTextCursor(top_cursor)
+        vbar = self.verticalScrollBar()
+        if vbar is not None:
+            vbar.setValue(int(vbar.minimum()))
+        hbar = self.horizontalScrollBar()
+        if hbar is not None:
+            hbar.setValue(int(hbar.minimum()))
         self.document().setModified(False)
         self.blockSignals(False)
         self._is_internal_change = False
@@ -4363,6 +5700,8 @@ class TDocEditorWidget(QTextEdit):
         if self._search_bar.isVisible():
             self._schedule_search_refresh(immediate=True)
         self._schedule_occurrence_marker_refresh()
+        self._schedule_inline_image_rescale(immediate=True)
+        self._schedule_fold_refresh(immediate=True)
 
     def save_tdoc(self):
         """Serializes document back to TDOC syntax."""
@@ -4505,6 +5844,7 @@ class TDocEditorWidget(QTextEdit):
                 continue
             tag_text = f"![{raw}]"
             was_internal = bool(self._is_internal_change)
+            was_modified = bool(self.document().isModified())
             self._is_internal_change = True
             try:
                 edit = QTextCursor(self.document())
@@ -4519,10 +5859,90 @@ class TDocEditorWidget(QTextEdit):
                 new_cursor.setPosition(candidate + max(2, len(tag_text) - 1))
                 self.setTextCursor(new_cursor)
             finally:
+                self._restore_document_modified_state(was_modified)
                 self._is_internal_change = was_internal
             self._last_cursor_pos = int(self.textCursor().position())
             return True
         return False
+
+    def _image_tag_span_containing_doc_pos(self, pos: int) -> tuple[int, int, str] | None:
+        doc = self.document()
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        p = int(pos)
+        if p < 0 or p > max_pos:
+            return None
+        block = doc.findBlock(p)
+        if not block.isValid():
+            return None
+        text = block.text()
+        if not text or "![" not in text or "]" not in text:
+            return None
+
+        block_start = int(block.position())
+        local = p - block_start
+        for match in IMAGE_PATTERN.finditer(text):
+            m_start = int(match.start())
+            m_end = int(match.end())
+            if local <= m_start or local >= m_end:
+                continue
+            body = str(match.group("body") or "")
+            if not body:
+                continue
+            return block_start + m_start, block_start + m_end, body
+        return None
+
+    def _collapse_inline_image_tag_on_cursor_move(self, old_pos: int, new_pos: int) -> bool:
+        old_i = int(old_pos)
+        new_i = int(new_pos)
+        candidates = [old_i]
+        if new_i > old_i:
+            candidates.append(old_i - 1)
+        elif new_i < old_i:
+            candidates.append(old_i + 1)
+
+        span = None
+        for candidate in candidates:
+            span = self._image_tag_span_containing_doc_pos(candidate)
+            if span:
+                break
+        if not span:
+            return False
+
+        start, end, raw_body = span
+        if start < new_i < end:
+            return False
+
+        adjusted_pos = new_i
+        if adjusted_pos >= end:
+            adjusted_pos = start + 1 + max(0, adjusted_pos - end)
+
+        was_internal = bool(self._is_internal_change)
+        was_modified = bool(self.document().isModified())
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            ok = self._insert_inline_image_from_tag(edit, raw_body)
+            if not ok:
+                edit.insertText(f"![{raw_body}]", QTextCharFormat())
+            edit.endEditBlock()
+            if not ok:
+                return False
+
+            max_pos = max(0, int(self.document().characterCount()) - 1)
+            safe_pos = max(0, min(adjusted_pos, max_pos))
+            new_cursor = self.textCursor()
+            new_cursor.setPosition(safe_pos)
+            self.setTextCursor(new_cursor)
+        finally:
+            self._restore_document_modified_state(was_modified)
+            self._is_internal_change = was_internal
+        self._schedule_inline_image_rescale(immediate=True)
+        self._last_cursor_pos = int(self.textCursor().position())
+        return True
 
     def _link_span_at_cursor(
         self, cursor: QTextCursor | None = None
@@ -4613,6 +6033,7 @@ class TDocEditorWidget(QTextEdit):
         if not shown:
             shown = normalized_raw
         was_internal = bool(self._is_internal_change)
+        was_modified = bool(self.document().isModified())
         self._is_internal_change = True
         try:
             edit = QTextCursor(self.document())
@@ -4630,6 +6051,7 @@ class TDocEditorWidget(QTextEdit):
                 cur.setPosition(safe_pos)
                 self.setTextCursor(cur)
         finally:
+            self._restore_document_modified_state(was_modified)
             self._is_internal_change = was_internal
         self._last_cursor_pos = int(self.textCursor().position())
 
@@ -4706,6 +6128,7 @@ class TDocEditorWidget(QTextEdit):
         relative = pos - start
 
         was_internal = bool(self._is_internal_change)
+        was_modified = bool(self.document().isModified())
         self._is_internal_change = True
         try:
             edit = QTextCursor(self.document())
@@ -4720,9 +6143,172 @@ class TDocEditorWidget(QTextEdit):
             new_cursor.setPosition(start + 1 + relative)
             self.setTextCursor(new_cursor)
         finally:
+            self._restore_document_modified_state(was_modified)
             self._is_internal_change = was_internal
         self._last_cursor_pos = int(self.textCursor().position())
         return True
+
+    def _bullet_span_at_cursor(
+        self,
+        cursor: QTextCursor | None = None,
+    ) -> tuple[int, int, str] | None:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if cur.hasSelection():
+            return None
+        pos = int(cur.position())
+
+        left_raw = self._bullet_raw_at_doc_pos(pos - 1)
+        right_raw = self._bullet_raw_at_doc_pos(pos)
+        if not left_raw and not right_raw:
+            return None
+        raw = str(left_raw or right_raw or "")
+        if not raw:
+            return None
+        probe = pos - 1 if left_raw else pos
+
+        probe_block = self.document().findBlock(probe)
+        if not probe_block.isValid():
+            return None
+        block_start = int(probe_block.position())
+        block_end = block_start + len(str(probe_block.text() or ""))
+        if probe < block_start or probe >= block_end:
+            return None
+
+        start = probe
+        while start > block_start:
+            if self._bullet_raw_at_doc_pos(start - 1) != raw:
+                break
+            start -= 1
+
+        end = probe + 1
+        while end < block_end:
+            if self._bullet_raw_at_doc_pos(end) != raw:
+                break
+            end += 1
+
+        if end <= start:
+            return None
+        return start, end, raw
+
+    def _expand_markdown_bullet_for_editing(
+        self,
+        cursor: QTextCursor | None = None,
+    ) -> bool:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        span = self._bullet_span_at_cursor(cur)
+        if not span:
+            return False
+        start, end, raw = span
+        pos = int(cur.position())
+        if pos <= start or pos >= end:
+            return False
+
+        parsed = self._parse_markdown_bullet_line(raw)
+        if not parsed:
+            return False
+        indent, body, prefix_len = parsed
+        rendered_body = self._render_inline_tokens_as_text(body)
+        rendered_len = len(indent) + 2 + len(rendered_body)
+        relative = max(0, min(pos - start, end - start))
+        if relative >= rendered_len:
+            mapped = len(raw)
+        elif relative < prefix_len:
+            mapped = relative
+        else:
+            mapped = prefix_len + self._map_inline_display_offset_to_raw_offset(body, relative - prefix_len)
+
+        was_internal = bool(self._is_internal_change)
+        was_modified = bool(self.document().isModified())
+        self._is_internal_change = True
+        try:
+            edit = QTextCursor(self.document())
+            edit.beginEditBlock()
+            edit.setPosition(start)
+            edit.setPosition(end, QTextCursor.KeepAnchor)
+            edit.removeSelectedText()
+            edit.insertText(raw, QTextCharFormat())
+            edit.endEditBlock()
+
+            new_cursor = self.textCursor()
+            max_pos = max(0, int(self.document().characterCount()) - 1)
+            new_cursor.setPosition(max(0, min(start + mapped, max_pos)))
+            self.setTextCursor(new_cursor)
+        finally:
+            self._restore_document_modified_state(was_modified)
+            self._is_internal_change = was_internal
+        self._last_cursor_pos = int(self.textCursor().position())
+        return True
+
+    def _collapse_markdown_bullet_on_cursor_move(self, old_pos: int, new_pos: int) -> bool:
+        old_i = int(old_pos)
+        new_i = int(new_pos)
+        candidates = [old_i]
+        if new_i > old_i:
+            candidates.append(old_i - 1)
+        elif new_i < old_i:
+            candidates.append(old_i + 1)
+
+        checked_blocks: set[int] = set()
+        for candidate in candidates:
+            if candidate < 0:
+                continue
+            block = self.document().findBlock(candidate)
+            if not block.isValid():
+                continue
+            block_no = int(block.blockNumber())
+            if block_no in checked_blocks:
+                continue
+            checked_blocks.add(block_no)
+
+            if self._collapsed_markdown_bullet_raw_for_block(block):
+                continue
+
+            raw_line = self._serialize_block_to_tdoc(block)
+            parsed = self._parse_markdown_bullet_line(raw_line)
+            if not parsed:
+                continue
+            indent, body, _prefix_len = parsed
+            rendered_line = self._render_markdown_bullet_as_text(raw_line)
+
+            block_start = int(block.position())
+            block_end = block_start + len(str(block.text() or ""))
+            if block_start <= new_i <= block_end:
+                return False
+
+            adjusted_pos = new_i
+            current_len = max(0, block_end - block_start)
+            delta = len(rendered_line) - current_len
+            if adjusted_pos > block_end:
+                adjusted_pos += delta
+
+            was_internal = bool(self._is_internal_change)
+            was_modified = bool(self.document().isModified())
+            self._is_internal_change = True
+            try:
+                edit = QTextCursor(self.document())
+                edit.beginEditBlock()
+                edit.setPosition(block_start)
+                edit.setPosition(block_end, QTextCursor.KeepAnchor)
+                edit.removeSelectedText()
+                self._insert_inline_tokens_for_bullet_line(
+                    edit,
+                    body,
+                    raw_bullet=raw_line,
+                    indent=indent,
+                )
+                edit.endEditBlock()
+
+                max_pos = max(0, int(self.document().characterCount()) - 1)
+                safe_pos = max(0, min(adjusted_pos, max_pos))
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(safe_pos)
+                self.setTextCursor(new_cursor)
+            finally:
+                self._restore_document_modified_state(was_modified)
+                self._is_internal_change = was_internal
+            self._last_cursor_pos = int(self.textCursor().position())
+            return True
+        return False
 
     def _heading_span_at_cursor(
         self,
@@ -4779,21 +6365,23 @@ class TDocEditorWidget(QTextEdit):
             return False
         start, end, raw, _level = span
         pos = int(cur.position())
-        if pos < start or pos > end:
+        if pos <= start or pos >= end:
             return False
 
         parsed = self._parse_markdown_heading_line(raw)
         if not parsed:
             return False
         _raw_level, title, prefix_len = parsed
-        title_len = len(title)
+        rendered_title = self._render_inline_tokens_as_text(title)
+        title_len = len(rendered_title)
         relative = max(0, min(pos - start, end - start))
         if relative >= title_len:
             mapped = len(raw)
         else:
-            mapped = prefix_len + relative
+            mapped = prefix_len + self._map_inline_display_offset_to_raw_offset(title, relative)
 
         was_internal = bool(self._is_internal_change)
+        was_modified = bool(self.document().isModified())
         self._is_internal_change = True
         try:
             edit = QTextCursor(self.document())
@@ -4809,6 +6397,7 @@ class TDocEditorWidget(QTextEdit):
             new_cursor.setPosition(max(0, min(start + mapped, max_pos)))
             self.setTextCursor(new_cursor)
         finally:
+            self._restore_document_modified_state(was_modified)
             self._is_internal_change = was_internal
         self._last_cursor_pos = int(self.textCursor().position())
         return True
@@ -4846,6 +6435,7 @@ class TDocEditorWidget(QTextEdit):
             level, title, _prefix_len = parsed
             if not title:
                 continue
+            rendered_title = self._render_inline_tokens_as_text(title)
 
             block_start = int(block.position())
             block_end = block_start + len(str(block.text() or ""))
@@ -4854,11 +6444,12 @@ class TDocEditorWidget(QTextEdit):
 
             adjusted_pos = new_i
             current_len = max(0, block_end - block_start)
-            delta = len(title) - current_len
+            delta = len(rendered_title) - current_len
             if adjusted_pos > block_end:
                 adjusted_pos += delta
 
             was_internal = bool(self._is_internal_change)
+            was_modified = bool(self.document().isModified())
             self._is_internal_change = True
             try:
                 edit = QTextCursor(self.document())
@@ -4866,7 +6457,12 @@ class TDocEditorWidget(QTextEdit):
                 edit.setPosition(block_start)
                 edit.setPosition(block_end, QTextCursor.KeepAnchor)
                 edit.removeSelectedText()
-                edit.insertText(title, self._make_markdown_heading_char_format(raw_line, level))
+                self._insert_inline_tokens_for_heading_line(
+                    edit,
+                    title,
+                    raw_heading=raw_line,
+                    level=level,
+                )
                 edit.endEditBlock()
 
                 max_pos = max(0, int(self.document().characterCount()) - 1)
@@ -4875,6 +6471,7 @@ class TDocEditorWidget(QTextEdit):
                 new_cursor.setPosition(safe_pos)
                 self.setTextCursor(new_cursor)
             finally:
+                self._restore_document_modified_state(was_modified)
                 self._is_internal_change = was_internal
             self._last_cursor_pos = int(self.textCursor().position())
             return True
@@ -4889,9 +6486,14 @@ class TDocEditorWidget(QTextEdit):
         if old_pos != new_pos:
             self._collapse_markdown_heading_on_cursor_move(old_pos, new_pos)
             new_pos = int(self.textCursor().position())
+            self._collapse_markdown_bullet_on_cursor_move(old_pos, new_pos)
+            new_pos = int(self.textCursor().position())
+            self._collapse_inline_image_tag_on_cursor_move(old_pos, new_pos)
+            new_pos = int(self.textCursor().position())
             self._collapse_bracket_link_on_cursor_move(old_pos, new_pos)
             new_pos = int(self.textCursor().position())
         self._expand_markdown_heading_for_editing(self.textCursor())
+        self._expand_markdown_bullet_for_editing(self.textCursor())
         self._expand_link_for_editing(self.textCursor())
         self._on_cursor_moved_inline_suggestion()
         self._last_cursor_pos = int(self.textCursor().position())
@@ -5019,6 +6621,10 @@ class TDocEditorWidget(QTextEdit):
         action_find = menu.addAction("Find")
         action_replace = menu.addAction("Replace")
         action_ai = menu.addAction("AI Inline Assist")
+        action_frontmatter_toggle = menu.addAction(
+            "Fold Frontmatter" if self.is_frontmatter_visible() else "Unfold Frontmatter"
+        )
+        action_frontmatter_toggle.setEnabled(self._frontmatter_block_bounds() is not None)
 
         if isinstance(target, str) and target.startswith("symbol:"):
             label = self._get_link_label_at(cursor)
@@ -5060,6 +6666,9 @@ class TDocEditorWidget(QTextEdit):
             return
         if chosen is action_ai:
             self.aiAssistRequested.emit("manual")
+            return
+        if chosen is action_frontmatter_toggle:
+            self.toggle_frontmatter_visibility()
             return
 
     def mouseMoveEvent(self, e):

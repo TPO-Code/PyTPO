@@ -22,6 +22,8 @@ class ProblemsPanel(QWidget):
     removeUnusedImportRequested = Signal(object)  # diagnostic dict
     addTdocSymbolRequested = Signal(object)  # diagnostic dict
     capitalizeTdocSectionRequested = Signal(object)  # diagnostic dict
+    createTdocMissingImageRequested = Signal(object)  # diagnostic dict
+    renumberTdocNumberedListRequested = Signal(object)  # diagnostic dict
     clearFileRequested = Signal(str)
     clearAllRequested = Signal()
     countChanged = Signal(int)
@@ -127,6 +129,8 @@ class ProblemsPanel(QWidget):
         is_unused_import = self._is_unused_import_diag(diag)
         unresolved_tdoc_symbol = self._tdoc_unresolved_symbol_from_diag(diag)
         tdoc_section_to_capitalize = self._tdoc_section_cap_warning_from_diag(diag)
+        tdoc_missing_image = self._tdoc_missing_image_from_diag(diag)
+        tdoc_numbered_list_gap = self._is_tdoc_numbered_list_gap_diag(diag)
         menu = QMenu(self)
 
         act_copy_message = QAction("Copy Message", self)
@@ -163,6 +167,16 @@ class ProblemsPanel(QWidget):
             )
             act_cap_section.triggered.connect(lambda: self._emit_capitalize_tdoc_section(diag))
             menu.addAction(act_cap_section)
+
+        if diag is not None and tdoc_missing_image:
+            act_create_missing_image = QAction(f"Create placeholder image '{tdoc_missing_image}'", self)
+            act_create_missing_image.triggered.connect(lambda: self._emit_create_tdoc_missing_image(diag))
+            menu.addAction(act_create_missing_image)
+
+        if diag is not None and tdoc_numbered_list_gap:
+            act_renumber_tdoc_list = QAction("Renumber numbered list", self)
+            act_renumber_tdoc_list.triggered.connect(lambda: self._emit_renumber_tdoc_numbered_list(diag))
+            menu.addAction(act_renumber_tdoc_list)
 
         menu.addSeparator()
 
@@ -229,6 +243,20 @@ class ProblemsPanel(QWidget):
         if not self._tdoc_section_cap_warning_from_diag(diag):
             return
         self.capitalizeTdocSectionRequested.emit(diag)
+
+    def _emit_create_tdoc_missing_image(self, diag: Optional[dict]):
+        if not isinstance(diag, dict):
+            return
+        if not self._tdoc_missing_image_from_diag(diag):
+            return
+        self.createTdocMissingImageRequested.emit(diag)
+
+    def _emit_renumber_tdoc_numbered_list(self, diag: Optional[dict]):
+        if not isinstance(diag, dict):
+            return
+        if not self._is_tdoc_numbered_list_gap_diag(diag):
+            return
+        self.renumberTdocNumberedListRequested.emit(diag)
 
     def _missing_symbol_from_diag(self, diag: Optional[dict]) -> str:
         if not isinstance(diag, dict):
@@ -303,6 +331,41 @@ class ProblemsPanel(QWidget):
         if not match:
             return ""
         return str(match.group(1) or "").strip()
+
+    def _tdoc_missing_image_from_diag(self, diag: Optional[dict]) -> str:
+        if not isinstance(diag, dict):
+            return ""
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return ""
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return ""
+        match = re.search(
+            r"^Missing image file\s+['\"](.+?)['\"]\s+used at\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return str(match.group(1) or "").strip()
+
+    def _is_tdoc_numbered_list_gap_diag(self, diag: Optional[dict]) -> bool:
+        if not isinstance(diag, dict):
+            return False
+        source = str(diag.get("source") or "").strip().lower()
+        if source != "tdoc":
+            return False
+        message = str(diag.get("message") or "").strip()
+        if not message:
+            return False
+        return bool(
+            re.search(
+                r"^Numbered list item\s+\d+\s+is out of sequence\s+\(expected\s+\d+\)\s+at\b",
+                message,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _severity_rank(self, severity: str) -> int:
         s = severity.lower()
