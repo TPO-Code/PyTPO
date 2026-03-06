@@ -1973,7 +1973,17 @@ class CodexAgentDockWidget(QWidget):
         merge: bool = False,
     ) -> None:
         line = str(text).rstrip("\n")
-        if not line.strip():
+        if (
+            not line.strip()
+            and not (
+                merge
+                and timestamp is None
+                and self._last_bubble is not None
+                and self._last_item is not None
+                and self._last_bubble.role == role
+                and self._last_bubble.timestamp is None
+            )
+        ):
             return
         if (
             merge
@@ -2038,6 +2048,25 @@ class CodexAgentDockWidget(QWidget):
             local_path = str(url.toLocalFile() or "")
         elif target.startswith("/"):
             local_path = target
+        elif not url.scheme():
+            raw_target = target.split("#", 1)[0].split("?", 1)[0].strip()
+            if raw_target:
+                candidate = Path(raw_target).expanduser()
+                if not candidate.is_absolute():
+                    base_dir = self._project_dir()
+                    if base_dir is None and self._session_project:
+                        try:
+                            session_dir = Path(self._session_project).expanduser().resolve(strict=False)
+                            if session_dir.is_dir():
+                                base_dir = session_dir
+                        except Exception:
+                            base_dir = None
+                    if base_dir is not None:
+                        candidate = base_dir / candidate
+                try:
+                    local_path = str(candidate.resolve(strict=False))
+                except Exception:
+                    local_path = str(candidate)
         if local_path and callable(self._file_opener):
             try:
                 self._file_opener(local_path)
@@ -2338,8 +2367,6 @@ class CodexAgentDockWidget(QWidget):
     @staticmethod
     def _is_noise_line(text: str) -> bool:
         stripped = text.strip()
-        if not stripped:
-            return True
         if stripped == "mcp startup: no servers":
             return True
         if "codex_core::state_db" in stripped and "WARN" in stripped:
