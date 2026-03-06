@@ -887,6 +887,9 @@ class CodexAgentDockWidget(QWidget):
         self._stream_mode = "assistant"
         self._stream_partial = ""
         self._suppress_post_tokens_echo = False
+        self._post_tokens_replay_expected_lines: list[str] = []
+        self._post_tokens_replay_index = 0
+        self._latest_assistant_bubble_text = ""
         self._last_bubble: _BubbleWidget | None = None
         self._last_item: QListWidgetItem | None = None
         self._bubble_debug_entries: list[tuple[str, str]] = []
@@ -1756,6 +1759,9 @@ class CodexAgentDockWidget(QWidget):
         self._stream_mode = "assistant"
         self._stream_partial = ""
         self._suppress_post_tokens_echo = False
+        self._post_tokens_replay_expected_lines = []
+        self._post_tokens_replay_index = 0
+        self._latest_assistant_bubble_text = ""
         self._last_bubble = None
         self._last_item = None
         self._bubble_debug_entries.clear()
@@ -2035,6 +2041,37 @@ class CodexAgentDockWidget(QWidget):
         else:
             self.session_picker.setToolTip("No active session")
 
+    def _begin_post_tokens_replay_suppression(self) -> None:
+        source = str(self._latest_assistant_bubble_text or "")
+        expected = [line for line in source.splitlines() if str(line).strip()]
+        self._post_tokens_replay_expected_lines = expected
+        self._post_tokens_replay_index = 0
+        self._suppress_post_tokens_echo = bool(expected)
+
+    def _consume_post_tokens_replay_line(self, line: str) -> bool:
+        if not self._suppress_post_tokens_echo:
+            return False
+        expected = self._post_tokens_replay_expected_lines
+        index = int(self._post_tokens_replay_index)
+        if index < 0 or index >= len(expected):
+            self._suppress_post_tokens_echo = False
+            self._post_tokens_replay_expected_lines = []
+            self._post_tokens_replay_index = 0
+            return False
+        incoming = str(line or "").strip()
+        wanted = str(expected[index] or "").strip()
+        if incoming != wanted:
+            self._suppress_post_tokens_echo = False
+            self._post_tokens_replay_expected_lines = []
+            self._post_tokens_replay_index = 0
+            return False
+        self._post_tokens_replay_index = index + 1
+        if self._post_tokens_replay_index >= len(expected):
+            self._suppress_post_tokens_echo = False
+            self._post_tokens_replay_expected_lines = []
+            self._post_tokens_replay_index = 0
+        return True
+
     def _add_bubble(
         self,
         role: str,
@@ -2056,6 +2093,8 @@ class CodexAgentDockWidget(QWidget):
         ):
             self._last_bubble.append_line(line)
             self._last_item.setSizeHint(self._last_bubble.sizeHint())
+            if role == "assistant":
+                self._latest_assistant_bubble_text = str(self._last_bubble._text or "")
             if self._bubble_debug_entries:
                 self._bubble_debug_entries[-1] = (
                     str(self._last_bubble.role),
@@ -2076,6 +2115,8 @@ class CodexAgentDockWidget(QWidget):
             self.transcript.setItemWidget(item, bubble)
             self._last_bubble = bubble
             self._last_item = item
+            if role == "assistant":
+                self._latest_assistant_bubble_text = str(bubble._text or "")
             self._bubble_debug_entries.append(
                 (str(bubble.role), str(bubble._text or line))
             )
@@ -2234,6 +2275,9 @@ class CodexAgentDockWidget(QWidget):
         self._stream_mode = "assistant"
         self._stream_partial = ""
         self._suppress_post_tokens_echo = False
+        self._post_tokens_replay_expected_lines = []
+        self._post_tokens_replay_index = 0
+        self._latest_assistant_bubble_text = ""
         self._last_bubble = None
         self._last_item = None
         self._turn_changed_files.clear()
@@ -2312,6 +2356,9 @@ class CodexAgentDockWidget(QWidget):
         self._stream_partial = ""
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
+        self._suppress_post_tokens_echo = False
+        self._post_tokens_replay_expected_lines = []
+        self._post_tokens_replay_index = 0
         attachment_refs, attachment_failures = self._stage_attachments_for_turn(project)
         if attachment_failures:
             self._add_bubble(
@@ -2432,24 +2479,21 @@ class CodexAgentDockWidget(QWidget):
             return
         if stripped.startswith("tokens used"):
             self._stream_mode = "meta_tokens"
+            self._begin_post_tokens_replay_suppression()
             self._add_bubble("meta", raw_line, merge=True)
             return
         if self._stream_mode == "meta_tokens":
             self._add_bubble("meta", raw_line, merge=True)
             self._stream_mode = "assistant"
-            self._suppress_post_tokens_echo = True
             return
         role = self._classify_stream_line(stripped, self._stream_mode)
         if self._suppress_post_tokens_echo and role == "assistant":
-            self._suppress_post_tokens_echo = False
-            if (
-                self._last_bubble is not None
-                and self._last_bubble.role == "assistant"
-                and stripped == str(self._last_bubble._text or "").strip()
-            ):
+            if self._consume_post_tokens_replay_line(raw_line):
                 return
         elif role != "meta":
             self._suppress_post_tokens_echo = False
+            self._post_tokens_replay_expected_lines = []
+            self._post_tokens_replay_index = 0
         self._add_bubble(role, raw_line, merge=True)
 
     def _append_raw(self, text: str) -> None:
@@ -2576,6 +2620,9 @@ class CodexAgentDockWidget(QWidget):
             self._handle_stream_line(self._stream_partial.rstrip("\r"))
         self._stream_partial = ""
         self._stream_mode = "assistant"
+        self._suppress_post_tokens_echo = False
+        self._post_tokens_replay_expected_lines = []
+        self._post_tokens_replay_index = 0
         self._update_rate_limits_label()
         self._append_turn_changed_files_bubble()
         if int(code) == 0:
