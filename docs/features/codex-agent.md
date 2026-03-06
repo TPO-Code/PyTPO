@@ -54,7 +54,6 @@ codex exec --skip-git-repo-check --sandbox workspace-write -
 
 Top row:
 
-- `Instructions (shown/hidden)` toggle for optional system preamble
 - recent session dropdown
 - `New Chat`
 - `Stop`
@@ -67,8 +66,8 @@ Composer:
 
 - multiline input box
 - attachment summary row (`Attached (...)`) with `Clear`
-- bottom control row: `Agent Options` toggle, `+` attachment button, `Send`
-- model/reasoning/permissions/rate-limits section (toggleable)
+- bottom control row: compact `Agent` settings toggle, `+` attachment button, `Send`
+- toggleable agent section with system preamble, model, reasoning, permissions, and rate-limits
 
 ## Keyboard behavior
 

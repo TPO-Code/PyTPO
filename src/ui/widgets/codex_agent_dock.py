@@ -14,11 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QEasingCurve, QObject, QRectF, QThread, QTimer, Qt, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QRectF, QSize, QThread, QTimer, Qt, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
     QDesktopServices,
+    QIcon,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -1001,8 +1002,6 @@ class CodexAgentDockWidget(QWidget):
         root.setSpacing(8)
 
         top_row = QHBoxLayout()
-        self.preamble_toggle_btn = QPushButton("Instructions (hidden)")
-        self.preamble_toggle_btn.setCheckable(True)
         self.session_picker = QToolButton()
         self.session_picker.setText("Recent Sessions")
         self.session_picker.setPopupMode(QToolButton.InstantPopup)
@@ -1013,26 +1012,11 @@ class CodexAgentDockWidget(QWidget):
         self.new_chat_btn = QPushButton("New Chat")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
-        top_row.addWidget(self.preamble_toggle_btn)
         top_row.addWidget(self.session_picker)
         top_row.addStretch(1)
         top_row.addWidget(self.new_chat_btn)
         top_row.addWidget(self.stop_btn)
         root.addLayout(top_row)
-
-        self.preamble_container = QWidget()
-        preamble_layout = QVBoxLayout(self.preamble_container)
-        preamble_layout.setContentsMargins(0, 0, 0, 0)
-        preamble_layout.setSpacing(4)
-        preamble_layout.addWidget(QLabel("System preamble (first turn only)"))
-        self.preamble_edit = QPlainTextEdit()
-        self.preamble_edit.setPlaceholderText("Optional Codex instructions...")
-        self.preamble_edit.setMaximumBlockCount(400)
-        self.preamble_edit.setMinimumHeight(74)
-        self.preamble_edit.setMaximumHeight(120)
-        preamble_layout.addWidget(self.preamble_edit)
-        root.addWidget(self.preamble_container)
-        self._set_preamble_visible(False)
 
         root.addWidget(QLabel("Transcript"))
         self.chat_splitter = QSplitter(Qt.Vertical)
@@ -1101,19 +1085,41 @@ class CodexAgentDockWidget(QWidget):
         input_row.setSpacing(8)
         self.input_hint_label = QLabel("Enter: new line  |  Ctrl+Enter: send")
         self.input_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.options_toggle_btn = QPushButton("Agent Options (shown)")
-        self.options_toggle_btn.setCheckable(True)
-        self.options_toggle_btn.setChecked(True)
+        self.agent_options_toggle_btn = QToolButton()
+        self.agent_options_toggle_btn.setCheckable(True)
+        self.agent_options_toggle_btn.setChecked(True)
+        self.agent_options_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.agent_options_toggle_btn.setIcon(self._load_settings_icon())
+        self.agent_options_toggle_btn.setIconSize(QSize(16, 16))
+        self.agent_options_toggle_btn.setToolTip("Show or hide agent options")
         self.add_file_btn = QPushButton("+")
         self.add_file_btn.setToolTip("Attach files")
         self.add_file_btn.setFixedWidth(26)
         self.send_btn = QPushButton("Send")
         input_row.addWidget(self.input_hint_label)
         input_row.addStretch(1)
-        input_row.addWidget(self.options_toggle_btn)
+        input_row.addWidget(self.agent_options_toggle_btn)
         input_row.addWidget(self.add_file_btn)
         input_row.addWidget(self.send_btn)
         composer_layout.addLayout(input_row)
+
+        self.agent_options_container = QWidget()
+        agent_options_layout = QVBoxLayout(self.agent_options_container)
+        agent_options_layout.setContentsMargins(0, 0, 0, 0)
+        agent_options_layout.setSpacing(6)
+
+        self.preamble_container = QWidget()
+        preamble_layout = QVBoxLayout(self.preamble_container)
+        preamble_layout.setContentsMargins(0, 0, 0, 0)
+        preamble_layout.setSpacing(4)
+        preamble_layout.addWidget(QLabel("System preamble (first turn only)"))
+        self.preamble_edit = QPlainTextEdit()
+        self.preamble_edit.setPlaceholderText("Optional Codex instructions...")
+        self.preamble_edit.setMaximumBlockCount(400)
+        self.preamble_edit.setMinimumHeight(74)
+        self.preamble_edit.setMaximumHeight(120)
+        preamble_layout.addWidget(self.preamble_edit)
+        agent_options_layout.addWidget(self.preamble_container)
 
         self.options_container = QWidget()
         options_grid = QGridLayout(self.options_container)
@@ -1150,8 +1156,9 @@ class CodexAgentDockWidget(QWidget):
         options_grid.addWidget(self.rate_limits_label, 4, 0, 1, 2)
         options_grid.setColumnStretch(0, 1)
         options_grid.setColumnStretch(1, 1)
-        composer_layout.addWidget(self.options_container)
-        self._set_options_visible(True)
+        agent_options_layout.addWidget(self.options_container)
+        composer_layout.addWidget(self.agent_options_container)
+        self._set_agent_options_visible(True)
 
         self.chat_splitter.addWidget(composer_container)
         self.chat_splitter.setStretchFactor(0, 6)
@@ -1167,8 +1174,7 @@ class CodexAgentDockWidget(QWidget):
         self.add_file_btn.clicked.connect(self._on_add_files_clicked)
         self.clear_attachments_btn.clicked.connect(self._clear_selected_attachments)
         self.input_edit.sendRequested.connect(self._send)
-        self.preamble_toggle_btn.toggled.connect(self._on_preamble_toggled)
-        self.options_toggle_btn.toggled.connect(self._on_options_toggled)
+        self.agent_options_toggle_btn.toggled.connect(self._on_agent_options_toggled)
 
         self.preamble_edit.textChanged.connect(self._schedule_persist_settings)
         self.model_combo.currentIndexChanged.connect(self._on_option_changed)
@@ -1179,28 +1185,23 @@ class CodexAgentDockWidget(QWidget):
         self._runner.busyChanged.connect(self._on_busy_changed)
         self._runner.exitCode.connect(self._on_exit_code)
 
-    def _set_preamble_visible(self, visible: bool) -> None:
+    def _load_settings_icon(self) -> QIcon:
+        icon_path = _APP_ROOT / "src" / "icons" / "settings.png"
+        if icon_path.is_file():
+            icon = QIcon(str(icon_path))
+            if not icon.isNull():
+                return icon
+        return QIcon()
+
+    def _set_agent_options_visible(self, visible: bool) -> None:
         shown = bool(visible)
+        self.agent_options_container.setVisible(shown)
         self.preamble_container.setVisible(shown)
-        self.preamble_toggle_btn.setText(
-            "Instructions (shown)" if shown else "Instructions (hidden)"
-        )
-
-    def _on_preamble_toggled(self, checked: bool) -> None:
-        self._set_preamble_visible(bool(checked))
-        if self._updating_options:
-            return
-        self._schedule_persist_settings()
-
-    def _set_options_visible(self, visible: bool) -> None:
-        shown = bool(visible)
         self.options_container.setVisible(shown)
-        self.options_toggle_btn.setText(
-            "Agent Options (shown)" if shown else "Agent Options (hidden)"
-        )
+        self.agent_options_toggle_btn.setText("v" if shown else ">")
 
-    def _on_options_toggled(self, checked: bool) -> None:
-        self._set_options_visible(bool(checked))
+    def _on_agent_options_toggled(self, checked: bool) -> None:
+        self._set_agent_options_visible(bool(checked))
         if self._updating_options:
             return
         self._schedule_persist_settings()
@@ -1376,17 +1377,13 @@ class CodexAgentDockWidget(QWidget):
             if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
                 sandbox_mode = "workspace-write"
             self._sandbox_mode = sandbox_mode
-            show_preamble = bool(data.get("show_system_preamble", False))
-            self.preamble_toggle_btn.blockSignals(True)
-            self.preamble_toggle_btn.setChecked(show_preamble)
-            self.preamble_toggle_btn.blockSignals(False)
-            self._set_preamble_visible(show_preamble)
-
             show_options = bool(data.get("show_agent_options", True))
-            self.options_toggle_btn.blockSignals(True)
-            self.options_toggle_btn.setChecked(show_options)
-            self.options_toggle_btn.blockSignals(False)
-            self._set_options_visible(show_options)
+            show_preamble = bool(data.get("show_system_preamble", False))
+            show_agent_options = show_options or show_preamble
+            self.agent_options_toggle_btn.blockSignals(True)
+            self.agent_options_toggle_btn.setChecked(show_agent_options)
+            self.agent_options_toggle_btn.blockSignals(False)
+            self._set_agent_options_visible(show_agent_options)
 
             model = str(data.get("model") or "").strip()
             self._load_model_choices(model)
@@ -1429,8 +1426,8 @@ class CodexAgentDockWidget(QWidget):
             "system_preamble": str(self.preamble_edit.toPlainText() or ""),
             "auto_skip_git_repo_check": bool(self._auto_skip_git_repo_check),
             "sandbox_mode": str(self._sandbox_mode or "workspace-write"),
-            "show_system_preamble": bool(self.preamble_toggle_btn.isChecked()),
-            "show_agent_options": bool(self.options_toggle_btn.isChecked()),
+            "show_system_preamble": bool(self.agent_options_toggle_btn.isChecked()),
+            "show_agent_options": bool(self.agent_options_toggle_btn.isChecked()),
             "model": model,
             "model_reasoning_effort": reasoning,
             "permission_mode": permission_mode,
@@ -3028,7 +3025,7 @@ class CodexAgentDockWidget(QWidget):
     def _format_reset_time(unix_seconds: object) -> str:
         try:
             timestamp = int(float(unix_seconds))
-            return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M")
         except Exception:
             return "--"
 
