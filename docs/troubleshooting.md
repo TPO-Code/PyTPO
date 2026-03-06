@@ -96,6 +96,29 @@ Check:
 
 See [AI Assist](features/ai-assist.md).
 
+## Codex Agent Dock issues
+
+Check:
+
+- `codex --version` works in your shell
+- project is open (Codex dock requires project root)
+- `File -> Settings... -> Code Intelligence -> Code Agents` command template is valid
+- selected permission mode matches your task (`Default` vs `Full Access`)
+- if using attachments, ensure files were successfully staged
+
+Common symptoms:
+
+- `Command not found: 'codex'`
+  - install Codex CLI or adjust shell/path environment
+- process exits with non-zero code
+  - inspect transcript `System` bubble and `Tools` lines for failure reason
+- resume/session mismatch
+  - start `New Chat` or pick a recent session from the dock dropdown
+- no rate limit values shown
+  - session log may not yet contain token/rate-limit payloads
+
+See [Codex Agent Dock](features/codex-agent.md).
+
 ## Git actions unavailable or stale
 
 Check:

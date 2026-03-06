@@ -1,6 +1,6 @@
 # Features
 
-Feature guides for editing, navigation, diagnostics, Git, and AI assistance.
+Feature guides for editing, navigation, diagnostics, Git, AI assistance, and docked coding agents.
 
 - [Editor Basics](editor.md)
 - [Panels](panels.md)
@@ -8,3 +8,4 @@ Feature guides for editing, navigation, diagnostics, Git, and AI assistance.
 - [Find and Replace in Files](find-replace-in-files.md)
 - [Git Integration](git.md)
 - [AI Assist](ai-assist.md)
+- [Codex Agent Dock](codex-agent.md)

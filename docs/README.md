@@ -27,6 +27,7 @@ User documentation for running, configuring, and troubleshooting PyTPO.
 - [Find and Replace in Files](features/find-replace-in-files.md)
 - [Git Integration](features/git.md)
 - [AI Assist](features/ai-assist.md)
+- [Codex Agent Dock](features/codex-agent.md)
 
 ## Configuration
 

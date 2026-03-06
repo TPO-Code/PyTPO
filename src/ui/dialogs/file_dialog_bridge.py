@@ -117,6 +117,26 @@ def get_open_file_name(
     return path, selected_filter
 
 
+def get_open_file_names(
+    *,
+    parent: Any | None,
+    manager: Any | None,
+    caption: str,
+    directory: str = "",
+    file_filter: str = "",
+) -> tuple[list[str], str]:
+    selected, selected_filter, _starred = FileDialog.getOpenFileNames(
+        parent=parent,
+        caption=caption,
+        directory=directory,
+        filter=file_filter,
+        starred_paths=_dialog_starred_paths(manager),
+        background=_dialog_background(manager),
+    )
+    _save_dialog_starred_paths(manager, _starred)
+    return selected, selected_filter
+
+
 def get_save_file_name(
     *,
     parent: Any | None,

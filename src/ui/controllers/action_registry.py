@@ -292,6 +292,12 @@ class ActionRegistry:
             ide._panel_toggle_actions.append(act_panel_commit_md)
             view.addAction(act_panel_commit_md)
 
+        if getattr(ide, "dock_codex_agent", None) is not None:
+            act_panel_codex_agent = ide.dock_codex_agent.toggleViewAction()
+            act_panel_codex_agent.setText("Codex Agent Dock")
+            ide._panel_toggle_actions.append(act_panel_codex_agent)
+            view.addAction(act_panel_codex_agent)
+
         view.addSeparator()
         act_markdown_preview = QAction("Markdown Live Preview", ide)
         act_markdown_preview.setCheckable(True)
@@ -393,6 +399,10 @@ class ActionRegistry:
             ),
         )
         tools.addAction(act_ai_inline)
+
+        act_codex_agent = QAction("Open Codex Agent Dock", ide)
+        act_codex_agent.triggered.connect(ide.show_codex_agent_dock)
+        tools.addAction(act_codex_agent)
 
         act_new_terminal = QAction("New Terminal", ide)
         act_new_terminal.triggered.connect(ide.new_terminal_tab)

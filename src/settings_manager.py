@@ -354,6 +354,14 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "ai_assist.retrieval_total_candidate_limit": "ai_assist.retrieval_total_candidate_limit",
     "ai_assist.retrieval_snippet_char_cap": "ai_assist.retrieval_snippet_char_cap",
     "ai_assist.retrieval_snippet_segment_limit": "ai_assist.retrieval_snippet_segment_limit",
+    "codex_agent": "codex_agent",
+    "codex_agent.command_template": "codex_agent.command_template",
+    "codex_agent.system_preamble": "codex_agent.system_preamble",
+    "codex_agent.model": "codex_agent.model",
+    "codex_agent.model_reasoning_effort": "codex_agent.model_reasoning_effort",
+    "codex_agent.permission_mode": "codex_agent.permission_mode",
+    "codex_agent.session_id": "codex_agent.session_id",
+    "codex_agent.session_project_dir": "codex_agent.session_project_dir",
     "github": "github",
     "github.username": "github.username",
     "github.use_token_for_git": "github.use_token_for_git",
@@ -415,6 +423,7 @@ IDE_KEY_PREFIXES: tuple[str, ...] = (
     "lint",
     "completion",
     "ai_assist",
+    "codex_agent",
     "github",
     "git",
     "editor",
@@ -586,6 +595,7 @@ class SettingsManager:
             "lint",
             "completion",
             "ai_assist",
+            "codex_agent",
             "github",
             "git",
             "editor",
@@ -620,6 +630,7 @@ class SettingsManager:
                 "lint",
                 "completion",
                 "ai_assist",
+                "codex_agent",
                 "github",
                 "git",
                 "editor",
@@ -1266,6 +1277,27 @@ class SettingsManager:
         data["completion"] = completion
 
         data["ai_assist"] = normalize_ai_settings(data.get("ai_assist"))
+        codex_agent = data.get("codex_agent")
+        if not isinstance(codex_agent, dict):
+            codex_agent = {}
+        codex_agent = deep_merge_defaults(codex_agent, default_ide_settings()["codex_agent"])
+        codex_agent["command_template"] = (
+            str(codex_agent.get("command_template") or "").strip()
+            or str(default_ide_settings()["codex_agent"]["command_template"])
+        )
+        codex_agent["system_preamble"] = str(codex_agent.get("system_preamble") or "")
+        codex_agent["model"] = str(codex_agent.get("model") or "").strip()
+        reasoning_effort = str(codex_agent.get("model_reasoning_effort") or "").strip().lower()
+        if reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+            reasoning_effort = str(default_ide_settings()["codex_agent"]["model_reasoning_effort"])
+        codex_agent["model_reasoning_effort"] = reasoning_effort
+        permission_mode = str(codex_agent.get("permission_mode") or "").strip().lower()
+        if permission_mode not in {"default", "full_access"}:
+            permission_mode = str(default_ide_settings()["codex_agent"]["permission_mode"])
+        codex_agent["permission_mode"] = permission_mode
+        codex_agent["session_id"] = str(codex_agent.get("session_id") or "").strip()
+        codex_agent["session_project_dir"] = str(codex_agent.get("session_project_dir") or "").strip()
+        data["codex_agent"] = codex_agent
 
         github = data.get("github")
         if not isinstance(github, dict):
