@@ -805,6 +805,9 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines: list[str] = []
         self._post_tokens_replay_index = 0
+        self._suppress_user_echo = False
+        self._user_echo_expected_lines: list[str] = []
+        self._user_echo_index = 0
         self._latest_assistant_bubble_text = ""
         self._transcript_entries: list[_TranscriptEntry] = []
         self._transcript_bubbles: list[ChatMarkdownBubble] = []
@@ -1342,6 +1345,10 @@ class CodexAgentDockWidget(QWidget):
     def _clear_selected_attachments(self) -> None:
         self._attached_source_files.clear()
         self._clear_attachment_stage_dir()
+        self._refresh_attachment_summary()
+
+    def _clear_selected_attachments_after_send(self) -> None:
+        self._attached_source_files.clear()
         self._refresh_attachment_summary()
 
     def _on_add_files_clicked(self) -> None:
@@ -1920,6 +1927,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
+        self._clear_user_echo_suppression()
         self._latest_assistant_bubble_text = ""
         self._reset_bubble_debug_log()
         self._clear_transcript()
@@ -2205,6 +2213,37 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_index = 0
         self._suppress_post_tokens_echo = bool(expected)
 
+    def _begin_user_echo_suppression(self, user_text: str) -> None:
+        expected = [line.strip() for line in str(user_text or "").splitlines() if line.strip()]
+        self._user_echo_expected_lines = expected
+        self._user_echo_index = 0
+        self._suppress_user_echo = bool(expected)
+
+    def _clear_user_echo_suppression(self) -> None:
+        self._suppress_user_echo = False
+        self._user_echo_expected_lines = []
+        self._user_echo_index = 0
+
+    def _consume_user_echo_line(self, line: str) -> bool:
+        if not self._suppress_user_echo:
+            return False
+        expected = self._user_echo_expected_lines
+        index = int(self._user_echo_index)
+        if index < 0 or index >= len(expected):
+            self._clear_user_echo_suppression()
+            return False
+        incoming = str(line or "").strip()
+        if not incoming:
+            return True
+        wanted = str(expected[index] or "").strip()
+        if incoming != wanted:
+            self._clear_user_echo_suppression()
+            return False
+        self._user_echo_index = index + 1
+        if self._user_echo_index >= len(expected):
+            self._clear_user_echo_suppression()
+        return True
+
     def _consume_post_tokens_replay_line(self, line: str) -> bool:
         if not self._suppress_post_tokens_echo:
             return False
@@ -2237,7 +2276,7 @@ class CodexAgentDockWidget(QWidget):
         timestamp: str | None = None,
         merge: bool = False,
     ) -> None:
-        if role == "meta":
+        if role in {"meta", "system"}:
             return
         line = str(text).rstrip("\n")
         last_entry = self._transcript_entries[-1] if self._transcript_entries else None
@@ -2466,6 +2505,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
+        self._clear_user_echo_suppression()
         self._latest_assistant_bubble_text = ""
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
@@ -2543,6 +2583,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
+        self._clear_user_echo_suppression()
         attachment_refs, attachment_failures = self._stage_attachments_for_turn(project)
         if attachment_failures:
             self._add_bubble(
@@ -2559,6 +2600,7 @@ class CodexAgentDockWidget(QWidget):
             return
 
         self._add_bubble("user", user_text, timestamp=_timestamp())
+        self._begin_user_echo_suppression(user_text)
         if attachment_refs:
             self._add_bubble(
                 "meta",
@@ -2576,6 +2618,7 @@ class CodexAgentDockWidget(QWidget):
         )
         self.input_edit.clear()
         self._runner.start(invocation)
+        self._clear_selected_attachments_after_send()
         self._schedule_persist_settings()
 
     @staticmethod
@@ -2645,19 +2688,24 @@ class CodexAgentDockWidget(QWidget):
             return
         if marker in {"user", "assistant", "system", "meta", "tools", "diff"}:
             if marker == "tools":
+                self._clear_user_echo_suppression()
                 self._stream_mode = "tools"
             elif marker == "diff":
+                self._clear_user_echo_suppression()
                 self._stream_mode = "diff"
             else:
                 self._stream_mode = "assistant"
             return
         if marker == "thinking":
+            self._clear_user_echo_suppression()
             self._stream_mode = "thinking"
             return
         if marker == "codex":
+            self._clear_user_echo_suppression()
             self._stream_mode = "assistant"
             return
         if marker == "exec":
+            self._clear_user_echo_suppression()
             self._stream_mode = "tools"
             return
         if stripped.startswith("tokens used"):
@@ -2677,6 +2725,11 @@ class CodexAgentDockWidget(QWidget):
             self._suppress_post_tokens_echo = False
             self._post_tokens_replay_expected_lines = []
             self._post_tokens_replay_index = 0
+        if role == "assistant":
+            if self._consume_user_echo_line(raw_line):
+                return
+        elif role != "meta":
+            self._clear_user_echo_suppression()
         self._add_bubble(role, raw_line, merge=True)
 
     def _append_raw(self, text: str) -> None:
@@ -2823,6 +2876,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
+        self._clear_user_echo_suppression()
         self._update_rate_limits_label()
         self._append_turn_changed_files_bubble()
         if int(code) == 0:
