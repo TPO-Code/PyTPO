@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 class _MarkdownBubbleBody(QTextEdit):
     linkActivated = Signal(str)
+    heightChanged = Signal()
 
     def __init__(self, parent: QFrame | None = None) -> None:
         super().__init__(parent)
@@ -59,7 +60,10 @@ class _MarkdownBubbleBody(QTextEdit):
             + frame
             + 2.0
         )
-        self.setFixedHeight(max(22, int(round(total))))
+        target = max(22, int(round(total)))
+        if target != int(self.height()):
+            self.setFixedHeight(target)
+            self.heightChanged.emit()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -67,6 +71,8 @@ class _MarkdownBubbleBody(QTextEdit):
 
 
 class ChatMarkdownBubble(QFrame):
+    sizeHintChanged = Signal()
+
     def __init__(
         self,
         role: str,
@@ -82,23 +88,27 @@ class ChatMarkdownBubble(QFrame):
         self._link_activated = link_activated
         self._collapsible = role == "tools"
         self._collapsed = self._collapsible
+        self._show_header = self._collapsible or bool(timestamp) or role != "assistant"
 
         self.setObjectName("codexBubble")
         self.setProperty("role", role)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 5, 8, 6)
+        layout.setSpacing(2)
 
         header_label = str(role_label or role.title())
         header_text = f"{header_label}  {timestamp}" if timestamp else header_label
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(6)
-        self.header = QLabel(header_text)
-        self.header.setObjectName("codexBubbleHeader")
-        self.header.setStyleSheet("background: transparent;")
-        header_row.addWidget(self.header, 1)
+        header_row: QHBoxLayout | None = None
+        self.header: QLabel | None = None
+        if self._show_header:
+            header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
+            header_row.setSpacing(4)
+            self.header = QLabel(header_text)
+            self.header.setObjectName("codexBubbleHeader")
+            self.header.setStyleSheet("background: transparent;")
+            header_row.addWidget(self.header, 1)
 
         self.toggle_btn: QPushButton | None = None
         if self._collapsible:
@@ -106,9 +116,12 @@ class ChatMarkdownBubble(QFrame):
             self.toggle_btn.setObjectName("codexBubbleToggle")
             self.toggle_btn.setCursor(Qt.PointingHandCursor)
             self.toggle_btn.setFlat(True)
+            self.toggle_btn.setFixedHeight(16)
             self.toggle_btn.clicked.connect(self._toggle_collapsed)
-            header_row.addWidget(self.toggle_btn, 0)
-        layout.addLayout(header_row)
+            if header_row is not None:
+                header_row.addWidget(self.toggle_btn, 0)
+        if header_row is not None:
+            layout.addLayout(header_row)
 
         self.preview = QLabel("")
         self.preview.setObjectName("codexBubblePreview")
@@ -119,6 +132,7 @@ class ChatMarkdownBubble(QFrame):
         layout.addWidget(self.preview)
 
         self.body = _MarkdownBubbleBody(self)
+        self.body.heightChanged.connect(self._notify_size_hint_changed)
         self.body.linkActivated.connect(self._on_link_activated)
         layout.addWidget(self.body)
 
@@ -127,14 +141,18 @@ class ChatMarkdownBubble(QFrame):
 
     def append_line(self, text: str) -> None:
         line = str(text or "")
+        if not self._text:
+            line = line.lstrip("\r\n")
         if self._text:
             self._text = f"{self._text}\n{line}"
         else:
             self._text = line
         if self._collapsed:
             self.preview.setText(self._collapsed_preview_text())
+            self._notify_size_hint_changed()
             return
         self.body.setHtml(self._render_html())
+        self._notify_size_hint_changed()
 
     def _toggle_collapsed(self) -> None:
         if not self._collapsible:
@@ -152,6 +170,7 @@ class ChatMarkdownBubble(QFrame):
             self.body.setHtml(self._render_html())
         if self.toggle_btn is not None:
             self.toggle_btn.setText("Expand" if collapsed else "Collapse")
+        self._notify_size_hint_changed()
 
     def _collapsed_preview_text(self) -> str:
         for raw in str(self._text or "").splitlines():
@@ -224,3 +243,7 @@ class ChatMarkdownBubble(QFrame):
         handler = self._link_activated
         if callable(handler):
             handler(str(href or ""))
+
+    def _notify_size_hint_changed(self) -> None:
+        self.updateGeometry()
+        self.sizeHintChanged.emit()

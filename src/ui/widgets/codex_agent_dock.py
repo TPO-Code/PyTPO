@@ -883,9 +883,9 @@ class CodexAgentDockWidget(QWidget):
             QFrame#codexBubble[role="tools"] { border-color: #2e5c47; background: #1d2a24; }
             QFrame#codexBubble[role="diff"] { border-color: #2c6a4f; background: #111a14; }
             QFrame#codexBubble[role="system"], QFrame#codexBubble[role="meta"] { border-color: #3f4b5f; background: #232b38; }
-            QLabel#codexBubbleHeader { color: #96a3b8; font-size: 11px; font-weight: 600; background: transparent; }
-            QLabel#codexBubblePreview { color: #c8d2e2; font-size: 12px; background: transparent; }
-            QPushButton#codexBubbleToggle { color: #9db1cb; background: transparent; border: 1px solid #3a4658; border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+            QLabel#codexBubbleHeader { color: #8d9cb4; font-size: 10px; font-weight: 500; background: transparent; }
+            QLabel#codexBubblePreview { color: #c8d2e2; font-size: 12px; background: transparent; margin-top: 1px; }
+            QPushButton#codexBubbleToggle { color: #9db1cb; background: transparent; border: 1px solid #3a4658; border-radius: 4px; padding: 0px 5px; font-size: 10px; min-height: 16px; max-height: 16px; }
             QPushButton#codexBubbleToggle:hover { border-color: #5b6f89; color: #d2ddec; }
             QTextEdit#codexBubbleBody { color: #e6edf3; font-size: 13px; background: transparent; border: none; }
             """
@@ -2005,6 +2005,10 @@ class CodexAgentDockWidget(QWidget):
             item.setSizeHint(bubble.sizeHint())
             self.transcript.addItem(item)
             self.transcript.setItemWidget(item, bubble)
+            bubble.sizeHintChanged.connect(
+                lambda _=None, it=item, b=bubble: self._refresh_bubble_item_size_hint(it, b)
+            )
+            QTimer.singleShot(0, lambda it=item, b=bubble: self._refresh_bubble_item_size_hint(it, b))
             self._last_bubble = bubble
             self._last_item = item
             if role == "assistant":
@@ -2015,6 +2019,14 @@ class CodexAgentDockWidget(QWidget):
                 event="bubble",
             )
         self.transcript.scrollToBottom()
+
+    def _refresh_bubble_item_size_hint(self, item: QListWidgetItem, bubble: ChatMarkdownBubble) -> None:
+        if item is None or bubble is None:
+            return
+        try:
+            item.setSizeHint(bubble.sizeHint())
+        except Exception:
+            return
 
     def _on_bubble_link_activated(self, href: str) -> None:
         target = str(href or "").strip()
@@ -2337,6 +2349,7 @@ class CodexAgentDockWidget(QWidget):
     def _handle_stream_line(self, line: str) -> None:
         raw_line = str(line or "")
         stripped = raw_line.strip()
+        marker = stripped[:-1].strip() if stripped.endswith(":") else stripped
         self._capture_changed_files_from_line(raw_line)
 
         if self._stream_mode == "diff":
@@ -2358,21 +2371,21 @@ class CodexAgentDockWidget(QWidget):
             self._stream_mode = "diff"
             self._add_bubble("diff", raw_line, merge=True)
             return
-        if stripped in {"user", "assistant", "system", "meta", "tools", "diff"}:
-            if stripped == "tools":
+        if marker in {"user", "assistant", "system", "meta", "tools", "diff"}:
+            if marker == "tools":
                 self._stream_mode = "tools"
-            elif stripped == "diff":
+            elif marker == "diff":
                 self._stream_mode = "diff"
             else:
                 self._stream_mode = "assistant"
             return
-        if stripped == "thinking":
+        if marker == "thinking":
             self._stream_mode = "thinking"
             return
-        if stripped == "codex":
+        if marker == "codex":
             self._stream_mode = "assistant"
             return
-        if stripped == "exec":
+        if marker == "exec":
             self._stream_mode = "tools"
             return
         if stripped.startswith("tokens used"):
