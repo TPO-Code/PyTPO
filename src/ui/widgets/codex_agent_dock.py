@@ -84,7 +84,14 @@ _MENTION_SKIP_DIRS: set[str] = {
 _MENTION_MAX_FILES = 5000
 _MENTION_CACHE_TTL_SECONDS = 8.0
 _BUBBLE_DEBUG_LOG_BASENAME = "codex-agent-bubble-debug.log"
+_RATE_LIMITS_DEBUG_LOG_BASENAME = "codex-agent-rate-limits-debug.log"
 _APP_ROOT = Path(__file__).resolve().parents[3]
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_STREAM_RATE_LIMITS_RE = re.compile(
+    r"5h:\s*(\d{1,3})%\s*remaining.*?(?:weekly|week):\s*(\d{1,3})%\s*remaining",
+    re.IGNORECASE,
+)
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
 _ROLE_LABELS = {
     "user": "You",
     "assistant": "Assistant",
@@ -98,6 +105,17 @@ _ROLE_LABELS = {
 
 def _timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", str(text or ""))
+
+
+def _normalize_newlines(text: str) -> str:
+    source = str(text or "")
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
+    source = source.replace("\u2028", "\n").replace("\u2029", "\n")
+    return source
 
 
 @dataclass(slots=True)
@@ -928,6 +946,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_user_echo = False
         self._user_echo_expected_lines: list[str] = []
         self._user_echo_index = 0
+        self._user_echo_source_text = ""
         self._latest_assistant_bubble_text = ""
         self._transcript_entries: list[_TranscriptEntry] = []
         self._transcript_bubbles: list[ChatMarkdownBubble] = []
@@ -944,7 +963,9 @@ class CodexAgentDockWidget(QWidget):
         self._updating_options = False
         self._sessions_refresh_token = 0
         self._rate_limits_refresh_token = 0
+        self._transcript_scroll_pending = False
         self._background_threads: set[QThread] = set()
+        self._background_workers: dict[str, _BackgroundTaskWorker] = {}
         self._background_callbacks: dict[str, Callable[[object], None]] = {}
 
         self._save_timer = QTimer(self)
@@ -961,6 +982,7 @@ class CodexAgentDockWidget(QWidget):
     def shutdown(self) -> None:
         self._save_timer.stop()
         self._runner.stop()
+        self._background_workers.clear()
         self._background_callbacks.clear()
         for thread in list(self._background_threads):
             if thread.isRunning():
@@ -1201,9 +1223,17 @@ class CodexAgentDockWidget(QWidget):
         if not scroll_to_bottom:
             return
         if immediate:
+            self._transcript_scroll_pending = False
             self._scroll_transcript_to_bottom()
             return
-        QTimer.singleShot(0, self._scroll_transcript_to_bottom)
+        if self._transcript_scroll_pending:
+            return
+        self._transcript_scroll_pending = True
+        QTimer.singleShot(16, self._flush_scheduled_transcript_render)
+
+    def _flush_scheduled_transcript_render(self) -> None:
+        self._transcript_scroll_pending = False
+        self._scroll_transcript_to_bottom()
 
     def _scroll_transcript_to_bottom(self) -> None:
         bar = self.transcript_scroll.verticalScrollBar()
@@ -1856,6 +1886,7 @@ class CodexAgentDockWidget(QWidget):
         self._background_callbacks[task_id] = on_done
         thread = QThread(self)
         worker = _BackgroundTaskWorker(task_id, task)
+        self._background_workers[task_id] = worker
         worker.moveToThread(thread)
         worker.finished.connect(self._on_background_task_finished)
         worker.finished.connect(lambda _id, _result: thread.quit())
@@ -1867,6 +1898,7 @@ class CodexAgentDockWidget(QWidget):
         thread.start()
 
     def _on_background_task_finished(self, task_id: str, result: object) -> None:
+        self._background_workers.pop(str(task_id or ""), None)
         callback = self._background_callbacks.pop(str(task_id or ""), None)
         if callable(callback):
             callback(result)
@@ -2373,15 +2405,40 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = bool(expected)
 
     def _begin_user_echo_suppression(self, user_text: str) -> None:
-        expected = [line.strip() for line in str(user_text or "").splitlines() if line.strip()]
+        source = str(user_text or "")
+        expected = [line.strip() for line in source.splitlines() if line.strip()]
         self._user_echo_expected_lines = expected
         self._user_echo_index = 0
+        self._user_echo_source_text = source
         self._suppress_user_echo = bool(expected)
 
     def _clear_user_echo_suppression(self) -> None:
         self._suppress_user_echo = False
         self._user_echo_expected_lines = []
         self._user_echo_index = 0
+        self._user_echo_source_text = ""
+
+    @staticmethod
+    def _paraphrase_overlap_score(source: str, candidate: str) -> float:
+        source_tokens = set(_WORD_TOKEN_RE.findall(str(source or "").casefold()))
+        candidate_tokens = set(_WORD_TOKEN_RE.findall(str(candidate or "").casefold()))
+        if not source_tokens or not candidate_tokens:
+            return 0.0
+        intersection = len(source_tokens.intersection(candidate_tokens))
+        return intersection / float(max(1, len(candidate_tokens)))
+
+    def _capture_rate_limits_from_stream_line(self, text: str) -> None:
+        stripped = _strip_ansi(str(text or "")).strip()
+        if not stripped:
+            return
+        match = _STREAM_RATE_LIMITS_RE.search(stripped)
+        if match is None:
+            return
+        five_hour = max(0, min(100, int(match.group(1))))
+        weekly = max(0, min(100, int(match.group(2))))
+        label = f"5h: {five_hour}% remaining | Weekly: {weekly}% remaining"
+        self.rate_limits_label.setText(label)
+        self.rate_limits_label.setToolTip("Live rate limits from Codex output")
 
     def _consume_user_echo_line(self, line: str) -> bool:
         if not self._suppress_user_echo:
@@ -2396,6 +2453,11 @@ class CodexAgentDockWidget(QWidget):
             return True
         wanted = str(expected[index] or "").strip()
         if incoming != wanted:
+            if index == 0:
+                overlap = self._paraphrase_overlap_score(self._user_echo_source_text, incoming)
+                if overlap >= 0.6 and len(incoming) <= 220:
+                    self._clear_user_echo_suppression()
+                    return True
             self._clear_user_echo_suppression()
             return False
         self._user_echo_index = index + 1
@@ -2630,12 +2692,25 @@ class CodexAgentDockWidget(QWidget):
     def _bubble_debug_log_path(self) -> Path:
         return _APP_ROOT / ".tide" / _BUBBLE_DEBUG_LOG_BASENAME
 
+    def _rate_limits_debug_log_path(self) -> Path:
+        return _APP_ROOT / ".tide" / _RATE_LIMITS_DEBUG_LOG_BASENAME
+
     def _reset_bubble_debug_log(self) -> None:
         log_path = self._bubble_debug_log_path()
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("w", encoding="utf-8") as handle:
                 handle.write("")
+        except Exception:
+            pass
+
+    def _append_rate_limits_debug_log(self, message: str) -> None:
+        log_path = self._rate_limits_debug_log_path()
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{stamp}] {str(message or '').strip()}\n")
         except Exception:
             pass
 
@@ -2682,7 +2757,7 @@ class CodexAgentDockWidget(QWidget):
             self.statusMessage.emit("Codex is busy. Wait for the current turn to finish before sending.")
             return
         self.input_edit.close_mention_popup()
-        user_text = str(self.input_edit.to_codex_text() or "").strip()
+        user_text = _normalize_newlines(str(self.input_edit.to_codex_text() or "")).strip()
         if not user_text:
             return
         project = self._project_dir()
@@ -2840,6 +2915,7 @@ class CodexAgentDockWidget(QWidget):
     def _handle_stream_line(self, line: str) -> None:
         raw_line = str(line or "")
         stripped = raw_line.strip()
+        self._capture_rate_limits_from_stream_line(stripped)
         marker = stripped[:-1].strip() if stripped.endswith(":") else stripped
         self._capture_changed_files_from_line(raw_line)
 
@@ -2909,7 +2985,8 @@ class CodexAgentDockWidget(QWidget):
         self._add_bubble(role, raw_line, merge=True)
 
     def _append_raw(self, text: str) -> None:
-        match = _SESSION_ID_RE.search(str(text or ""))
+        clean_text = _strip_ansi(str(text or ""))
+        match = _SESSION_ID_RE.search(clean_text)
         if match is not None:
             session_id = str(match.group(1) or "").strip()
             if session_id and session_id != self._session_id:
@@ -2958,25 +3035,33 @@ class CodexAgentDockWidget(QWidget):
     def _rate_limit_display_for_session(self, session_id: str) -> tuple[str, str]:
         normalized_id = str(session_id or "").strip()
         if not normalized_id:
+            self._append_rate_limits_debug_log("task: empty session_id")
             return _RATE_LIMITS_UNAVAILABLE, "Rate limit data unavailable"
 
         sessions_dir = Path.home() / ".codex" / "sessions"
         if not sessions_dir.is_dir():
+            self._append_rate_limits_debug_log("task: sessions_dir not found")
             return _RATE_LIMITS_UNAVAILABLE, "Codex sessions directory not found"
 
         candidates = list(sessions_dir.rglob(f"*{normalized_id}.jsonl"))
         if not candidates:
+            self._append_rate_limits_debug_log(f"task: no candidates for {normalized_id}")
             return _RATE_LIMITS_UNAVAILABLE, "No rate limit data found for current session yet"
 
         try:
             log_path = max(candidates, key=lambda path: path.stat().st_mtime)
         except Exception:
             log_path = candidates[-1]
+        self._append_rate_limits_debug_log(
+            f"task: reading {log_path} (candidates={len(candidates)}) for {normalized_id}"
+        )
 
         rate_limits: dict[str, Any] | None = None
+        scanned_lines = 0
         try:
             with log_path.open("r", encoding="utf-8") as handle:
                 for raw_line in handle:
+                    scanned_lines += 1
                     line = str(raw_line or "").strip()
                     if not line:
                         continue
@@ -2994,8 +3079,14 @@ class CodexAgentDockWidget(QWidget):
                         rate_limits = candidate
         except Exception:
             rate_limits = None
+            self._append_rate_limits_debug_log(
+                f"task: read exception while scanning {log_path} (lines={scanned_lines})"
+            )
 
         if not isinstance(rate_limits, dict):
+            self._append_rate_limits_debug_log(
+                f"task: no rate_limits found after scan (lines={scanned_lines}) for {normalized_id}"
+            )
             return _RATE_LIMITS_UNAVAILABLE, "No rate limit data found for current session yet"
 
         def _remaining(bucket: Any) -> str:
@@ -3014,6 +3105,9 @@ class CodexAgentDockWidget(QWidget):
         primary_reset = self._format_reset_time(primary.get("resets_at") if isinstance(primary, dict) else None)
         secondary_reset = self._format_reset_time(secondary.get("resets_at") if isinstance(secondary, dict) else None)
         tooltip = f"5h reset: {primary_reset}\nWeekly reset: {secondary_reset}"
+        self._append_rate_limits_debug_log(
+            f"task: parsed display='{display}' (lines={scanned_lines})"
+        )
         return display, tooltip
 
     def _update_rate_limits_label(self) -> None:
@@ -3021,17 +3115,26 @@ class CodexAgentDockWidget(QWidget):
         if not session_id:
             self.rate_limits_label.setText(_RATE_LIMITS_UNAVAILABLE)
             self.rate_limits_label.setToolTip("Rate limit data unavailable")
+            self._append_rate_limits_debug_log("update: no active session id, set unavailable")
             return
         self._rate_limits_refresh_token += 1
         token = int(self._rate_limits_refresh_token)
         self.rate_limits_label.setText("5h: ... | Weekly: ...")
         self.rate_limits_label.setToolTip("Refreshing rate limit data...")
+        started_at = time.monotonic()
+        self._append_rate_limits_debug_log(
+            f"update: start token={token} session_id={session_id}"
+        )
 
         def _task() -> object:
             return self._rate_limit_display_for_session(session_id)
 
         def _done(result: object) -> None:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000.0)
             if token != self._rate_limits_refresh_token:
+                self._append_rate_limits_debug_log(
+                    f"update: discard stale token={token} current={self._rate_limits_refresh_token} elapsed_ms={elapsed_ms}"
+                )
                 return
             if isinstance(result, tuple) and len(result) == 2:
                 text = str(result[0] or _RATE_LIMITS_UNAVAILABLE)
@@ -3041,6 +3144,9 @@ class CodexAgentDockWidget(QWidget):
                 tooltip = "Rate limit data unavailable"
             self.rate_limits_label.setText(text)
             self.rate_limits_label.setToolTip(tooltip)
+            self._append_rate_limits_debug_log(
+                f"update: applied token={token} elapsed_ms={elapsed_ms} text='{text}'"
+            )
 
         self._run_background_task(task=_task, on_done=_done)
 
