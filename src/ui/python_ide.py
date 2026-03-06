@@ -76,6 +76,7 @@ from src.ui.editor_workspace import EditorTabs, EditorWidget, EditorWorkspace
 from src.ui.lint_manager import LintManager
 from src.ui.spellcheck_manager import SpellcheckManager
 from src.ui.widgets.code_editor import CodeEditor
+from src.ui.widgets.codex_agent_dock import CodexAgentDockWidget
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.image_viewer import ImageViewerWidget
 from src.ui.widgets.markdown_editor_tab import MarkdownEditorTab
@@ -412,6 +413,8 @@ class PythonIDE(Window):
         self.commit_md_editor: EditorWidget | None = None
         self.commit_md_widget: MarkdownEditorTab | None = None
         self.dock_commit_md: QDockWidget | None = None
+        self.codex_agent_widget: CodexAgentDockWidget | None = None
+        self.dock_codex_agent: QDockWidget | None = None
 
         self.lint_manager = LintManager(
             project_root=self.project_root,
@@ -664,6 +667,7 @@ class PythonIDE(Window):
         self._apply_editor_change_highlight_config()
         self.setup_bottom_panels()
         self.setup_commit_md_dock()
+        self.setup_codex_agent_dock()
         self._setup_status_bar_widgets()
         self._bind_status_bar_debug_mirror()
         self.setup_menus()
@@ -754,6 +758,7 @@ class PythonIDE(Window):
             (self.dock_usages, Qt.BottomDockWidgetArea),
             (self.dock_outline, Qt.RightDockWidgetArea),
             (self.dock_commit_md, Qt.RightDockWidgetArea),
+            (self.dock_codex_agent, Qt.RightDockWidgetArea),
         ):
             if dock is None:
                 continue
@@ -1231,6 +1236,62 @@ class PythonIDE(Window):
             self.tabifyDockWidget(self.dock_outline, self.dock_commit_md)
         self.dock_commit_md.show()
         self._load_commit_md_into_dock()
+
+    def _codex_agent_settings(self) -> dict:
+        raw = self.settings_manager.get("codex_agent", scope_preference="ide", default={})
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _save_codex_agent_settings(self, value: dict) -> None:
+        payload = dict(value) if isinstance(value, dict) else {}
+        current = self._codex_agent_settings()
+        current.update(payload)
+        self.settings_manager.set("codex_agent", current, "ide")
+        try:
+            self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+        except Exception:
+            pass
+
+    def setup_codex_agent_dock(self) -> None:
+        features = (
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        self.dock_codex_agent = QDockWidget("Codex Agent", self)
+        self.dock_codex_agent.setObjectName("dock_codex_agent")
+        self.dock_codex_agent.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.dock_codex_agent.setFeatures(features)
+
+        widget = CodexAgentDockWidget(
+            project_dir_provider=lambda: str(self.project_root or ""),
+            settings_provider=self._codex_agent_settings,
+            settings_saver=self._save_codex_agent_settings,
+            file_opener=self._open_codex_agent_file,
+            parent=self.dock_codex_agent,
+        )
+        widget.statusMessage.connect(lambda msg: self.statusBar().showMessage(str(msg or ""), 2400))
+        self.codex_agent_widget = widget
+        self.dock_codex_agent.setWidget(widget)
+
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_codex_agent)
+        if isinstance(self.dock_commit_md, QDockWidget):
+            self.tabifyDockWidget(self.dock_commit_md, self.dock_codex_agent)
+        elif isinstance(self.dock_outline, QDockWidget):
+            self.tabifyDockWidget(self.dock_outline, self.dock_codex_agent)
+        self.dock_codex_agent.show()
+
+    def _open_codex_agent_file(self, path: str) -> None:
+        target = str(path or "").strip()
+        if not target:
+            return
+        self.open_file(target)
+
+    def show_codex_agent_dock(self) -> None:
+        dock = self.dock_codex_agent
+        if not isinstance(dock, QDockWidget):
+            return
+        dock.show()
+        dock.raise_()
 
     def _commit_md_file_path(self) -> str:
         return str(commit_md_path_for_project(self.project_root))
@@ -1973,6 +2034,7 @@ class PythonIDE(Window):
             self.dock_usages,
             self.dock_outline,
             self.dock_commit_md,
+            self.dock_codex_agent,
         ]
         return [dock for dock in docks if isinstance(dock, QDockWidget)]
 
@@ -6401,6 +6463,12 @@ class PythonIDE(Window):
         self._apply_editor_change_highlight_config()
         self._configure_git_poll_timer()
         self.schedule_git_status_refresh(delay_ms=80)
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            try:
+                codex_widget.reload_settings()
+            except Exception:
+                pass
 
         for ed in self.editor_workspace.all_editors():
             self._track_widget_change_highlights(ed)
@@ -6537,6 +6605,8 @@ class PythonIDE(Window):
             self.resizeDocks([self.dock_outline], [280], Qt.Horizontal)
         if self._is_resizable_docked(self.dock_commit_md):
             self.resizeDocks([self.dock_commit_md], [320], Qt.Horizontal)
+        if self._is_resizable_docked(self.dock_codex_agent):
+            self.resizeDocks([self.dock_codex_agent], [420], Qt.Horizontal)
 
         bottom = [
             d
@@ -6549,6 +6619,12 @@ class PythonIDE(Window):
     # ---------- Close ----------
 
     def closeEvent(self, event: QCloseEvent):
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            try:
+                codex_widget.shutdown()
+            except Exception:
+                pass
         if hasattr(self, "workspace_controller"):
             self.workspace_controller.stop()
         if hasattr(self, "spellcheck_manager"):

@@ -392,6 +392,7 @@ class SettingsDialog(DialogWindow):
             "ide-run": 120,
             "ide-linting": 130,
             "ide-ai-assist": 131,
+            "ide-code-agents": 132,
             "ide-git": 140,
             "ide-github": 141,
         }
@@ -2887,6 +2888,32 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                             )
                         ],
                     )
+                ],
+            ),
+            SchemaPage(
+                id="ide-code-agents",
+                category="Code Intelligence",
+                title="Code Agents",
+                scope="ide",
+                description="Configure command settings for docked external coding agents.",
+                keywords=["codex", "agent", "command", "dock", "cli"],
+                sections=[
+                    SchemaSection(
+                        title="Codex CLI",
+                        fields=[
+                            SchemaField(
+                                id="ide-code-agents-command-template",
+                                key="codex_agent.command_template",
+                                label="Codex Command Template",
+                                type="lineedit",
+                                scope="ide",
+                                description=(
+                                    "Command used by the Codex Agent dock. "
+                                    "Supports {project}. Default: codex exec --skip-git-repo-check --sandbox workspace-write -"
+                                ),
+                            ),
+                        ],
+                    ),
                 ],
             ),
             SchemaPage(

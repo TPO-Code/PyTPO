@@ -11,6 +11,7 @@ Open settings from `File -> Settings...`, then use the `IDE` section.
 - global run defaults
 - lint defaults
 - AI Assist configuration
+- Code Agents configuration
 - Git/GitHub integration preferences
 
 ## High-impact pages
@@ -19,6 +20,7 @@ Open settings from `File -> Settings...`, then use the `IDE` section.
 - `IDE -> Run`
 - `IDE -> Linting`
 - `IDE -> AI Assist`
+- `IDE -> Code Agents`
 - `IDE -> Appearance`
 
 Recommended screenshot: `docs/assets/screenshots/03-settings-dialog-overview.png`

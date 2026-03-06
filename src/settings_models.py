@@ -9,6 +9,7 @@ from src.ai.settings_schema import AIAssistSettings, default_ai_settings
 from src.core.keybindings import default_keybindings
 
 SettingsScope = Literal["project", "ide"]
+DEFAULT_CODEX_AGENT_COMMAND = "codex exec --skip-git-repo-check --sandbox workspace-write -"
 
 
 class InterpreterOverride(TypedDict, total=False):
@@ -287,6 +288,16 @@ class IdeFileDialogSettings(TypedDict, total=False):
     starred_paths: list[str]
 
 
+class IdeCodexAgentSettings(TypedDict, total=False):
+    command_template: str
+    system_preamble: str
+    model: str
+    model_reasoning_effort: str
+    permission_mode: str
+    session_id: str
+    session_project_dir: str
+
+
 class IdeSettings(TypedDict, total=False):
     theme: str
     font_size: int
@@ -300,6 +311,7 @@ class IdeSettings(TypedDict, total=False):
     lint: LintSettings
     completion: IdeCompletionSettings
     ai_assist: AIAssistSettings
+    codex_agent: IdeCodexAgentSettings
     github: IdeGitHubSettings
     git: IdeGitSettings
     editor: IdeEditorSettings
@@ -512,6 +524,15 @@ def default_ide_settings() -> IdeSettings:
             "doc_tooltip_delay_ms": 180,
         },
         "ai_assist": default_ai_settings(),
+        "codex_agent": {
+            "command_template": DEFAULT_CODEX_AGENT_COMMAND,
+            "system_preamble": "",
+            "model": "",
+            "model_reasoning_effort": "medium",
+            "permission_mode": "default",
+            "session_id": "",
+            "session_project_dir": "",
+        },
         "github": {
             "username": "",
             "use_token_for_git": True,
