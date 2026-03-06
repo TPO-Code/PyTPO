@@ -26,6 +26,9 @@ class _MarkdownBubbleBody(QTextEdit):
         self.setObjectName("codexBubbleBody")
         self.setReadOnly(True)
         self.setFrameShape(QFrame.NoFrame)
+        self.setFrameStyle(QFrame.NoFrame)
+        self.setLineWidth(0)
+        self.setMidLineWidth(0)
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -37,6 +40,12 @@ class _MarkdownBubbleBody(QTextEdit):
         )
         self.document().setDocumentMargin(0.0)
         self.document().contentsChanged.connect(self._sync_height)
+        self._max_content_height: int | None = None
+
+    def set_scroll_limit(self, max_height: int | None) -> None:
+        limit = int(max_height) if max_height is not None else None
+        self._max_content_height = limit if limit is None or limit > 0 else None
+        self._sync_height()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.LeftButton:
@@ -61,6 +70,8 @@ class _MarkdownBubbleBody(QTextEdit):
             + 2.0
         )
         target = max(22, int(round(total)))
+        if self._max_content_height is not None:
+            target = min(target, int(self._max_content_height))
         if target != int(self.height()):
             self.setFixedHeight(target)
             self.heightChanged.emit()
@@ -72,6 +83,8 @@ class _MarkdownBubbleBody(QTextEdit):
 
 class ChatMarkdownBubble(QFrame):
     sizeHintChanged = Signal()
+    _DIFF_SCROLL_THRESHOLD_LINES = 20
+    _DIFF_MAX_BODY_HEIGHT = 280
 
     def __init__(
         self,
@@ -103,7 +116,7 @@ class ChatMarkdownBubble(QFrame):
         self.header: QLabel | None = None
         if self._show_header:
             header_row = QHBoxLayout()
-            header_row.setContentsMargins(0, 0, 0, 0)
+            header_row.setContentsMargins(0, 0, 2, 0)
             header_row.setSpacing(4)
             self.header = QLabel(header_text)
             self.header.setObjectName("codexBubbleHeader")
@@ -116,7 +129,9 @@ class ChatMarkdownBubble(QFrame):
             self.toggle_btn.setObjectName("codexBubbleToggle")
             self.toggle_btn.setCursor(Qt.PointingHandCursor)
             self.toggle_btn.setFlat(True)
-            self.toggle_btn.setFixedHeight(16)
+            self.toggle_btn.setMinimumHeight(20)
+            self.toggle_btn.setMinimumWidth(68)
+            self.toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.toggle_btn.clicked.connect(self._toggle_collapsed)
             if header_row is not None:
                 header_row.addWidget(self.toggle_btn, 0)
@@ -151,6 +166,7 @@ class ChatMarkdownBubble(QFrame):
             self.preview.setText(self._collapsed_preview_text())
             self._notify_size_hint_changed()
             return
+        self._apply_body_scroll_behavior()
         self.body.setHtml(self._render_html())
         self._notify_size_hint_changed()
 
@@ -167,10 +183,26 @@ class ChatMarkdownBubble(QFrame):
         if collapsed:
             self.preview.setText(self._collapsed_preview_text())
         else:
+            self._apply_body_scroll_behavior()
             self.body.setHtml(self._render_html())
         if self.toggle_btn is not None:
             self.toggle_btn.setText("Expand" if collapsed else "Collapse")
         self._notify_size_hint_changed()
+
+    def _apply_body_scroll_behavior(self) -> None:
+        if self.role == "diff" and self._text_line_count(self._text) > self._DIFF_SCROLL_THRESHOLD_LINES:
+            self.body.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.body.set_scroll_limit(self._DIFF_MAX_BODY_HEIGHT)
+            return
+        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.body.set_scroll_limit(None)
+
+    @staticmethod
+    def _text_line_count(text: str) -> int:
+        source = str(text or "")
+        if not source:
+            return 0
+        return len(source.splitlines())
 
     def _collapsed_preview_text(self) -> str:
         for raw in str(self._text or "").splitlines():
