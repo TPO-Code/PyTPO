@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -24,7 +23,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -38,6 +36,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
 
@@ -754,113 +753,6 @@ class _ChatInputEdit(SpellcheckTextEdit):
         return "\n".join(lines)
 
 
-class _BubbleWidget(QFrame):
-    def __init__(
-        self,
-        role: str,
-        text: str,
-        timestamp: str | None = None,
-        link_activated: Callable[[str], None] | None = None,
-    ) -> None:
-        super().__init__()
-        self.role = role
-        self.timestamp = timestamp
-        self._link_activated = link_activated
-        self._text = ""
-
-        self.setObjectName("codexBubble")
-        self.setProperty("role", role)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
-
-        header_label = _ROLE_LABELS.get(role, role.title())
-        header_text = f"{header_label}  {timestamp}" if timestamp else header_label
-        self.header = QLabel(header_text)
-        self.header.setObjectName("codexBubbleHeader")
-        self.header.setStyleSheet("background: transparent;")
-        layout.addWidget(self.header)
-
-        self.body = QLabel("")
-        self.body.setObjectName("codexBubbleBody")
-        self.body.setStyleSheet("background: transparent;")
-        self.body.setWordWrap(True)
-        self.body.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-        self.body.setTextFormat(Qt.RichText)
-        self.body.setOpenExternalLinks(False)
-        self.body.linkActivated.connect(self._on_link_activated)
-        layout.addWidget(self.body)
-
-        self.append_line(text)
-
-    def append_line(self, text: str) -> None:
-        if self._text:
-            self._text = f"{self._text}\n{text}"
-        else:
-            self._text = text
-        self.body.setText(self._render_html())
-
-    def _render_html(self) -> str:
-        if self.role == "diff":
-            return self._render_diff_html(self._text)
-        return self._render_text_with_links(self._text)
-
-    @staticmethod
-    def _render_text_with_links(text: str) -> str:
-        source = str(text or "")
-        parts: list[str] = []
-        cursor = 0
-        for match in _MARKDOWN_LINK_RE.finditer(source):
-            start, end = match.span()
-            if start > cursor:
-                parts.append(html.escape(source[cursor:start]))
-            label = html.escape(str(match.group(1) or "link"))
-            raw_target = str(match.group(2) or "").strip()
-            if raw_target.startswith("/"):
-                href = QUrl.fromLocalFile(raw_target).toString()
-            else:
-                href = raw_target
-            parts.append(
-                f'<a href="{html.escape(href, quote=True)}">{label}</a>'
-            )
-            cursor = end
-        if cursor < len(source):
-            parts.append(html.escape(source[cursor:]))
-        content = "".join(parts).replace("\n", "<br>")
-        return f'<div style="white-space: pre-wrap;">{content}</div>'
-
-    @staticmethod
-    def _render_diff_html(text: str) -> str:
-        lines = str(text or "").splitlines()
-        rendered: list[str] = []
-        for raw in lines:
-            escaped = html.escape(raw)
-            style = "color: #e6edf3;"
-            if raw.startswith("+") and not raw.startswith("+++"):
-                style = "color: #b5cea8; background-color: #17361f;"
-            elif raw.startswith("-") and not raw.startswith("---"):
-                style = "color: #f2a7a7; background-color: #3c1820;"
-            elif raw.startswith("@@"):
-                style = "color: #d7ba7d;"
-            elif raw.startswith("diff --git") or raw.startswith("index "):
-                style = "color: #8ab4f8;"
-            elif raw.startswith("--- ") or raw.startswith("+++ "):
-                style = "color: #9cdcfe;"
-            rendered.append(f'<span style="{style}">{escaped}</span>')
-        body = "<br>".join(rendered)
-        return (
-            '<div style="white-space: pre; font-family: '
-            '\'Cascadia Code\', \'Fira Code\', \'Consolas\', monospace;">'
-            f"{body}</div>"
-        )
-
-    def _on_link_activated(self, href: str) -> None:
-        handler = self._link_activated
-        if callable(handler):
-            handler(str(href or ""))
-
-
 class CodexAgentDockWidget(QWidget):
     statusMessage = Signal(str)
 
@@ -890,9 +782,8 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines: list[str] = []
         self._post_tokens_replay_index = 0
         self._latest_assistant_bubble_text = ""
-        self._last_bubble: _BubbleWidget | None = None
+        self._last_bubble: ChatMarkdownBubble | None = None
         self._last_item: QListWidgetItem | None = None
-        self._bubble_debug_entries: list[tuple[str, str]] = []
         self._turn_changed_files: list[str] = []
         self._turn_changed_file_set: set[str] = set()
         self._attached_source_files: list[str] = []
@@ -993,8 +884,10 @@ class CodexAgentDockWidget(QWidget):
             QFrame#codexBubble[role="diff"] { border-color: #2c6a4f; background: #111a14; }
             QFrame#codexBubble[role="system"], QFrame#codexBubble[role="meta"] { border-color: #3f4b5f; background: #232b38; }
             QLabel#codexBubbleHeader { color: #96a3b8; font-size: 11px; font-weight: 600; background: transparent; }
-            QLabel#codexBubbleBody { color: #e6edf3; font-size: 13px; background: transparent; }
-            QLabel#codexBubbleBody a { color: #8ab4f8; text-decoration: none; }
+            QLabel#codexBubblePreview { color: #c8d2e2; font-size: 12px; background: transparent; }
+            QPushButton#codexBubbleToggle { color: #9db1cb; background: transparent; border: 1px solid #3a4658; border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+            QPushButton#codexBubbleToggle:hover { border-color: #5b6f89; color: #d2ddec; }
+            QTextEdit#codexBubbleBody { color: #e6edf3; font-size: 13px; background: transparent; border: none; }
             """
         )
         self.chat_splitter.addWidget(self.transcript)
@@ -1764,8 +1657,7 @@ class CodexAgentDockWidget(QWidget):
         self._latest_assistant_bubble_text = ""
         self._last_bubble = None
         self._last_item = None
-        self._bubble_debug_entries.clear()
-        self._write_bubble_debug_log()
+        self._reset_bubble_debug_log()
         self.transcript.clear()
         for role, text, stamp in bubbles:
             self._add_bubble(role, text, timestamp=stamp or _timestamp())
@@ -2095,18 +1987,18 @@ class CodexAgentDockWidget(QWidget):
             self._last_item.setSizeHint(self._last_bubble.sizeHint())
             if role == "assistant":
                 self._latest_assistant_bubble_text = str(self._last_bubble._text or "")
-            if self._bubble_debug_entries:
-                self._bubble_debug_entries[-1] = (
-                    str(self._last_bubble.role),
-                    str(self._last_bubble._text or line),
-                )
-                self._write_bubble_debug_log()
+            self._append_bubble_debug_log(
+                role=str(self._last_bubble.role),
+                text=line,
+                event="append",
+            )
         else:
-            bubble = _BubbleWidget(
+            bubble = ChatMarkdownBubble(
                 role=role,
                 text=line,
                 timestamp=timestamp,
                 link_activated=self._on_bubble_link_activated,
+                role_label=_ROLE_LABELS.get(role, role.title()),
             )
             item = QListWidgetItem()
             item.setFlags(Qt.NoItemFlags)
@@ -2117,10 +2009,11 @@ class CodexAgentDockWidget(QWidget):
             self._last_item = item
             if role == "assistant":
                 self._latest_assistant_bubble_text = str(bubble._text or "")
-            self._bubble_debug_entries.append(
-                (str(bubble.role), str(bubble._text or line))
+            self._append_bubble_debug_log(
+                role=str(bubble.role),
+                text=str(bubble._text or line),
+                event="bubble",
             )
-            self._write_bubble_debug_log()
         self.transcript.scrollToBottom()
 
     def _on_bubble_link_activated(self, href: str) -> None:
@@ -2251,16 +2144,24 @@ class CodexAgentDockWidget(QWidget):
     def _bubble_debug_log_path(self) -> Path:
         return _APP_ROOT / ".tide" / _BUBBLE_DEBUG_LOG_BASENAME
 
-    def _write_bubble_debug_log(self) -> None:
+    def _reset_bubble_debug_log(self) -> None:
         log_path = self._bubble_debug_log_path()
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("w", encoding="utf-8") as handle:
-                for role, text in self._bubble_debug_entries:
-                    handle.write(f"{role}:\n")
-                    handle.write('"""\n')
-                    handle.write(f"{text}\n")
-                    handle.write('"""\n\n')
+                handle.write("")
+        except Exception:
+            pass
+
+    def _append_bubble_debug_log(self, *, role: str, text: str, event: str = "bubble") -> None:
+        log_path = self._bubble_debug_log_path()
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{event}] {role}:\n")
+                handle.write('"""\n')
+                handle.write(f"{text}\n")
+                handle.write('"""\n\n')
         except Exception:
             pass
 
@@ -2282,8 +2183,7 @@ class CodexAgentDockWidget(QWidget):
         self._last_item = None
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
-        self._bubble_debug_entries.clear()
-        self._write_bubble_debug_log()
+        self._reset_bubble_debug_log()
         self.transcript.clear()
         self._refresh_recent_sessions_picker(select_session_id=None)
         self._refresh_session_ui()
@@ -2316,8 +2216,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_id = None
             self._session_project = ""
             self._session_options_signature = None
-            self._bubble_debug_entries.clear()
-            self._write_bubble_debug_log()
+            self._reset_bubble_debug_log()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
@@ -2339,8 +2238,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_id = None
             self._session_project = ""
             self._session_options_signature = None
-            self._bubble_debug_entries.clear()
-            self._write_bubble_debug_log()
+            self._reset_bubble_debug_log()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
