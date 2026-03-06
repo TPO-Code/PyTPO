@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import markdown
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
@@ -33,10 +35,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
-from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
 
@@ -106,6 +108,15 @@ class _RecentSession:
     first_user_message: str
     updated_at: datetime
     log_path: Path
+
+
+@dataclass(slots=True)
+class _TranscriptEntry:
+    role: str
+    text: str
+    timestamp: str | None = None
+    cached_html: str = ""
+    collapsed: bool = False
 
 
 class _CodexWorker(QObject):
@@ -782,8 +793,8 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines: list[str] = []
         self._post_tokens_replay_index = 0
         self._latest_assistant_bubble_text = ""
-        self._last_bubble: ChatMarkdownBubble | None = None
-        self._last_item: QListWidgetItem | None = None
+        self._transcript_entries: list[_TranscriptEntry] = []
+        self._transcript_render_pending_scroll = False
         self._turn_changed_files: list[str] = []
         self._turn_changed_file_set: set[str] = set()
         self._attached_source_files: list[str] = []
@@ -800,6 +811,10 @@ class CodexAgentDockWidget(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(300)
         self._save_timer.timeout.connect(self._persist_settings)
+        self._transcript_render_timer = QTimer(self)
+        self._transcript_render_timer.setSingleShot(True)
+        self._transcript_render_timer.setInterval(33)
+        self._transcript_render_timer.timeout.connect(self._render_transcript)
 
         self._build_ui()
         self._wire_signals()
@@ -809,6 +824,7 @@ class CodexAgentDockWidget(QWidget):
 
     def shutdown(self) -> None:
         self._save_timer.stop()
+        self._transcript_render_timer.stop()
         self._runner.stop()
         self._reset_attachments_for_new_chat()
 
@@ -864,30 +880,24 @@ class CodexAgentDockWidget(QWidget):
             """
         )
 
-        self.transcript = QListWidget()
-        self.transcript.setSelectionMode(QListWidget.NoSelection)
+        self.transcript = QTextBrowser()
+        self.transcript.setObjectName("codexTranscript")
+        self.transcript.setReadOnly(True)
+        self.transcript.setOpenLinks(False)
+        self.transcript.setOpenExternalLinks(False)
+        self.transcript.setUndoRedoEnabled(False)
         self.transcript.setFocusPolicy(Qt.NoFocus)
-        self.transcript.setSpacing(7)
-        self.transcript.setAlternatingRowColors(False)
         self.transcript.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.transcript.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.transcript.verticalScrollBar().setSingleStep(18)
+        self.transcript.document().setDocumentMargin(0.0)
         self.transcript.setStyleSheet(
             """
-            QListWidget { background: #0f131a; border: 1px solid #2c3440; border-radius: 10px; padding: 8px; }
-            QListWidget::item { background: transparent; border: none; }
-            QFrame#codexBubble { border-radius: 10px; border: 1px solid #2f3746; background: #1a1f2a; }
-            QFrame#codexBubble[role="user"] { border-color: #2e6ad9; background: #16386f; }
-            QFrame#codexBubble[role="assistant"] { border-color: #2f3f5e; background: #1a1f2a; }
-            QFrame#codexBubble[role="thinking"] { border-color: #7d5ba6; background: #2a2234; }
-            QFrame#codexBubble[role="tools"] { border-color: #2e5c47; background: #1d2a24; }
-            QFrame#codexBubble[role="diff"] { border-color: #2c6a4f; background: #111a14; }
-            QFrame#codexBubble[role="system"], QFrame#codexBubble[role="meta"] { border-color: #3f4b5f; background: #232b38; }
-            QLabel#codexBubbleHeader { color: #8d9cb4; font-size: 10px; font-weight: 500; background: transparent; }
-            QLabel#codexBubblePreview { color: #c8d2e2; font-size: 12px; background: transparent; margin-top: 1px; }
-            QPushButton#codexBubbleToggle { color: #9db1cb; background: transparent; border: 1px solid #3a4658; border-radius: 4px; padding: 0px 5px; font-size: 10px; min-height: 16px; max-height: 16px; }
-            QPushButton#codexBubbleToggle:hover { border-color: #5b6f89; color: #d2ddec; }
-            QTextEdit#codexBubbleBody { color: #e6edf3; font-size: 13px; background: transparent; border: none; }
+            QTextBrowser#codexTranscript {
+                background: #0f131a;
+                border: 1px solid #2c3440;
+                border-radius: 10px;
+                padding: 8px;
+            }
             """
         )
         self.chat_splitter.addWidget(self.transcript)
@@ -997,6 +1007,7 @@ class CodexAgentDockWidget(QWidget):
         self.model_combo.currentIndexChanged.connect(self._on_option_changed)
         self.reasoning_combo.currentIndexChanged.connect(self._on_option_changed)
         self.permissions_combo.currentIndexChanged.connect(self._on_option_changed)
+        self.transcript.anchorClicked.connect(self._on_transcript_anchor_clicked)
 
         self._runner.output.connect(self._append_raw)
         self._runner.busyChanged.connect(self._on_busy_changed)
@@ -1027,6 +1038,207 @@ class CodexAgentDockWidget(QWidget):
         if self._updating_options:
             return
         self._schedule_persist_settings()
+
+    def _on_transcript_anchor_clicked(self, url: QUrl) -> None:
+        target = str(url.toString() or "").strip()
+        if target.startswith("codex://toggle/"):
+            index_text = target.rsplit("/", 1)[-1].strip()
+            try:
+                index = int(index_text)
+            except Exception:
+                index = -1
+            if 0 <= index < len(self._transcript_entries):
+                entry = self._transcript_entries[index]
+                if entry.role == "tools":
+                    entry.collapsed = not bool(entry.collapsed)
+                    self._schedule_transcript_render(scroll_to_bottom=False, immediate=True)
+            return
+        self._on_bubble_link_activated(target)
+
+    def _clear_transcript(self) -> None:
+        self._transcript_entries.clear()
+        self._transcript_render_pending_scroll = False
+        self._transcript_render_timer.stop()
+        self.transcript.clear()
+
+    def _schedule_transcript_render(
+        self,
+        *,
+        scroll_to_bottom: bool = True,
+        immediate: bool = False,
+    ) -> None:
+        if scroll_to_bottom:
+            self._transcript_render_pending_scroll = True
+        if immediate:
+            self._render_transcript()
+            return
+        if not self._transcript_render_timer.isActive():
+            self._transcript_render_timer.start()
+
+    def _scroll_transcript_to_bottom(self) -> None:
+        bar = self.transcript.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    @staticmethod
+    def _append_transcript_line(current_text: str, line: str) -> str:
+        chunk = str(line or "")
+        if not current_text:
+            return chunk.lstrip("\r\n")
+        return f"{current_text}\n{chunk}"
+
+    @staticmethod
+    def _collapsed_preview_text(text: str) -> str:
+        for raw in str(text or "").splitlines():
+            line = str(raw).strip()
+            if line:
+                if len(line) > 180:
+                    return f"{line[:177].rstrip()}..."
+                return line
+        return "(no output)"
+
+    @staticmethod
+    def _render_markdown_body_html(text: str) -> str:
+        parser = markdown.Markdown(
+            extensions=[
+                "fenced_code",
+                "tables",
+                "sane_lists",
+                "nl2br",
+            ]
+        )
+        return parser.convert(str(text or ""))
+
+    @staticmethod
+    def _render_diff_body_html(text: str) -> str:
+        rendered: list[str] = []
+        for raw in str(text or "").splitlines():
+            escaped = html.escape(raw)
+            style = "color: #e6edf3;"
+            if raw.startswith("+") and not raw.startswith("+++"):
+                style = "color: #b5cea8; background-color: #17361f;"
+            elif raw.startswith("-") and not raw.startswith("---"):
+                style = "color: #f2a7a7; background-color: #3c1820;"
+            elif raw.startswith("@@"):
+                style = "color: #d7ba7d;"
+            elif raw.startswith("diff --git") or raw.startswith("index "):
+                style = "color: #8ab4f8;"
+            elif raw.startswith("--- ") or raw.startswith("+++ "):
+                style = "color: #9cdcfe;"
+            rendered.append(f'<span style="{style}">{escaped}</span>')
+        body = "<br>".join(rendered)
+        return (
+            '<div style="white-space: pre; font-family: '
+            '\'Cascadia Code\', \'Fira Code\', \'Consolas\', monospace;">'
+            f"{body}</div>"
+        )
+
+    @classmethod
+    def _render_transcript_body_html(cls, role: str, text: str) -> str:
+        if role == "diff":
+            return cls._render_diff_body_html(text)
+        return cls._render_markdown_body_html(text)
+
+    @staticmethod
+    def _role_bubble_palette(role: str) -> tuple[str, str]:
+        role_name = str(role or "").strip()
+        if role_name == "user":
+            return "#2e6ad9", "#16386f"
+        if role_name == "assistant":
+            return "#2f3f5e", "#1a1f2a"
+        if role_name == "thinking":
+            return "#7d5ba6", "#2a2234"
+        if role_name == "tools":
+            return "#2e5c47", "#1d2a24"
+        if role_name == "diff":
+            return "#2c6a4f", "#111a14"
+        if role_name in {"system", "meta"}:
+            return "#3f4b5f", "#232b38"
+        return "#2f3746", "#1a1f2a"
+
+    @classmethod
+    def _compose_transcript_document(cls, bubbles_html: str) -> str:
+        return (
+            "<html><head>"
+            "<style>"
+            "body { margin: 0; padding: 0; background: transparent; color: #e6edf3; font-size: 13px; }"
+            "p { margin: 0.1em 0 0.45em 0; }"
+            "ul, ol { margin: 0.15em 0 0.45em 1.25em; }"
+            "blockquote { margin: 0.25em 0; padding-left: 8px; border-left: 2px solid #3a4558; color: #c2cfdf; }"
+            "pre { background: #111722; border: 1px solid #2f3f56; border-radius: 6px; padding: 8px; }"
+            "code { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }"
+            "pre code { color: #e6edf3; }"
+            "a { color: #8ab4f8; text-decoration: none; }"
+            "</style>"
+            "</head><body>"
+            f"{bubbles_html}"
+            "</body></html>"
+        )
+
+    @classmethod
+    def _render_transcript_entry_html(cls, entry: _TranscriptEntry, *, index: int) -> str:
+        role = str(entry.role or "").strip()
+        role_label = _ROLE_LABELS.get(role, role.title())
+        border_color, background_color = cls._role_bubble_palette(role)
+        stamp = str(entry.timestamp or "").strip()
+        show_header = role == "tools" or bool(stamp) or role != "assistant"
+        body_html = ""
+        if role == "tools" and entry.collapsed:
+            preview = html.escape(cls._collapsed_preview_text(entry.text))
+            body_html = (
+                '<div style="color: #c8d2e2; font-size: 12px; margin-top: 1px;">'
+                f"{preview}"
+                "</div>"
+            )
+        else:
+            if not entry.cached_html:
+                entry.cached_html = cls._render_transcript_body_html(role, entry.text)
+            body_html = entry.cached_html
+
+        header_row = ""
+        if show_header:
+            header = f"{role_label}  {stamp}" if stamp else role_label
+            if role == "tools":
+                toggle_label = "Expand" if entry.collapsed else "Collapse"
+                header_row = (
+                    '<table width="100%" cellspacing="0" cellpadding="0" style="margin: 0 0 2px 0;">'
+                    "<tr>"
+                    f'<td style="color: #8d9cb4; font-size: 10px; font-weight: 500;">{html.escape(header)}</td>'
+                    f'<td align="right"><a href="codex://toggle/{index}" style="color: #9db1cb; font-size: 10px;">{toggle_label}</a></td>'
+                    "</tr>"
+                    "</table>"
+                )
+            else:
+                header_row = (
+                    f'<div style="color: #8d9cb4; font-size: 10px; font-weight: 500; margin: 0 0 2px 0;">'
+                    f"{html.escape(header)}"
+                    "</div>"
+                )
+        return (
+            '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse: separate;">'
+            "<tr>"
+            f'<td style="border: 1px solid {border_color}; background: {background_color}; border-radius: 10px; padding: 8px 8px 6px 8px;">'
+            f"{header_row}"
+            f'<div style="color: #e6edf3; font-size: 13px;">{body_html}</div>'
+            "</td>"
+            "</tr>"
+            '<tr><td style="font-size: 2px; line-height: 7px;">&nbsp;</td></tr>'
+            "</table>"
+        )
+
+    def _render_transcript(self) -> None:
+        self._transcript_render_timer.stop()
+        pending_scroll = self._transcript_render_pending_scroll
+        self._transcript_render_pending_scroll = False
+        if not self._transcript_entries:
+            self.transcript.clear()
+            return
+        rendered_entries = [
+            self._render_transcript_entry_html(entry, index=index)
+            for index, entry in enumerate(self._transcript_entries)
+        ]
+        self.transcript.setHtml(self._compose_transcript_document("".join(rendered_entries)))
+        if pending_scroll:
+            self._scroll_transcript_to_bottom()
 
     def _load_model_choices(self, selected_model: str) -> None:
         selected = str(selected_model or "").strip()
@@ -1119,7 +1331,7 @@ class CodexAgentDockWidget(QWidget):
                 self._active_options_signature() if self._session_id else None
             )
             self._refresh_recent_sessions_picker(select_session_id=self._session_id)
-            if self._session_id and self.transcript.count() == 0:
+            if self._session_id and not self._transcript_entries:
                 session = self._recent_sessions_by_id.get(self._session_id)
                 if session is not None:
                     self._restore_session_transcript(session)
@@ -1626,18 +1838,9 @@ class CodexAgentDockWidget(QWidget):
                     payload = data.get("payload")
                     if not isinstance(payload, dict):
                         continue
-                    if str(payload.get("type") or "").strip() != "message":
+                    role, text = self._extract_visible_session_item(payload)
+                    if not role or not text:
                         continue
-                    role = str(payload.get("role") or "").strip()
-                    if role not in {"user", "assistant"}:
-                        continue
-                    text = self._extract_message_text(payload.get("content"))
-                    if not text:
-                        continue
-                    if role == "user":
-                        text = self._extract_user_visible_text(text)
-                        if self._is_non_user_facing_user_text(text):
-                            continue
                     stamp = self._format_iso_timestamp(data.get("timestamp"))
                     messages.append((role, text, stamp))
         except Exception:
@@ -1647,6 +1850,114 @@ class CodexAgentDockWidget(QWidget):
             messages = messages[-max_messages:]
         return messages, truncated
 
+    @classmethod
+    def _extract_visible_session_item(cls, payload: dict[str, Any]) -> tuple[str, str]:
+        payload_type = str(payload.get("type") or "").strip()
+        if payload_type == "message":
+            role = str(payload.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                return "", ""
+            text = cls._extract_message_text(payload.get("content"))
+            if not text:
+                return "", ""
+            if role == "user":
+                text = cls._extract_user_visible_text(text)
+                if cls._is_non_user_facing_user_text(text):
+                    return "", ""
+            return role, text
+
+        if payload_type == "reasoning":
+            text = cls._extract_reasoning_text(payload)
+            if not text:
+                return "", ""
+            return "thinking", text
+
+        if payload_type in {"function_call", "custom_tool_call"}:
+            role, text = cls._extract_tool_call_text(payload)
+            if not role or not text:
+                return "", ""
+            return role, text
+
+        if payload_type in {"function_call_output", "custom_tool_call_output"}:
+            role, text = cls._extract_tool_output_text(payload)
+            if not role or not text:
+                return "", ""
+            return role, text
+
+        return "", ""
+
+    @staticmethod
+    def _extract_reasoning_text(payload: dict[str, Any]) -> str:
+        summary = payload.get("summary")
+        if isinstance(summary, list):
+            lines: list[str] = []
+            for item in summary:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if text:
+                    lines.append(text)
+            if lines:
+                return "\n\n".join(lines).strip()
+        return ""
+
+    @classmethod
+    def _extract_tool_call_text(cls, payload: dict[str, Any]) -> tuple[str, str]:
+        name = str(payload.get("name") or payload.get("tool_name") or "tool").strip()
+        status = str(payload.get("status") or "").strip()
+        body = str(payload.get("arguments") or payload.get("input") or "").strip()
+        header = name
+        if status:
+            header = f"{header} ({status})"
+        text = f"{header}\n{body}".strip() if body else header
+        role = cls._classify_tool_restore_role(name=name, text=text)
+        return role, text
+
+    @classmethod
+    def _extract_tool_output_text(cls, payload: dict[str, Any]) -> tuple[str, str]:
+        raw_output = payload.get("output")
+        output_text = ""
+        if isinstance(raw_output, (dict, list)):
+            try:
+                output_text = json.dumps(raw_output, ensure_ascii=True, indent=2)
+            except Exception:
+                output_text = str(raw_output)
+        else:
+            output_text = str(raw_output or "").strip()
+            if output_text.startswith("{") and output_text.endswith("}"):
+                try:
+                    parsed = json.loads(output_text)
+                    if isinstance(parsed, dict):
+                        nested = str(parsed.get("output") or "").strip()
+                        if nested:
+                            output_text = nested
+                except Exception:
+                    pass
+
+        call_id = str(payload.get("call_id") or "").strip()
+        if call_id and output_text:
+            text = f"{call_id}\n{output_text}".strip()
+        elif call_id:
+            text = call_id
+        else:
+            text = output_text
+        if not text:
+            return "", ""
+        role = cls._classify_tool_restore_role(name="", text=text)
+        return role, text
+
+    @staticmethod
+    def _classify_tool_restore_role(*, name: str, text: str) -> str:
+        tool_name = str(name or "").strip().casefold()
+        source = str(text or "")
+        if tool_name == "apply_patch":
+            return "diff"
+        if source.startswith(("*** Begin Patch", "diff --git ")):
+            return "diff"
+        if "\ndiff --git " in source or "\n@@ " in source:
+            return "diff"
+        return "tools"
+
     def _restore_session_transcript(self, session: _RecentSession) -> None:
         bubbles, truncated = self._load_session_visible_messages(session.log_path)
         self._stream_mode = "assistant"
@@ -1655,10 +1966,8 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
         self._latest_assistant_bubble_text = ""
-        self._last_bubble = None
-        self._last_item = None
         self._reset_bubble_debug_log()
-        self.transcript.clear()
+        self._clear_transcript()
         for role, text, stamp in bubbles:
             self._add_bubble(role, text, timestamp=stamp or _timestamp())
         if truncated:
@@ -1667,6 +1976,7 @@ class CodexAgentDockWidget(QWidget):
                 "Showing the latest part of this restored session.",
                 timestamp=_timestamp(),
             )
+        self._schedule_transcript_render(scroll_to_bottom=True, immediate=True)
 
     def _attach_recent_session(
         self,
@@ -1972,71 +2282,49 @@ class CodexAgentDockWidget(QWidget):
         timestamp: str | None = None,
         merge: bool = False,
     ) -> None:
-        line = str(text).rstrip("\n")
-        if (
-            not line.strip()
-            and not (
-                merge
-                and timestamp is None
-                and self._last_bubble is not None
-                and self._last_item is not None
-                and self._last_bubble.role == role
-                and self._last_bubble.timestamp is None
-            )
-        ):
+        if role == "meta":
             return
-        if (
+        line = str(text).rstrip("\n")
+        last_entry = self._transcript_entries[-1] if self._transcript_entries else None
+        can_merge = (
             merge
             and timestamp is None
-            and self._last_bubble is not None
-            and self._last_item is not None
-            and self._last_bubble.role == role
-            and self._last_bubble.timestamp is None
+            and last_entry is not None
+            and last_entry.role == role
+            and last_entry.timestamp is None
+        )
+        if (
+            not line.strip()
+            and not can_merge
         ):
-            self._last_bubble.append_line(line)
-            self._last_item.setSizeHint(self._last_bubble.sizeHint())
+            return
+
+        if can_merge and last_entry is not None:
+            last_entry.text = self._append_transcript_line(last_entry.text, line)
+            last_entry.cached_html = ""
             if role == "assistant":
-                self._latest_assistant_bubble_text = str(self._last_bubble._text or "")
+                self._latest_assistant_bubble_text = str(last_entry.text or "")
             self._append_bubble_debug_log(
-                role=str(self._last_bubble.role),
+                role=str(last_entry.role),
                 text=line,
                 event="append",
             )
         else:
-            bubble = ChatMarkdownBubble(
+            entry = _TranscriptEntry(
                 role=role,
-                text=line,
                 timestamp=timestamp,
-                link_activated=self._on_bubble_link_activated,
-                role_label=_ROLE_LABELS.get(role, role.title()),
+                text=self._append_transcript_line("", line),
+                collapsed=(role == "tools"),
             )
-            item = QListWidgetItem()
-            item.setFlags(Qt.NoItemFlags)
-            item.setSizeHint(bubble.sizeHint())
-            self.transcript.addItem(item)
-            self.transcript.setItemWidget(item, bubble)
-            bubble.sizeHintChanged.connect(
-                lambda _=None, it=item, b=bubble: self._refresh_bubble_item_size_hint(it, b)
-            )
-            QTimer.singleShot(0, lambda it=item, b=bubble: self._refresh_bubble_item_size_hint(it, b))
-            self._last_bubble = bubble
-            self._last_item = item
+            self._transcript_entries.append(entry)
             if role == "assistant":
-                self._latest_assistant_bubble_text = str(bubble._text or "")
+                self._latest_assistant_bubble_text = str(entry.text or "")
             self._append_bubble_debug_log(
-                role=str(bubble.role),
-                text=str(bubble._text or line),
+                role=str(entry.role),
+                text=str(entry.text or line),
                 event="bubble",
             )
-        self.transcript.scrollToBottom()
-
-    def _refresh_bubble_item_size_hint(self, item: QListWidgetItem, bubble: ChatMarkdownBubble) -> None:
-        if item is None or bubble is None:
-            return
-        try:
-            item.setSizeHint(bubble.sizeHint())
-        except Exception:
-            return
+        self._schedule_transcript_render(scroll_to_bottom=True)
 
     def _on_bubble_link_activated(self, href: str) -> None:
         target = str(href or "").strip()
@@ -2220,12 +2508,10 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
         self._latest_assistant_bubble_text = ""
-        self._last_bubble = None
-        self._last_item = None
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
         self._reset_bubble_debug_log()
-        self.transcript.clear()
+        self._clear_transcript()
         self._refresh_recent_sessions_picker(select_session_id=None)
         self._refresh_session_ui()
         self._update_rate_limits_label()
