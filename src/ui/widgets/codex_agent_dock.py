@@ -46,6 +46,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from src.ui.codex_session_store import (
+    CodexSessionRecord,
+    canonical_path_text,
+    find_codex_session,
+    list_codex_sessions,
+    read_codex_session,
+    session_preview_text,
+)
+from src.ui.dialogs.codex_sessions_dialog import CodexSessionsDialog
 from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
@@ -126,14 +135,7 @@ class _CodexInvocation:
     prompt_text: str
 
 
-@dataclass(slots=True)
-class _RecentSession:
-    session_id: str
-    cwd: str
-    model: str
-    first_user_message: str
-    updated_at: datetime
-    log_path: Path
+_RecentSession = CodexSessionRecord
 
 
 @dataclass(slots=True)
@@ -931,6 +933,7 @@ class CodexAgentDockWidget(QWidget):
         self._non_git_warning_shown_for_chat = False
         self._stream_mode = "assistant"
         self._stream_partial = ""
+        self._pending_diff_lines: list[str] = []
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines: list[str] = []
         self._post_tokens_replay_index = 0
@@ -1189,6 +1192,7 @@ class CodexAgentDockWidget(QWidget):
 
     def _clear_transcript(self) -> None:
         self._transcript_entries.clear()
+        self._pending_diff_lines.clear()
         while self._transcript_layout.count() > 1:
             item = self._transcript_layout.takeAt(0)
             widget = item.widget()
@@ -1227,6 +1231,16 @@ class CodexAgentDockWidget(QWidget):
         if not current_text:
             return chunk.lstrip("\r\n")
         return f"{current_text}\n{chunk}"
+
+    def _buffer_diff_line(self, line: str) -> None:
+        self._pending_diff_lines.append(str(line or ""))
+
+    def _flush_pending_diff_bubble(self) -> None:
+        if not self._pending_diff_lines:
+            return
+        text = "\n".join(self._pending_diff_lines)
+        self._pending_diff_lines.clear()
+        self._add_bubble("diff", text, merge=True)
 
     @staticmethod
     def _role_bubble_palette(role: str) -> tuple[str, str]:
@@ -1583,14 +1597,7 @@ class CodexAgentDockWidget(QWidget):
 
     @staticmethod
     def _canonical_path_text(path_text: str) -> str:
-        text = str(path_text or "").strip()
-        if not text:
-            return ""
-        try:
-            canonical = str(Path(text).expanduser().resolve(strict=False))
-        except Exception:
-            canonical = text
-        return canonical.casefold()
+        return canonical_path_text(path_text)
 
     def _refresh_mention_file_cache(self) -> None:
         project = self._project_dir()
@@ -1755,99 +1762,15 @@ class CodexAgentDockWidget(QWidget):
             return None
 
     def _read_recent_session(self, log_path: Path) -> _RecentSession | None:
-        session_id = ""
-        cwd = ""
-        model = ""
-        first_user_message = ""
-        fallback_user_message = ""
-        try:
-            updated_at = datetime.fromtimestamp(log_path.stat().st_mtime)
-        except Exception:
-            updated_at = datetime.now()
-        try:
-            with log_path.open("r", encoding="utf-8") as handle:
-                for index, raw in enumerate(handle):
-                    line = str(raw or "").strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except Exception:
-                        continue
-                    payload = data.get("payload")
-                    if not isinstance(payload, dict):
-                        continue
-                    message_type = str(data.get("type") or "").strip()
-                    if message_type == "session_meta":
-                        session_id = str(payload.get("id") or "").strip() or session_id
-                        cwd = str(payload.get("cwd") or "").strip() or cwd
-                    elif message_type == "turn_context":
-                        model = str(payload.get("model") or "").strip() or model
-                        cwd = str(payload.get("cwd") or "").strip() or cwd
-                    elif message_type == "response_item":
-                        if str(payload.get("type") or "").strip() != "message":
-                            continue
-                        if str(payload.get("role") or "").strip() != "user":
-                            continue
-                        raw_text = self._extract_message_text(payload.get("content"))
-                        text = self._extract_user_visible_text(raw_text)
-                        if text and not fallback_user_message:
-                            fallback_user_message = text
-                        if text and not self._is_non_user_facing_user_text(text):
-                            first_user_message = text
-                    if session_id and cwd and model and first_user_message:
-                        break
-                    if index >= 500:
-                        break
-        except Exception:
-            return None
-        if not session_id:
-            return None
-        friendly_message = first_user_message or fallback_user_message
-        return _RecentSession(
-            session_id=session_id,
-            cwd=cwd,
-            model=model,
-            first_user_message=friendly_message,
-            updated_at=updated_at,
-            log_path=log_path,
-        )
+        return read_codex_session(log_path)
 
     def _recent_sessions(self, *, limit: int = 40, project_dir: Path | None = None) -> list[_RecentSession]:
-        sessions_dir = Path.home() / ".codex" / "sessions"
-        if not sessions_dir.is_dir():
-            return []
-        project_key = self._canonical_path_text(str(project_dir or ""))
-        try:
-            candidates = sorted(
-                sessions_dir.rglob("*.jsonl"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
-        except Exception:
-            return []
-        found: list[_RecentSession] = []
-        seen_ids: set[str] = set()
-        for log_path in candidates:
-            session = self._read_recent_session(log_path)
-            if session is None:
-                continue
-            session_key = session.session_id.casefold()
-            if session_key in seen_ids:
-                continue
-            if project_key:
-                if self._canonical_path_text(session.cwd) != project_key:
-                    continue
-            seen_ids.add(session_key)
-            found.append(session)
-            if len(found) >= max(1, int(limit)):
-                break
-        return found
+        return list_codex_sessions(limit=limit, project_dir=project_dir)
 
     @staticmethod
     def _format_recent_session_label(item: _RecentSession) -> str:
         date_text = item.updated_at.strftime("%Y-%m-%d %H:%M")
-        summary = CodexAgentDockWidget._single_line_preview(
+        summary = session_preview_text(
             item.first_user_message or f"Session {item.session_id[:8]}...",
             max_chars=58,
         )
@@ -1883,6 +1806,9 @@ class CodexAgentDockWidget(QWidget):
                         lambda _checked=False, sid=item.session_id: self._on_session_menu_triggered(sid)
                     )
                     self.session_menu.addAction(action)
+            self.session_menu.addSeparator()
+            manage_action = self.session_menu.addAction("Manage Sessions...")
+            manage_action.triggered.connect(self._open_manage_sessions_dialog)
         finally:
             self.session_picker.setEnabled(not self._runner.busy)
             self._refresh_session_ui()
@@ -2036,6 +1962,7 @@ class CodexAgentDockWidget(QWidget):
         bubbles, truncated = self._load_session_visible_messages(session.log_path)
         self._stream_mode = "assistant"
         self._stream_partial = ""
+        self._pending_diff_lines.clear()
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
@@ -2087,6 +2014,44 @@ class CodexAgentDockWidget(QWidget):
         if session is None:
             return
         self._attach_recent_session(session, restore_visible=True, announce=True)
+
+    def _open_manage_sessions_dialog(self) -> None:
+        if self._runner.busy:
+            return
+        dialog = CodexSessionsDialog(
+            project_dir=self._project_dir(),
+            active_session_id=self._session_id,
+            parent=self,
+        )
+        result = dialog.exec()
+        self._refresh_recent_sessions_picker(select_session_id=self._session_id)
+        self._clear_deleted_active_session()
+        selected_session_id = str(dialog.selected_session_id or "").strip()
+        if result and selected_session_id:
+            session = find_codex_session(selected_session_id)
+            if session is not None:
+                self._attach_recent_session(session, restore_visible=True, announce=True)
+
+    def _clear_deleted_active_session(self) -> None:
+        session_id = str(self._session_id or "").strip()
+        if not session_id:
+            return
+        if find_codex_session(session_id) is not None:
+            return
+        self._reset_attachments_for_new_chat()
+        self._session_id = None
+        self._session_project = ""
+        self._session_options_signature = None
+        self._clear_transcript()
+        self._refresh_recent_sessions_picker(select_session_id=None)
+        self._refresh_session_ui()
+        self._update_rate_limits_label()
+        self._schedule_persist_settings()
+        self._add_bubble(
+            "system",
+            "The attached Codex session was deleted. Started a new chat session.",
+            timestamp=_timestamp(),
+        )
 
     def _active_options_signature(self) -> tuple[str, str, str]:
         model = str(self.model_combo.currentData() or "").strip()
@@ -2713,6 +2678,7 @@ class CodexAgentDockWidget(QWidget):
         self._non_git_warning_shown_for_chat = False
         self._stream_mode = "assistant"
         self._stream_partial = ""
+        self._pending_diff_lines.clear()
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
@@ -2805,6 +2771,7 @@ class CodexAgentDockWidget(QWidget):
         run_command = self._build_runtime_command(command)
         self._stream_mode = "assistant"
         self._stream_partial = ""
+        self._pending_diff_lines.clear()
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
         self._suppress_post_tokens_echo = False
@@ -2898,12 +2865,14 @@ class CodexAgentDockWidget(QWidget):
         if self._stream_mode == "diff":
             if stripped.startswith("tokens used"):
                 self._stream_mode = "meta_tokens"
+                self._flush_pending_diff_bubble()
                 self._add_bubble("meta", raw_line, merge=True)
                 return
             if self._is_diff_content_line(raw_line) or not stripped:
-                self._add_bubble("diff", raw_line, merge=True)
+                self._buffer_diff_line(raw_line)
                 return
             self._stream_mode = "assistant"
+            self._flush_pending_diff_bubble()
 
         if self._is_noise_line(stripped):
             return
@@ -2912,7 +2881,7 @@ class CodexAgentDockWidget(QWidget):
             return
         if stripped.startswith("diff --git "):
             self._stream_mode = "diff"
-            self._add_bubble("diff", raw_line, merge=True)
+            self._buffer_diff_line(raw_line)
             return
         if marker in {"user", "assistant", "system", "meta", "tools", "diff"}:
             if marker == "tools":
@@ -3128,6 +3097,7 @@ class CodexAgentDockWidget(QWidget):
         if self._stream_partial.strip():
             self._handle_stream_line(self._stream_partial.rstrip("\r"))
         self._stream_partial = ""
+        self._flush_pending_diff_bubble()
         self._stream_mode = "assistant"
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
