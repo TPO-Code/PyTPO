@@ -127,11 +127,11 @@ class SettingsDialog(QDialog):
 
         lint = lint_cfg if isinstance(lint_cfg, dict) else {}
         backend = str(lint.get("backend", "ruff")).strip().lower()
-        fallback = str(lint.get("fallback_backend", "ast")).strip().lower()
+        fallback = str(lint.get("fallback_backend", "pyflakes")).strip().lower()
         if backend not in {"ruff", "pyflakes", "ast"}:
             backend = "ruff"
         if fallback not in {"none", "ruff", "pyflakes", "ast"}:
-            fallback = "ast"
+            fallback = "pyflakes"
 
         self.lint_enabled = QCheckBox()
         self.lint_enabled.setChecked(bool(lint.get("enabled", True)))

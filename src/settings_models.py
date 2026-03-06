@@ -630,7 +630,7 @@ def default_ide_settings() -> IdeSettings:
             "run_on_idle": True,
             "max_problems_per_file": 200,
             "backend": "ruff",
-            "fallback_backend": "ast",
+            "fallback_backend": "pyflakes",
             "args": {
                 "ruff": ["check", "--output-format", "json"],
                 "pyflakes": [],

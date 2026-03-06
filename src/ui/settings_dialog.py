@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from PySide6.QtCore import Qt
@@ -1008,10 +1010,59 @@ class SettingsDialog(DialogWindow):
                 return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, lambda: [])
 
             line = QLineEdit()
-            line.setPlaceholderText(field.description or "")
+            if field.key == "codex_agent.command_template":
+                line.setPlaceholderText("codex or /absolute/path/to/codex")
+            else:
+                line.setPlaceholderText(field.description or "")
 
             control: QWidget = line
             connect_signal = line.textChanged.connect
+
+            if field.key == "codex_agent.command_template":
+                holder = QWidget()
+                row = QHBoxLayout(holder)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(6)
+                browse = QPushButton("Browse")
+                browse.setFixedWidth(80)
+
+                def on_browse_codex() -> None:
+                    start_dir = ""
+                    raw = str(line.text() or "").strip()
+                    if raw:
+                        try:
+                            parsed = shlex.split(raw)
+                        except Exception:
+                            parsed = []
+                        if parsed:
+                            probe = Path(str(parsed[0] or "")).expanduser()
+                            if probe.is_dir():
+                                start_dir = str(probe)
+                            else:
+                                start_dir = str(probe.parent)
+                    selected, _selected_filter = get_open_file_name(
+                        parent=self,
+                        manager=self.manager,
+                        caption="Select Codex Binary",
+                        directory=start_dir,
+                        file_filter="All Files (*)",
+                    )
+                    if not selected:
+                        return
+                    existing_tail: list[str] = []
+                    if raw:
+                        try:
+                            parsed = shlex.split(raw)
+                        except Exception:
+                            parsed = []
+                        if len(parsed) > 1:
+                            existing_tail = [str(part) for part in parsed[1:]]
+                    line.setText(shlex.join([str(selected), *existing_tail]))
+
+                browse.clicked.connect(on_browse_codex)
+                row.addWidget(line, 1)
+                row.addWidget(browse)
+                control = holder
 
             if field.type in {"path_dir", "path_file"}:
                 holder = QWidget()
@@ -2908,8 +2959,8 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 type="lineedit",
                                 scope="ide",
                                 description=(
-                                    "Command used by the Codex Agent dock. "
-                                    "Supports {project}. Default: codex exec -"
+                                    "Command used by the Codex Agent dock. Supports {project}. "
+                                    "You can enter just 'codex' or a codex binary path; the dock adds exec mode automatically."
                                 ),
                             ),
                             SchemaField(

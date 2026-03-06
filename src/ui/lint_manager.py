@@ -46,7 +46,7 @@ class LintManager(QObject):
         "run_on_idle": True,
         "max_problems_per_file": 200,
         "backend": "ruff",
-        "fallback_backend": "ast",
+        "fallback_backend": "pyflakes",
         "args": {
             "ruff": ["check", "--output-format", "json"],
             "pyflakes": [],
@@ -387,7 +387,7 @@ class LintManager(QObject):
             backend = "ruff"
         out["backend"] = backend
 
-        fallback = str(out.get("fallback_backend", "ast")).strip().lower()
+        fallback = str(out.get("fallback_backend", "pyflakes")).strip().lower()
         if fallback not in self.FALLBACK_BACKENDS:
             fallback = "ast"
         out["fallback_backend"] = fallback
@@ -497,37 +497,43 @@ def _run_external_backend(
                 temp_path = tmp.name
                 target = temp_path
 
-        cmd = _build_backend_command(
-            backend=backend,
-            interpreter=interpreter,
-            target=target,
-            args_cfg=args_cfg,
-        )
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=25,
-            env=_backend_environment(project_root),
-        )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-        combined = (stdout + "\n" + stderr).strip()
+        env = _backend_environment(project_root)
+        for candidate in _interpreter_candidates(interpreter):
+            cmd = _build_backend_command(
+                backend=backend,
+                interpreter=candidate,
+                target=target,
+                args_cfg=args_cfg,
+            )
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=25,
+                    env=env,
+                )
+            except FileNotFoundError:
+                continue
 
-        if _is_backend_missing(backend, combined):
-            return {"state": "missing", "diagnostics": []}
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            combined = (stdout + "\n" + stderr).strip()
 
-        if backend == "ruff":
-            parsed = _parse_ruff_json(stdout, file_path, target, severity_overrides=severity_overrides)
-        else:
-            parsed = _parse_pyflakes_text(combined, file_path, target)
+            if _is_backend_missing(backend, combined):
+                return {"state": "missing", "diagnostics": []}
 
-        if proc.returncode == 0:
-            return {"state": "ok", "diagnostics": parsed}
-        if proc.returncode == 1 and parsed:
-            return {"state": "ok", "diagnostics": parsed}
-        if parsed:
-            return {"state": "ok", "diagnostics": parsed}
+            if backend == "ruff":
+                parsed = _parse_ruff_json(stdout, file_path, target, severity_overrides=severity_overrides)
+            else:
+                parsed = _parse_pyflakes_text(combined, file_path, target)
+
+            if proc.returncode == 0:
+                return {"state": "ok", "diagnostics": parsed}
+            if proc.returncode == 1 and parsed:
+                return {"state": "ok", "diagnostics": parsed}
+            if parsed:
+                return {"state": "ok", "diagnostics": parsed}
         return {"state": "failed", "diagnostics": []}
     except Exception:
         return {"state": "failed", "diagnostics": []}
@@ -571,6 +577,30 @@ def _build_backend_command(backend: str, interpreter: str, target: str, args_cfg
     configured = args_cfg.get("pyflakes", [])
     args = [str(v) for v in configured] if isinstance(configured, list) else []
     return [interpreter, "-m", "pyflakes"] + args + [target]
+
+
+def _interpreter_candidates(interpreter: str) -> list[str]:
+    requested = str(interpreter or "").strip() or "python"
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    add(requested)
+
+    # Project configs often point linting at a venv interpreter that has been
+    # removed or not created yet. Fall back to common launchers before giving
+    # up and dropping to AST-only syntax checks.
+    if requested != "python":
+        add("python")
+    if requested != "python3":
+        add("python3")
+    return candidates
 
 
 def _is_backend_missing(backend: str, text: str) -> bool:

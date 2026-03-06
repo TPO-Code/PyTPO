@@ -5,6 +5,22 @@ import threading
 import time
 from pathlib import Path
 
+from src.app_launch_monitor import extract_monitor_launch, run_monitored_process
+
+_MONITOR_LAUNCH = extract_monitor_launch(sys.argv[1:]) if __name__ == "__main__" else None
+
+if _MONITOR_LAUNCH is not None:
+    monitor_cwd, monitor_child_args = _MONITOR_LAUNCH
+    sys.exit(
+        run_monitored_process(
+            python_executable=sys.executable or "python3",
+            main_script=Path(__file__).resolve(),
+            working_dir=monitor_cwd,
+            child_args=monitor_child_args,
+            app_name="PyTPO",
+        )
+    )
+
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
+from src.app_launch_monitor import MONITOR_LAUNCH_ARG
 from src.instance_coordinator import request_project_activation
 from src.settings_manager import SettingsManager
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory, get_open_file_name, get_save_file_name
@@ -211,7 +212,11 @@ class ProjectLifecycleController:
     def _launch_project_window(self, project_path: str) -> bool:
         main_script = Path(__file__).resolve().parents[3] / "main.py"
         python_bin = self._ide_python_executable()
-        ok = QProcess.startDetached(python_bin, [str(main_script), project_path], project_path)
+        ok = QProcess.startDetached(
+            python_bin,
+            [str(main_script), MONITOR_LAUNCH_ARG, project_path, project_path],
+            project_path,
+        )
         if not ok:
             QMessageBox.warning(self.ide, "Open Project", f"Could not open project:\n{project_path}")
             return False
@@ -222,7 +227,7 @@ class ProjectLifecycleController:
         python_bin = self._ide_python_executable()
         ok = QProcess.startDetached(
             python_bin,
-            [str(main_script), self.FORCE_NO_PROJECT_ARG],
+            [str(main_script), MONITOR_LAUNCH_ARG, self.project_root, self.FORCE_NO_PROJECT_ARG],
             self.project_root,
         )
         if not ok:

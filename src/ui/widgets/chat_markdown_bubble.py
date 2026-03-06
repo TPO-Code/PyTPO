@@ -120,7 +120,7 @@ class ChatMarkdownBubble(QFrame):
             header_row.setSpacing(4)
             self.header = QLabel(header_text)
             self.header.setObjectName("codexBubbleHeader")
-            self.header.setStyleSheet("background: transparent;")
+            self.header.setStyleSheet("background-color: transparent;")
             header_row.addWidget(self.header, 1)
 
         self.toggle_btn: QPushButton | None = None
@@ -140,7 +140,7 @@ class ChatMarkdownBubble(QFrame):
 
         self.preview = QLabel("")
         self.preview.setObjectName("codexBubblePreview")
-        self.preview.setStyleSheet("background: transparent;")
+        self.preview.setStyleSheet("background-color: transparent;")
         self.preview.setWordWrap(False)
         self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.preview.setVisible(False)

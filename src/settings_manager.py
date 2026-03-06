@@ -1208,9 +1208,9 @@ class SettingsManager:
             backend = "ruff"
         lint["backend"] = backend
 
-        fallback = str(lint.get("fallback_backend", "ast")).strip().lower()
+        fallback = str(lint.get("fallback_backend", "pyflakes")).strip().lower()
         if fallback not in {"none", "ruff", "pyflakes", "ast"}:
-            fallback = "ast"
+            fallback = "pyflakes"
         lint["fallback_backend"] = fallback
 
         args_cfg = lint.get("args")

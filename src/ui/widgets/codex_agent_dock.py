@@ -168,9 +168,15 @@ class _CodexWorker(QObject):
 
     def run(self) -> None:
         self.started.emit()
-        command = self._invocation.command_template.format(
-            project=str(self._invocation.project_dir)
-        )
+        try:
+            command = self._invocation.command_template.format(
+                project=str(self._invocation.project_dir)
+            )
+        except Exception as exc:
+            self.output.emit(f"[error] Invalid command template: {exc}\n")
+            self.finished.emit(2)
+            return
+
         try:
             args = shlex.split(command)
         except Exception:
@@ -291,22 +297,6 @@ class _CodexRunner(QObject):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
-
-
-class _BackgroundTaskWorker(QObject):
-    finished = Signal(str, object)
-
-    def __init__(self, task_id: str, task: Callable[[], object]) -> None:
-        super().__init__()
-        self._task_id = task_id
-        self._task = task
-
-    def run(self) -> None:
-        try:
-            result = self._task()
-        except Exception as exc:
-            result = exc
-        self.finished.emit(self._task_id, result)
 
 
 class _ChatInputEdit(SpellcheckTextEdit):
@@ -965,9 +955,6 @@ class CodexAgentDockWidget(QWidget):
         self._sessions_refresh_token = 0
         self._rate_limits_refresh_token = 0
         self._transcript_scroll_pending = False
-        self._background_threads: set[QThread] = set()
-        self._background_workers: dict[str, _BackgroundTaskWorker] = {}
-        self._background_callbacks: dict[str, Callable[[object], None]] = {}
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -983,12 +970,6 @@ class CodexAgentDockWidget(QWidget):
     def shutdown(self) -> None:
         self._save_timer.stop()
         self._runner.stop()
-        self._background_workers.clear()
-        self._background_callbacks.clear()
-        for thread in list(self._background_threads):
-            if thread.isRunning():
-                thread.quit()
-                thread.wait(500)
         self._reset_attachments_for_new_chat()
 
     def reload_settings(self) -> None:
@@ -1278,7 +1259,7 @@ class CodexAgentDockWidget(QWidget):
             f"""
             QFrame#codexBubble {{
                 border: 1px solid {border_color};
-                background: {background_color};
+                background-color: {background_color};
                 border-radius: 0px;
             }}
             QLabel#codexBubbleHeader {{
@@ -1300,10 +1281,9 @@ class CodexAgentDockWidget(QWidget):
             }}
             QTextEdit#codexBubbleBody {{
                 color: #e6edf3;
-                background: transparent;
+                background-color: transparent;
                 font-size: 13px;
                 border: none;
-                outline: none;
                 padding: 0px;
                 margin: 0px;
                 border-radius: 0px;
@@ -1873,33 +1853,6 @@ class CodexAgentDockWidget(QWidget):
         )
         return f"{summary} | {date_text}"
 
-    def _run_background_task(
-        self,
-        *,
-        task: Callable[[], object],
-        on_done: Callable[[object], None],
-    ) -> None:
-        task_id = uuid.uuid4().hex
-        self._background_callbacks[task_id] = on_done
-        thread = QThread(self)
-        worker = _BackgroundTaskWorker(task_id, task)
-        self._background_workers[task_id] = worker
-        worker.moveToThread(thread)
-        worker.finished.connect(self._on_background_task_finished)
-        worker.finished.connect(lambda _id, _result: thread.quit())
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._background_threads.discard(thread))
-        thread.started.connect(worker.run)
-        self._background_threads.add(thread)
-        thread.start()
-
-    def _on_background_task_finished(self, task_id: str, result: object) -> None:
-        self._background_workers.pop(str(task_id or ""), None)
-        callback = self._background_callbacks.pop(str(task_id or ""), None)
-        if callable(callback):
-            callback(result)
-
     def _refresh_recent_sessions_picker(self, *, select_session_id: str | None = None) -> None:
         project = self._project_dir()
         wanted = str(select_session_id or "").strip()
@@ -2337,8 +2290,7 @@ class CodexAgentDockWidget(QWidget):
         base = list(args)
         if base and base[-1] == "-":
             base = base[:-1]
-        resume_args = list(base[2:])
-        resume_args = [part for part in resume_args if part not in {"--full-auto", "--dangerously-bypass-approvals-and-sandbox"}]
+        resume_args = self._resume_supported_args(base[2:])
         permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
         permission_flag = (
             "--dangerously-bypass-approvals-and-sandbox"
@@ -2346,6 +2298,33 @@ class CodexAgentDockWidget(QWidget):
             else "--full-auto"
         )
         return shlex.join([base[0], "exec", "resume", permission_flag, *resume_args, self._session_id, "-"])
+
+    @staticmethod
+    def _resume_supported_args(args: list[str]) -> list[str]:
+        out: list[str] = []
+        idx = 0
+        while idx < len(args):
+            token = str(args[idx] or "")
+            if token == "--skip-git-repo-check":
+                out.append(token)
+                idx += 1
+                continue
+            if token in {"--full-auto", "--dangerously-bypass-approvals-and-sandbox"}:
+                idx += 1
+                continue
+            if token in {"--model", "-m", "--config", "-c"}:
+                out.append(token)
+                idx += 1
+                if idx < len(args):
+                    out.append(str(args[idx] or ""))
+                    idx += 1
+                continue
+            if token.startswith("--model=") or token.startswith("--config="):
+                out.append(token)
+                idx += 1
+                continue
+            idx += 1
+        return out
 
     def _compose_prompt(
         self,
@@ -3122,30 +3101,28 @@ class CodexAgentDockWidget(QWidget):
         self._append_rate_limits_debug_log(
             f"update: start token={token} session_id={session_id}"
         )
-
-        def _task() -> object:
-            return self._rate_limit_display_for_session(session_id)
-
-        def _done(result: object) -> None:
-            elapsed_ms = int((time.monotonic() - started_at) * 1000.0)
-            if token != self._rate_limits_refresh_token:
-                self._append_rate_limits_debug_log(
-                    f"update: discard stale token={token} current={self._rate_limits_refresh_token} elapsed_ms={elapsed_ms}"
-                )
-                return
-            if isinstance(result, tuple) and len(result) == 2:
-                text = str(result[0] or _RATE_LIMITS_UNAVAILABLE)
-                tooltip = str(result[1] or "Rate limit data unavailable")
-            else:
-                text = _RATE_LIMITS_UNAVAILABLE
-                tooltip = "Rate limit data unavailable"
-            self.rate_limits_label.setText(text)
-            self.rate_limits_label.setToolTip(tooltip)
+        result: object
+        try:
+            result = self._rate_limit_display_for_session(session_id)
+        except Exception:
+            result = None
+        elapsed_ms = int((time.monotonic() - started_at) * 1000.0)
+        if token != self._rate_limits_refresh_token:
             self._append_rate_limits_debug_log(
-                f"update: applied token={token} elapsed_ms={elapsed_ms} text='{text}'"
+                f"update: discard stale token={token} current={self._rate_limits_refresh_token} elapsed_ms={elapsed_ms}"
             )
-
-        self._run_background_task(task=_task, on_done=_done)
+            return
+        if isinstance(result, tuple) and len(result) == 2:
+            text = str(result[0] or _RATE_LIMITS_UNAVAILABLE)
+            tooltip = str(result[1] or "Rate limit data unavailable")
+        else:
+            text = _RATE_LIMITS_UNAVAILABLE
+            tooltip = "Rate limit data unavailable"
+        self.rate_limits_label.setText(text)
+        self.rate_limits_label.setToolTip(tooltip)
+        self._append_rate_limits_debug_log(
+            f"update: applied token={token} elapsed_ms={elapsed_ms} text='{text}'"
+        )
 
     def _on_exit_code(self, code: int) -> None:
         if self._stream_partial.strip():
