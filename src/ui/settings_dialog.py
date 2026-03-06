@@ -2909,8 +2909,34 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 scope="ide",
                                 description=(
                                     "Command used by the Codex Agent dock. "
-                                    "Supports {project}. Default: codex exec --skip-git-repo-check --sandbox workspace-write -"
+                                    "Supports {project}. Default: codex exec -"
                                 ),
+                            ),
+                            SchemaField(
+                                id="ide-code-agents-auto-skip-git-check",
+                                key="codex_agent.auto_skip_git_repo_check",
+                                label="Auto-add --skip-git-repo-check For Non-Git Projects",
+                                type="checkbox",
+                                scope="ide",
+                                description=(
+                                    "When enabled, the dock adds --skip-git-repo-check for projects not under source control "
+                                    "and shows a one-time warning at the start of a new chat session."
+                                ),
+                            ),
+                            SchemaField(
+                                id="ide-code-agents-add-workspace-sandbox",
+                                key="codex_agent.sandbox_mode",
+                                label="Default Sandbox Mode",
+                                type="combo",
+                                scope="ide",
+                                description=(
+                                    "Select which --sandbox mode the Codex Agent uses for turns."
+                                ),
+                                options=[
+                                    {"label": "read-only", "value": "read-only"},
+                                    {"label": "workspace-write", "value": "workspace-write"},
+                                    {"label": "danger-full-access", "value": "danger-full-access"},
+                                ],
                             ),
                         ],
                     ),

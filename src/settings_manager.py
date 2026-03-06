@@ -357,6 +357,8 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "codex_agent": "codex_agent",
     "codex_agent.command_template": "codex_agent.command_template",
     "codex_agent.system_preamble": "codex_agent.system_preamble",
+    "codex_agent.auto_skip_git_repo_check": "codex_agent.auto_skip_git_repo_check",
+    "codex_agent.sandbox_mode": "codex_agent.sandbox_mode",
     "codex_agent.model": "codex_agent.model",
     "codex_agent.model_reasoning_effort": "codex_agent.model_reasoning_effort",
     "codex_agent.permission_mode": "codex_agent.permission_mode",
@@ -1286,6 +1288,12 @@ class SettingsManager:
             or str(default_ide_settings()["codex_agent"]["command_template"])
         )
         codex_agent["system_preamble"] = str(codex_agent.get("system_preamble") or "")
+        codex_agent["auto_skip_git_repo_check"] = bool(codex_agent.get("auto_skip_git_repo_check", True))
+        sandbox_mode = str(codex_agent.get("sandbox_mode") or "").strip().lower()
+        if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            legacy_workspace_write = bool(codex_agent.get("add_workspace_write_sandbox", True))
+            sandbox_mode = "workspace-write" if legacy_workspace_write else "read-only"
+        codex_agent["sandbox_mode"] = sandbox_mode
         codex_agent["model"] = str(codex_agent.get("model") or "").strip()
         reasoning_effort = str(codex_agent.get("model_reasoning_effort") or "").strip().lower()
         if reasoning_effort not in {"low", "medium", "high", "xhigh"}:

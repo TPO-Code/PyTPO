@@ -9,7 +9,7 @@ from src.ai.settings_schema import AIAssistSettings, default_ai_settings
 from src.core.keybindings import default_keybindings
 
 SettingsScope = Literal["project", "ide"]
-DEFAULT_CODEX_AGENT_COMMAND = "codex exec --skip-git-repo-check --sandbox workspace-write -"
+DEFAULT_CODEX_AGENT_COMMAND = "codex exec -"
 
 
 class InterpreterOverride(TypedDict, total=False):
@@ -291,6 +291,8 @@ class IdeFileDialogSettings(TypedDict, total=False):
 class IdeCodexAgentSettings(TypedDict, total=False):
     command_template: str
     system_preamble: str
+    auto_skip_git_repo_check: bool
+    sandbox_mode: str
     model: str
     model_reasoning_effort: str
     permission_mode: str
@@ -527,6 +529,8 @@ def default_ide_settings() -> IdeSettings:
         "codex_agent": {
             "command_template": DEFAULT_CODEX_AGENT_COMMAND,
             "system_preamble": "",
+            "auto_skip_git_repo_check": True,
+            "sandbox_mode": "workspace-write",
             "model": "",
             "model_reasoning_effort": "medium",
             "permission_mode": "default",

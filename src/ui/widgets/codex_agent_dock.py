@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -13,10 +14,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QRectF, QThread, QTimer, Qt, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QDesktopServices,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
     QTextCharFormat,
     QTextCursor,
 )
@@ -31,9 +37,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -41,7 +49,7 @@ from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
 
-DEFAULT_CODEX_COMMAND = "codex exec --skip-git-repo-check --sandbox workspace-write -"
+DEFAULT_CODEX_COMMAND = "codex exec -"
 _SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F-]{36})", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
@@ -777,6 +785,115 @@ class _ChatInputEdit(SpellcheckTextEdit):
         return "\n".join(lines)
 
 
+class _ShimmerBorderFrame(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._shimmer_enabled = False
+        self._shimmer_progress = 0.0
+        self._travel_angle_degrees = -25.0
+        self._border_radius = 10.0
+        self._border_width = 2.0
+        self._padding = 4
+        self._content_layout = QVBoxLayout(self)
+        self._content_layout.setContentsMargins(
+            self._padding,
+            self._padding,
+            self._padding,
+            self._padding,
+        )
+        self._content_layout.setSpacing(0)
+        self._animation = QVariantAnimation(self)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setDuration(1800)
+        self._animation.setLoopCount(-1)
+        self._animation.setEasingCurve(QEasingCurve.Linear)
+        self._animation.valueChanged.connect(self._on_animation_value_changed)
+
+    def set_content_widget(self, widget: QWidget) -> None:
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            old = item.widget()
+            if old is not None and old is not widget:
+                old.setParent(None)
+        self._content_layout.addWidget(widget)
+
+    def set_shimmer_enabled(self, enabled: bool) -> None:
+        wanted = bool(enabled)
+        if wanted == self._shimmer_enabled:
+            return
+        self._shimmer_enabled = wanted
+        if wanted:
+            self._animation.start()
+        else:
+            self._animation.stop()
+            self.update()
+
+    def _on_animation_value_changed(self, value: object) -> None:
+        try:
+            self._shimmer_progress = float(value)
+        except Exception:
+            self._shimmer_progress = 0.0
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(
+            self._border_width / 2.0,
+            self._border_width / 2.0,
+            -self._border_width / 2.0,
+            -self._border_width / 2.0,
+        )
+        if rect.width() <= 0.0 or rect.height() <= 0.0:
+            return
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._border_radius, self._border_radius)
+
+        base_pen = QPen(QColor("#4a4a4a"))
+        base_pen.setWidthF(self._border_width)
+        painter.setPen(base_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+
+        if not self._shimmer_enabled:
+            return
+
+        angle_rad = math.radians(self._travel_angle_degrees)
+        dx = math.cos(angle_rad)
+        dy = math.sin(angle_rad)
+        diagonal = math.hypot(rect.width(), rect.height())
+        travel_distance = diagonal * 2.2
+        offset = (self._shimmer_progress - 0.5) * travel_distance
+
+        cx = rect.center().x() + dx * offset
+        cy = rect.center().y() + dy * offset
+        half_len = diagonal
+        x1 = cx - dx * half_len
+        y1 = cy - dy * half_len
+        x2 = cx + dx * half_len
+        y2 = cy + dy * half_len
+
+        gradient = QLinearGradient(x1, y1, x2, y2)
+        gradient.setColorAt(0.00, QColor(255, 255, 255, 0))
+        gradient.setColorAt(0.42, QColor(120, 180, 255, 0))
+        gradient.setColorAt(0.48, QColor(120, 180, 255, 60))
+        gradient.setColorAt(0.50, QColor(180, 220, 255, 180))
+        gradient.setColorAt(0.52, QColor(120, 180, 255, 60))
+        gradient.setColorAt(0.58, QColor(120, 180, 255, 0))
+        gradient.setColorAt(1.00, QColor(255, 255, 255, 0))
+
+        shimmer_pen = QPen()
+        shimmer_pen.setBrush(gradient)
+        shimmer_pen.setWidthF(self._border_width + 0.8)
+        painter.setPen(shimmer_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+
+
 class CodexAgentDockWidget(QWidget):
     statusMessage = Signal(str)
 
@@ -800,6 +917,9 @@ class CodexAgentDockWidget(QWidget):
         self._session_project = ""
         self._session_options_signature: tuple[str, str, str] | None = None
         self._command_template = DEFAULT_CODEX_COMMAND
+        self._auto_skip_git_repo_check = True
+        self._sandbox_mode = "workspace-write"
+        self._non_git_warning_shown_for_chat = False
         self._stream_mode = "assistant"
         self._stream_partial = ""
         self._suppress_post_tokens_echo = False
@@ -861,10 +981,13 @@ class CodexAgentDockWidget(QWidget):
         top_row = QHBoxLayout()
         self.preamble_toggle_btn = QPushButton("Instructions (hidden)")
         self.preamble_toggle_btn.setCheckable(True)
-        self.session_picker = QComboBox()
+        self.session_picker = QToolButton()
+        self.session_picker.setText("Recent Sessions")
+        self.session_picker.setPopupMode(QToolButton.InstantPopup)
+        self.session_picker.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.session_picker.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.session_picker.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.session_picker.setMinimumContentsLength(14)
+        self.session_menu = QMenu(self.session_picker)
+        self.session_picker.setMenu(self.session_menu)
         self.new_chat_btn = QPushButton("New Chat")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
@@ -927,14 +1050,17 @@ class CodexAgentDockWidget(QWidget):
         composer_layout.setContentsMargins(0, 0, 0, 0)
         composer_layout.setSpacing(6)
 
+        self.input_frame = _ShimmerBorderFrame()
         self.input_edit = _ChatInputEdit(
             mention_provider=self._mention_candidates,
             link_target_provider=self._mention_link_target,
+            parent=self.input_frame,
         )
         self.input_edit.setPlaceholderText("Ask Codex...")
         self.input_edit.setMinimumHeight(92)
         self.input_edit.setMaximumBlockCount(1200)
-        composer_layout.addWidget(self.input_edit)
+        self.input_frame.set_content_widget(self.input_edit)
+        composer_layout.addWidget(self.input_frame)
 
         self.attachments_container = QWidget()
         attachments_layout = QHBoxLayout(self.attachments_container)
@@ -1014,7 +1140,6 @@ class CodexAgentDockWidget(QWidget):
 
     def _wire_signals(self) -> None:
         self.new_chat_btn.clicked.connect(self._new_chat)
-        self.session_picker.activated.connect(self._on_session_picker_activated)
         self.stop_btn.clicked.connect(self._runner.stop)
         self.send_btn.clicked.connect(self._send)
         self.add_file_btn.clicked.connect(self._on_add_files_clicked)
@@ -1216,6 +1341,11 @@ class CodexAgentDockWidget(QWidget):
         try:
             self._command_template = command
             self.preamble_edit.setPlainText(str(data.get("system_preamble") or ""))
+            self._auto_skip_git_repo_check = bool(data.get("auto_skip_git_repo_check", True))
+            sandbox_mode = str(data.get("sandbox_mode") or "").strip().lower()
+            if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+                sandbox_mode = "workspace-write"
+            self._sandbox_mode = sandbox_mode
             show_preamble = bool(data.get("show_system_preamble", False))
             self.preamble_toggle_btn.blockSignals(True)
             self.preamble_toggle_btn.setChecked(show_preamble)
@@ -1267,6 +1397,8 @@ class CodexAgentDockWidget(QWidget):
         payload = {
             "command_template": str(self._command_template or "").strip() or DEFAULT_CODEX_COMMAND,
             "system_preamble": str(self.preamble_edit.toPlainText() or ""),
+            "auto_skip_git_repo_check": bool(self._auto_skip_git_repo_check),
+            "sandbox_mode": str(self._sandbox_mode or "workspace-write"),
             "show_system_preamble": bool(self.preamble_toggle_btn.isChecked()),
             "show_agent_options": bool(self.options_toggle_btn.isChecked()),
             "model": model,
@@ -1754,24 +1886,22 @@ class CodexAgentDockWidget(QWidget):
         self._recent_sessions_by_id = {item.session_id: item for item in sessions}
         self._updating_session_picker = True
         try:
-            self.session_picker.blockSignals(True)
-            self.session_picker.clear()
-            self.session_picker.addItem("Recent sessions", "")
-            for item in sessions:
-                self.session_picker.addItem(
-                    self._format_recent_session_label(item),
-                    item.session_id,
-                )
-            wanted = str(select_session_id or "").strip()
-            if wanted:
-                index = self.session_picker.findData(wanted)
-                if index < 0:
-                    index = 0
-                self.session_picker.setCurrentIndex(index)
+            self.session_menu.clear()
+            if not sessions:
+                empty_action = self.session_menu.addAction("No recent sessions")
+                empty_action.setEnabled(False)
             else:
-                self.session_picker.setCurrentIndex(0)
+                header_action = self.session_menu.addAction("Recent Sessions")
+                header_action.setEnabled(False)
+                self.session_menu.addSeparator()
+                for item in sessions:
+                    action = QAction(self._format_recent_session_label(item), self.session_menu)
+                    action.setData(item.session_id)
+                    action.triggered.connect(
+                        lambda _checked=False, sid=item.session_id: self._on_session_menu_triggered(sid)
+                    )
+                    self.session_menu.addAction(action)
         finally:
-            self.session_picker.blockSignals(False)
             self.session_picker.setEnabled(not self._runner.busy)
             self._refresh_session_ui()
             self._updating_session_picker = False
@@ -1965,12 +2095,10 @@ class CodexAgentDockWidget(QWidget):
                 timestamp=_timestamp(),
             )
 
-    def _on_session_picker_activated(self, index: int) -> None:
+    def _on_session_menu_triggered(self, session_id: str) -> None:
         if self._updating_session_picker:
             return
-        if int(index) <= 0:
-            return
-        session_id = str(self.session_picker.itemData(index) or "").strip()
+        session_id = str(session_id or "").strip()
         if not session_id:
             return
         session = self._recent_sessions_by_id.get(session_id)
@@ -2014,6 +2142,40 @@ class CodexAgentDockWidget(QWidget):
         return out
 
     @staticmethod
+    def _drop_flags(args: list[str], names: set[str]) -> list[str]:
+        blocked = {str(name or "").strip() for name in names if str(name or "").strip()}
+        return [token for token in args if str(token or "").strip() not in blocked]
+
+    @staticmethod
+    def _is_project_source_controlled(project: Path) -> bool:
+        root = Path(project).expanduser()
+        for marker in (".git", ".hg", ".svn"):
+            try:
+                if (root / marker).exists():
+                    return True
+            except Exception:
+                continue
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2.0,
+            )
+        except Exception:
+            return False
+        if proc.returncode != 0:
+            return False
+        return str(proc.stdout or "").strip().lower() == "true"
+
+    def _resolved_sandbox_mode(self) -> str:
+        mode = str(self._sandbox_mode or "").strip().lower()
+        if mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            return "workspace-write"
+        return mode
+
+    @staticmethod
     def _drop_reasoning_config(args: list[str]) -> list[str]:
         out: list[str] = []
         idx = 0
@@ -2038,34 +2200,40 @@ class CodexAgentDockWidget(QWidget):
             idx += 1
         return out
 
-    def _apply_agent_options(self, command: str) -> str:
+    def _apply_agent_options(self, command: str, project: Path) -> tuple[str, bool]:
         try:
             args = shlex.split(command)
         except Exception:
-            return command
+            return command, False
         if len(args) < 2:
-            return command
+            return command, False
         if Path(str(args[0])).name.lower() != "codex" or args[1] != "exec":
-            return command
+            return command, False
         if args[2:3] and args[2] in {"resume", "review", "help"}:
-            return command
+            return command, False
 
         updated = list(args)
         updated = self._drop_flag_with_value(updated, {"-m", "--model"})
         updated = self._drop_flag_with_value(updated, {"-s", "--sandbox"})
         updated = self._drop_reasoning_config(updated)
         updated = [token for token in updated if token != "--dangerously-bypass-approvals-and-sandbox"]
+        updated = self._drop_flags(updated, {"--skip-git-repo-check"})
 
-        model, reasoning, permission_mode = self._active_options_signature()
+        added_skip_git_repo_check = False
+
+        model, reasoning, _ = self._active_options_signature()
         insert_at = 2
+        if self._auto_skip_git_repo_check and not self._is_project_source_controlled(project):
+            updated[insert_at:insert_at] = ["--skip-git-repo-check"]
+            insert_at += 1
+            added_skip_git_repo_check = True
         if model:
             updated[insert_at:insert_at] = ["--model", model]
             insert_at += 2
         updated[insert_at:insert_at] = ["--config", f'model_reasoning_effort="{reasoning}"']
         insert_at += 2
-        sandbox_mode = "danger-full-access" if permission_mode == "full_access" else "workspace-write"
-        updated[insert_at:insert_at] = ["--sandbox", sandbox_mode]
-        return shlex.join(updated)
+        updated[insert_at:insert_at] = ["--sandbox", self._resolved_sandbox_mode()]
+        return shlex.join(updated), added_skip_git_repo_check
 
     def _normalize_command(self, command: str) -> str:
         try:
@@ -2091,12 +2259,6 @@ class CodexAgentDockWidget(QWidget):
                         del normalized[index]
                     continue
                 index += 1
-            insert_at = 2
-            if "--skip-git-repo-check" not in normalized:
-                normalized[insert_at:insert_at] = ["--skip-git-repo-check"]
-                insert_at += 1
-            if "--sandbox" not in normalized:
-                normalized[insert_at:insert_at] = ["--sandbox", "workspace-write"]
             if "-" not in normalized:
                 normalized.append("-")
             return shlex.join(normalized)
@@ -2125,9 +2287,6 @@ class CodexAgentDockWidget(QWidget):
             [
                 args[0],
                 "exec",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
                 *args[1:],
                 "-",
             ]
@@ -2149,7 +2308,7 @@ class CodexAgentDockWidget(QWidget):
         base = list(args)
         if base and base[-1] == "-":
             base = base[:-1]
-        resume_args = self._drop_flag_with_value(list(base[2:]), {"-s", "--sandbox"})
+        resume_args = list(base[2:])
         resume_args = [part for part in resume_args if part not in {"--full-auto", "--dangerously-bypass-approvals-and-sandbox"}]
         permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
         permission_flag = (
@@ -2500,6 +2659,7 @@ class CodexAgentDockWidget(QWidget):
         self._session_id = None
         self._session_project = ""
         self._session_options_signature = None
+        self._non_git_warning_shown_for_chat = False
         self._stream_mode = "assistant"
         self._stream_partial = ""
         self._suppress_post_tokens_echo = False
@@ -2518,6 +2678,9 @@ class CodexAgentDockWidget(QWidget):
         self._schedule_persist_settings()
 
     def _send(self) -> None:
+        if self._runner.busy:
+            self.statusMessage.emit("Codex is busy. Wait for the current turn to finish before sending.")
+            return
         self.input_edit.close_mention_popup()
         user_text = str(self.input_edit.to_codex_text() or "").strip()
         if not user_text:
@@ -2542,6 +2705,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_id = None
             self._session_project = ""
             self._session_options_signature = None
+            self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
@@ -2564,6 +2728,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_id = None
             self._session_project = ""
             self._session_options_signature = None
+            self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
@@ -2574,7 +2739,18 @@ class CodexAgentDockWidget(QWidget):
                 timestamp=_timestamp(),
             )
 
-        command = self._apply_agent_options(command)
+        command, added_skip_git_repo_check = self._apply_agent_options(command, project)
+        if (
+            added_skip_git_repo_check
+            and not self._session_id
+            and not self._non_git_warning_shown_for_chat
+        ):
+            self._non_git_warning_shown_for_chat = True
+            QMessageBox.warning(
+                self,
+                "Non-Git Project",
+                "This project is not under source control, so --skip-git-repo-check was added for this Codex session.",
+            )
         run_command = self._build_runtime_command(command)
         self._stream_mode = "assistant"
         self._stream_partial = ""
@@ -2760,10 +2936,10 @@ class CodexAgentDockWidget(QWidget):
         running = bool(busy)
         if running:
             self.input_edit.close_mention_popup()
+        self.input_frame.set_shimmer_enabled(running)
         self.send_btn.setEnabled(not running)
         self.add_file_btn.setEnabled(not running)
         self.clear_attachments_btn.setEnabled(not running)
-        self.input_edit.setEnabled(not running)
         self.model_combo.setEnabled(not running)
         self.reasoning_combo.setEnabled(not running)
         self.permissions_combo.setEnabled(not running)
