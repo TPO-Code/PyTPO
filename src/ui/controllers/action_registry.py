@@ -138,6 +138,10 @@ class ActionRegistry:
         file_menu.addAction(act_close_project)
         ide._act_close_project = act_close_project
 
+        act_reload_ui = QAction("Reload UI", ide)
+        act_reload_ui.triggered.connect(ide.reload_ui)
+        file_menu.addAction(act_reload_ui)
+
         file_menu.addSeparator()
 
         act_settings = QAction("Settings...", ide)

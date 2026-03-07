@@ -5819,6 +5819,9 @@ class PythonIDE(Window):
     def close_project(self) -> None:
         self.project_lifecycle_controller.close_project()
 
+    def reload_ui(self) -> None:
+        self.project_lifecycle_controller.reload_ui()
+
     def open_project_path(self, path: str):
         self.project_lifecycle_controller.open_project_path(path)
 

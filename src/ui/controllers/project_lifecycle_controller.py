@@ -293,6 +293,39 @@ class ProjectLifecycleController:
         self.ide.close()
         return True
 
+    def reload_ui(self) -> None:
+        if not self._confirm_save_modified_editors():
+            return
+        self._persist_window_layout_before_handoff()
+
+        previous_server = getattr(self.ide, "_instance_server", None)
+        if previous_server is not None:
+            try:
+                previous_server.close()
+            except Exception:
+                pass
+            self.ide._instance_server = None
+
+        target = self.no_project_instance_key() if self.no_project_mode else self.project_root
+        launched = self._launch_no_project_window() if self.no_project_mode else self._launch_project_window(self.project_root)
+        if not launched:
+            self.ide._setup_instance_server()
+            return
+
+        timeout_s = self._instance_handoff_timeout_s()
+        if not self._wait_for_project_instance(target, timeout_s=timeout_s):
+            self.ide._setup_instance_server()
+            QMessageBox.warning(
+                self.ide,
+                "Reload UI",
+                "The replacement window did not start successfully.\n"
+                "Keeping the current window open.",
+            )
+            return
+
+        self.ide._skip_close_save_prompt_once = True
+        self.ide.close()
+
     def close_project(self) -> None:
         if self.no_project_mode:
             return
