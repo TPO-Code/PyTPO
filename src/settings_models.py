@@ -298,6 +298,8 @@ class IdeCodexAgentSettings(TypedDict, total=False):
     permission_mode: str
     session_id: str
     session_project_dir: str
+    last_rate_limits_text: str
+    last_rate_limits_tooltip: str
 
 
 class IdeSettings(TypedDict, total=False):
@@ -536,6 +538,8 @@ def default_ide_settings() -> IdeSettings:
             "permission_mode": "default",
             "session_id": "",
             "session_project_dir": "",
+            "last_rate_limits_text": "",
+            "last_rate_limits_tooltip": "",
         },
         "github": {
             "username": "",

@@ -96,6 +96,8 @@ _MENTION_CACHE_TTL_SECONDS = 8.0
 _BUBBLE_DEBUG_LOG_BASENAME = "codex-agent-bubble-debug.log"
 _RATE_LIMITS_DEBUG_LOG_BASENAME = "codex-agent-rate-limits-debug.log"
 _APP_ROOT = Path(__file__).resolve().parents[3]
+_PROMPT_USER_MESSAGE_START = "<tide_user_message>"
+_PROMPT_USER_MESSAGE_END = "</tide_user_message>"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _STREAM_RATE_LIMITS_RE = re.compile(
     r"5h:\s*(\d{1,3})%\s*remaining.*?(?:weekly|week):\s*(\d{1,3})%\s*remaining",
@@ -113,6 +115,16 @@ _ROLE_LABELS = {
 }
 
 
+def _normalize_rate_limits_display(text: object) -> str:
+    normalized = str(text or "").strip()
+    return normalized or _RATE_LIMITS_UNAVAILABLE
+
+
+def _normalize_rate_limits_tooltip(text: object) -> str:
+    normalized = str(text or "").strip()
+    return normalized or "Rate limit data unavailable"
+
+
 def _timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
@@ -126,6 +138,11 @@ def _normalize_newlines(text: str) -> str:
     source = source.replace("\r\n", "\n").replace("\r", "\n")
     source = source.replace("\u2028", "\n").replace("\u2029", "\n")
     return source
+
+
+def _wrap_user_prompt_text(text: str) -> str:
+    body = _normalize_newlines(str(text or "")).strip("\n")
+    return f"{_PROMPT_USER_MESSAGE_START}\n{body}\n{_PROMPT_USER_MESSAGE_END}"
 
 
 @dataclass(slots=True)
@@ -944,6 +961,7 @@ class CodexAgentDockWidget(QWidget):
         self._prompt_echo_index = 0
         self._prompt_echo_source_text = ""
         self._latest_assistant_bubble_text = ""
+        self._forced_bubble_role_boundary: str | None = None
         self._transcript_entries: list[_TranscriptEntry] = []
         self._transcript_bubbles: list[ChatMarkdownBubble] = []
         self._turn_changed_files: list[str] = []
@@ -960,6 +978,8 @@ class CodexAgentDockWidget(QWidget):
         self._sessions_refresh_token = 0
         self._rate_limits_refresh_token = 0
         self._transcript_scroll_pending = False
+        self._last_rate_limits_text = _RATE_LIMITS_UNAVAILABLE
+        self._last_rate_limits_tooltip = "Rate limit data unavailable"
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1180,6 +1200,7 @@ class CodexAgentDockWidget(QWidget):
 
     def _clear_transcript(self) -> None:
         self._transcript_entries.clear()
+        self._forced_bubble_role_boundary = None
         self._pending_diff_lines.clear()
         while self._transcript_layout.count() > 1:
             item = self._transcript_layout.takeAt(0)
@@ -1383,6 +1404,12 @@ class CodexAgentDockWidget(QWidget):
             session_id = str(data.get("session_id") or "").strip()
             self._session_id = session_id or None
             self._session_project = str(data.get("session_project_dir") or "").strip()
+            self._last_rate_limits_text = _normalize_rate_limits_display(
+                data.get("last_rate_limits_text")
+            )
+            self._last_rate_limits_tooltip = _normalize_rate_limits_tooltip(
+                data.get("last_rate_limits_tooltip")
+            )
             self._session_options_signature = (
                 self._active_options_signature() if self._session_id else None
             )
@@ -1415,11 +1442,35 @@ class CodexAgentDockWidget(QWidget):
             "permission_mode": permission_mode,
             "session_id": str(self._session_id or ""),
             "session_project_dir": str(self._session_project or ""),
+            "last_rate_limits_text": str(self._last_rate_limits_text or ""),
+            "last_rate_limits_tooltip": str(self._last_rate_limits_tooltip or ""),
         }
         try:
             self._settings_saver(payload)
         except Exception:
             pass
+
+    def _apply_rate_limits_label(
+        self,
+        text: str,
+        tooltip: str,
+        *,
+        remember: bool,
+    ) -> None:
+        normalized_text = _normalize_rate_limits_display(text)
+        normalized_tooltip = _normalize_rate_limits_tooltip(tooltip)
+        self.rate_limits_label.setText(normalized_text)
+        self.rate_limits_label.setToolTip(normalized_tooltip)
+        if not remember or normalized_text == _RATE_LIMITS_UNAVAILABLE:
+            return
+        changed = (
+            normalized_text != self._last_rate_limits_text
+            or normalized_tooltip != self._last_rate_limits_tooltip
+        )
+        self._last_rate_limits_text = normalized_text
+        self._last_rate_limits_tooltip = normalized_tooltip
+        if changed:
+            self._schedule_persist_settings()
 
     def _project_dir(self) -> Path | None:
         raw = self._project_dir_provider() if callable(self._project_dir_provider) else ""
@@ -1726,6 +1777,13 @@ class CodexAgentDockWidget(QWidget):
     @staticmethod
     def _extract_user_visible_text(text: str) -> str:
         source = str(text or "").strip()
+        start_index = source.find(_PROMPT_USER_MESSAGE_START)
+        if start_index >= 0:
+            start_index += len(_PROMPT_USER_MESSAGE_START)
+            end_index = source.find(_PROMPT_USER_MESSAGE_END, start_index)
+            if end_index >= 0:
+                return source[start_index:end_index].strip()
+            return source[start_index:].strip()
         marker = "User message:\n"
         index = source.find(marker)
         if index >= 0:
@@ -1970,6 +2028,7 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_index = 0
         self._clear_prompt_echo_suppression()
         self._latest_assistant_bubble_text = ""
+        self._forced_bubble_role_boundary = None
         self._reset_bubble_debug_log()
         self._clear_transcript()
         for role, text, stamp in bubbles:
@@ -2311,12 +2370,12 @@ class CodexAgentDockWidget(QWidget):
             return (
                 f"{preamble}\n\nProject path: {project}\n\n"
                 f"{attachment_block}"
-                f"User message:\n{user_text}\n"
+                f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
             )
         return (
             f"Project path: {project}\n\n"
             f"{attachment_block}"
-            f"User message:\n{user_text}\n"
+            f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
         )
 
     @staticmethod
@@ -2330,9 +2389,9 @@ class CodexAgentDockWidget(QWidget):
             return (
                 "Attached files (staged for this turn):\n"
                 f"{attachment_block}\n\n"
-                f"User message:\n{user_text}\n"
+                f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
             )
-        return f"{user_text}\n"
+        return f"{_wrap_user_prompt_text(user_text)}\n"
 
     def _refresh_session_ui(self) -> None:
         if self._session_id:
@@ -2360,6 +2419,106 @@ class CodexAgentDockWidget(QWidget):
         self._prompt_echo_expected_lines = []
         self._prompt_echo_index = 0
         self._prompt_echo_source_text = ""
+    def _advance_prompt_echo_index_to_line(self, target: str) -> bool:
+        expected = self._prompt_echo_expected_lines
+        index = max(0, int(self._prompt_echo_index))
+        for offset in range(index, len(expected)):
+            if str(expected[offset] or "").strip() == target:
+                self._prompt_echo_index = offset + 1
+                if self._prompt_echo_index >= len(expected):
+                    self._clear_prompt_echo_suppression()
+                return True
+        return False
+
+    def _mark_forced_bubble_boundary(self, role: str) -> None:
+        self._forced_bubble_role_boundary = str(role or "").strip() or None
+
+    def _consume_forced_bubble_boundary(self, role: str) -> bool:
+        wanted = str(self._forced_bubble_role_boundary or "").strip()
+        if not wanted:
+            return False
+        matches = wanted == str(role or "").strip()
+        if matches:
+            self._forced_bubble_role_boundary = None
+        return matches
+
+    def _sync_latest_assistant_bubble_text(self) -> None:
+        for entry in reversed(self._transcript_entries):
+            if str(entry.role or "").strip() == "assistant":
+                self._latest_assistant_bubble_text = str(entry.text or "")
+                return
+        self._latest_assistant_bubble_text = ""
+
+    @staticmethod
+    def _is_replay_prune_role(role: str) -> bool:
+        return str(role or "").strip() in {"assistant", "thinking", "tools", "diff"}
+
+    @classmethod
+    def _entries_match_for_replay(cls, left: _TranscriptEntry, right: _TranscriptEntry) -> bool:
+        return (
+            cls._is_replay_prune_role(left.role)
+            and cls._is_replay_prune_role(right.role)
+            and str(left.role or "").strip() == str(right.role or "").strip()
+            and left.timestamp is None
+            and right.timestamp is None
+            and str(left.text or "") == str(right.text or "")
+        )
+
+    def _remove_transcript_tail_entries(self, count: int) -> None:
+        remove_count = max(0, int(count))
+        for _ in range(remove_count):
+            if self._transcript_bubbles:
+                bubble = self._transcript_bubbles.pop()
+                self._transcript_layout.removeWidget(bubble)
+                bubble.deleteLater()
+            if self._transcript_entries:
+                self._transcript_entries.pop()
+        self._sync_latest_assistant_bubble_text()
+
+    def _prune_replayed_transcript_tail(self) -> None:
+        total = len(self._transcript_entries)
+        max_tail = min(3, total // 2)
+        for tail_size in range(max_tail, 0, -1):
+            first_half = self._transcript_entries[total - (tail_size * 2) : total - tail_size]
+            second_half = self._transcript_entries[total - tail_size :]
+            if len(first_half) != tail_size or len(second_half) != tail_size:
+                continue
+            if all(
+                self._entries_match_for_replay(left, right)
+                for left, right in zip(first_half, second_half)
+            ):
+                self._remove_transcript_tail_entries(tail_size)
+                return
+
+    @staticmethod
+    def _collapse_adjacent_repeated_suffix(text: str, *, max_lines: int = 80) -> str:
+        lines = str(text or "").splitlines()
+        total = len(lines)
+        if total < 4:
+            return str(text or "")
+        max_tail = min(int(max_lines), total // 2)
+        for tail_size in range(max_tail, 1, -1):
+            first_half = lines[total - (tail_size * 2) : total - tail_size]
+            second_half = lines[total - tail_size :]
+            if first_half != second_half:
+                continue
+            if not any(str(line).strip() for line in second_half):
+                continue
+            return "\n".join(lines[: total - tail_size])
+        return str(text or "")
+
+    def _prune_repeated_suffix_in_last_entry(self) -> None:
+        if not self._transcript_entries or not self._transcript_bubbles:
+            return
+        entry = self._transcript_entries[-1]
+        if not self._is_replay_prune_role(entry.role):
+            return
+        collapsed = self._collapse_adjacent_repeated_suffix(entry.text)
+        if collapsed == str(entry.text or ""):
+            return
+        entry.text = collapsed
+        self._transcript_bubbles[-1].set_text(collapsed)
+        self._sync_latest_assistant_bubble_text()
 
     @staticmethod
     def _paraphrase_overlap_score(source: str, candidate: str) -> float:
@@ -2380,29 +2539,22 @@ class CodexAgentDockWidget(QWidget):
         five_hour = max(0, min(100, int(match.group(1))))
         weekly = max(0, min(100, int(match.group(2))))
         label = f"5h: {five_hour}% remaining | Weekly: {weekly}% remaining"
-        self.rate_limits_label.setText(label)
-        self.rate_limits_label.setToolTip("Live rate limits from Codex output")
+        self._apply_rate_limits_label(label, "Live rate limits from Codex output", remember=True)
 
     def _consume_prompt_echo_line(self, line: str) -> bool:
         if not self._suppress_prompt_echo:
             return False
+        incoming = str(line or "").strip()
+        if not incoming:
+            return True
         expected = self._prompt_echo_expected_lines
         index = int(self._prompt_echo_index)
         if index < 0 or index >= len(expected):
             self._clear_prompt_echo_suppression()
             return False
-        incoming = str(line or "").strip()
-        if not incoming:
-            return True
         wanted = str(expected[index] or "").strip()
         if incoming != wanted:
-            if index == 0:
-                overlap = self._paraphrase_overlap_score(self._prompt_echo_source_text, incoming)
-                if overlap >= 0.6 and len(incoming) <= 220:
-                    self._clear_prompt_echo_suppression()
-                    return True
-            self._clear_prompt_echo_suppression()
-            return False
+            return self._advance_prompt_echo_index_to_line(incoming)
         self._prompt_echo_index = index + 1
         if self._prompt_echo_index >= len(expected):
             self._clear_prompt_echo_suppression()
@@ -2444,8 +2596,10 @@ class CodexAgentDockWidget(QWidget):
             return
         line = str(text).rstrip("\n")
         last_entry = self._transcript_entries[-1] if self._transcript_entries else None
+        force_boundary = self._consume_forced_bubble_boundary(role)
         can_merge = (
             merge
+            and not force_boundary
             and timestamp is None
             and last_entry is not None
             and last_entry.role == role
@@ -2463,11 +2617,13 @@ class CodexAgentDockWidget(QWidget):
                 self._latest_assistant_bubble_text = str(last_entry.text or "")
             if self._transcript_bubbles:
                 self._transcript_bubbles[-1].append_line(line)
+                self._prune_repeated_suffix_in_last_entry()
             self._append_bubble_debug_log(
                 role=str(last_entry.role),
                 text=line,
                 event="append",
             )
+            self._prune_replayed_transcript_tail()
         else:
             entry = _TranscriptEntry(
                 role=role,
@@ -2486,6 +2642,7 @@ class CodexAgentDockWidget(QWidget):
                 text=str(entry.text or line),
                 event="bubble",
             )
+            self._prune_replayed_transcript_tail()
         self._schedule_transcript_render(scroll_to_bottom=True)
 
     def _on_bubble_link_activated(self, href: str) -> None:
@@ -2686,6 +2843,7 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_index = 0
         self._clear_prompt_echo_suppression()
         self._latest_assistant_bubble_text = ""
+        self._forced_bubble_role_boundary = None
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
         self._reset_bubble_debug_log()
@@ -2780,6 +2938,7 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
         self._clear_prompt_echo_suppression()
+        self._forced_bubble_role_boundary = None
         attachment_refs, attachment_failures = self._stage_attachments_for_turn(project)
         if attachment_failures:
             self._add_bubble(
@@ -2861,6 +3020,8 @@ class CodexAgentDockWidget(QWidget):
         raw_line = str(line or "")
         stripped = raw_line.strip()
         self._capture_rate_limits_from_stream_line(stripped)
+        if self._consume_prompt_echo_line(raw_line):
+            return
         marker = stripped[:-1].strip() if stripped.endswith(":") else stripped
         self._capture_changed_files_from_line(raw_line)
 
@@ -2889,23 +3050,31 @@ class CodexAgentDockWidget(QWidget):
             if marker == "tools":
                 self._clear_prompt_echo_suppression()
                 self._stream_mode = "tools"
+                self._mark_forced_bubble_boundary("tools")
             elif marker == "diff":
                 self._clear_prompt_echo_suppression()
                 self._stream_mode = "diff"
+                self._mark_forced_bubble_boundary("diff")
             else:
                 self._stream_mode = "assistant"
+                if marker == "assistant":
+                    self._mark_forced_bubble_boundary("assistant")
+                elif marker == "user":
+                    self._mark_forced_bubble_boundary("user")
             return
         if marker == "thinking":
             self._clear_prompt_echo_suppression()
             self._stream_mode = "thinking"
+            self._mark_forced_bubble_boundary("thinking")
             return
         if marker == "codex":
-            self._clear_prompt_echo_suppression()
             self._stream_mode = "assistant"
+            self._mark_forced_bubble_boundary("assistant")
             return
         if marker == "exec":
             self._clear_prompt_echo_suppression()
             self._stream_mode = "tools"
+            self._mark_forced_bubble_boundary("tools")
             return
         if stripped.startswith("tokens used"):
             self._stream_mode = "meta_tokens"
@@ -2924,10 +3093,7 @@ class CodexAgentDockWidget(QWidget):
             self._suppress_post_tokens_echo = False
             self._post_tokens_replay_expected_lines = []
             self._post_tokens_replay_index = 0
-        if role == "assistant":
-            if self._consume_prompt_echo_line(raw_line):
-                return
-        elif role != "meta":
+        if role != "assistant" and role != "meta":
             self._clear_prompt_echo_suppression()
         self._add_bubble(role, raw_line, merge=True)
 
@@ -3060,8 +3226,11 @@ class CodexAgentDockWidget(QWidget):
     def _update_rate_limits_label(self) -> None:
         session_id = str(self._session_id or "").strip()
         if not session_id:
-            self.rate_limits_label.setText(_RATE_LIMITS_UNAVAILABLE)
-            self.rate_limits_label.setToolTip("Rate limit data unavailable")
+            self._apply_rate_limits_label(
+                self._last_rate_limits_text,
+                self._last_rate_limits_tooltip,
+                remember=False,
+            )
             self._append_rate_limits_debug_log("update: no active session id, set unavailable")
             return
         self._rate_limits_refresh_token += 1
@@ -3086,11 +3255,13 @@ class CodexAgentDockWidget(QWidget):
         if isinstance(result, tuple) and len(result) == 2:
             text = str(result[0] or _RATE_LIMITS_UNAVAILABLE)
             tooltip = str(result[1] or "Rate limit data unavailable")
+            if text == _RATE_LIMITS_UNAVAILABLE and self._last_rate_limits_text != _RATE_LIMITS_UNAVAILABLE:
+                text = self._last_rate_limits_text
+                tooltip = self._last_rate_limits_tooltip
         else:
-            text = _RATE_LIMITS_UNAVAILABLE
-            tooltip = "Rate limit data unavailable"
-        self.rate_limits_label.setText(text)
-        self.rate_limits_label.setToolTip(tooltip)
+            text = self._last_rate_limits_text
+            tooltip = self._last_rate_limits_tooltip
+        self._apply_rate_limits_label(text, tooltip, remember=True)
         self._append_rate_limits_debug_log(
             f"update: applied token={token} elapsed_ms={elapsed_ms} text='{text}'"
         )
@@ -3105,6 +3276,7 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
         self._clear_prompt_echo_suppression()
+        self._forced_bubble_role_boundary = None
         self._update_rate_limits_label()
         self._append_turn_changed_files_bubble()
         if int(code) == 0:

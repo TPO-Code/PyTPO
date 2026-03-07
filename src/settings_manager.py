@@ -364,6 +364,8 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "codex_agent.permission_mode": "codex_agent.permission_mode",
     "codex_agent.session_id": "codex_agent.session_id",
     "codex_agent.session_project_dir": "codex_agent.session_project_dir",
+    "codex_agent.last_rate_limits_text": "codex_agent.last_rate_limits_text",
+    "codex_agent.last_rate_limits_tooltip": "codex_agent.last_rate_limits_tooltip",
     "github": "github",
     "github.username": "github.username",
     "github.use_token_for_git": "github.use_token_for_git",
@@ -1305,6 +1307,8 @@ class SettingsManager:
         codex_agent["permission_mode"] = permission_mode
         codex_agent["session_id"] = str(codex_agent.get("session_id") or "").strip()
         codex_agent["session_project_dir"] = str(codex_agent.get("session_project_dir") or "").strip()
+        codex_agent["last_rate_limits_text"] = str(codex_agent.get("last_rate_limits_text") or "").strip()
+        codex_agent["last_rate_limits_tooltip"] = str(codex_agent.get("last_rate_limits_tooltip") or "").strip()
         data["codex_agent"] = codex_agent
 
         github = data.get("github")

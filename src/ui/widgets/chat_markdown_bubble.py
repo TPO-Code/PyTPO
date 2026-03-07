@@ -81,6 +81,17 @@ class _MarkdownBubbleBody(QTextEdit):
         self._sync_height()
 
 
+class _BubblePreviewLabel(QLabel):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ChatMarkdownBubble(QFrame):
     sizeHintChanged = Signal()
     _DIFF_SCROLL_THRESHOLD_LINES = 20
@@ -99,7 +110,7 @@ class ChatMarkdownBubble(QFrame):
         self.timestamp = timestamp
         self._text = ""
         self._link_activated = link_activated
-        self._collapsible = role == "tools"
+        self._collapsible = role in {"tools", "diff"}
         self._collapsed = self._collapsible
         self._show_header = self._collapsible or bool(timestamp) or role != "assistant"
 
@@ -138,11 +149,16 @@ class ChatMarkdownBubble(QFrame):
         if header_row is not None:
             layout.addLayout(header_row)
 
-        self.preview = QLabel("")
+        self.preview = _BubblePreviewLabel("")
         self.preview.setObjectName("codexBubblePreview")
         self.preview.setStyleSheet("background-color: transparent;")
         self.preview.setWordWrap(False)
         self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.preview.setTextFormat(Qt.RichText if role == "diff" else Qt.AutoText)
+        self.preview.setCursor(
+            Qt.PointingHandCursor if self._collapsible else Qt.IBeamCursor
+        )
+        self.preview.clicked.connect(self._toggle_collapsed)
         self.preview.setVisible(False)
         layout.addWidget(self.preview)
 
@@ -162,6 +178,13 @@ class ChatMarkdownBubble(QFrame):
             self._text = f"{self._text}\n{line}"
         else:
             self._text = line
+        self._refresh_rendered_text()
+
+    def set_text(self, text: str) -> None:
+        self._text = str(text or "").lstrip("\r\n")
+        self._refresh_rendered_text()
+
+    def _refresh_rendered_text(self) -> None:
         if self._collapsed:
             self.preview.setText(self._collapsed_preview_text())
             self._notify_size_hint_changed()
@@ -205,6 +228,8 @@ class ChatMarkdownBubble(QFrame):
         return len(source.splitlines())
 
     def _collapsed_preview_text(self) -> str:
+        if self.role == "diff":
+            return self._collapsed_diff_preview_html()
         for raw in str(self._text or "").splitlines():
             line = str(raw).strip()
             if line:
@@ -212,6 +237,40 @@ class ChatMarkdownBubble(QFrame):
                     return f"{line[:177].rstrip()}..."
                 return line
         return "(no output)"
+
+    def _collapsed_diff_preview_html(self) -> str:
+        file_label = "(unknown file)"
+        added = 0
+        removed = 0
+        for raw in str(self._text or "").splitlines():
+            line = str(raw)
+            if line.startswith("diff --git "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    candidate = parts[3].strip()
+                    if candidate.startswith("b/"):
+                        candidate = candidate[2:]
+                    file_label = candidate or file_label
+                    break
+            if line.startswith("+++ "):
+                candidate = line[4:].strip()
+                if candidate.startswith("b/"):
+                    candidate = candidate[2:]
+                if candidate != "/dev/null":
+                    file_label = candidate or file_label
+        for raw in str(self._text or "").splitlines():
+            if raw.startswith("+++") or raw.startswith("---"):
+                continue
+            if raw.startswith("+"):
+                added += 1
+            elif raw.startswith("-"):
+                removed += 1
+        escaped_file = html.escape(file_label)
+        return (
+            f'Diff: {escaped_file} '
+            f'<span style="color: #f2a7a7;">-{removed}</span> '
+            f'<span style="color: #b5cea8;">+{added}</span>'
+        )
 
     def _render_html(self) -> str:
         if self.role == "diff":
