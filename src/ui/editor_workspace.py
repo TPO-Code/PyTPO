@@ -44,7 +44,95 @@ class DocumentRecord:
     key: str
     document: QTextDocument
     file_path: str | None = None
+    reduced_capability_mode: bool = False
+    large_file_analysis: "LargeFileAnalysis | None" = None
     views: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+
+
+@dataclass(frozen=True)
+class LargeFileAnalysis:
+    path: str
+    size_bytes: int
+    line_count: int | None = None
+
+
+LARGE_FILE_WARNING_SIZE_BYTES = 1024 * 1024
+LARGE_FILE_WARNING_LINE_THRESHOLD = 20000
+_LARGE_FILE_LINE_SCAN_CHUNK_BYTES = 256 * 1024
+
+
+def _format_byte_count(size_bytes: int) -> str:
+    value = max(0, int(size_bytes))
+    units = ("B", "KB", "MB", "GB")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            break
+        size /= 1024.0
+    if unit == "B":
+        return f"{int(size)} {unit}"
+    return f"{size:.1f} {unit}"
+
+
+def analyze_large_text_file(path: str) -> LargeFileAnalysis | None:
+    cpath = str(path or "").strip()
+    if not cpath or not os.path.exists(cpath):
+        return None
+    try:
+        size_bytes = int(os.path.getsize(cpath))
+    except Exception:
+        return None
+
+    warn_for_size = size_bytes >= LARGE_FILE_WARNING_SIZE_BYTES
+    line_count: int | None = None
+    if not warn_for_size:
+        try:
+            count = 0
+            with open(cpath, "rb") as handle:
+                while True:
+                    chunk = handle.read(_LARGE_FILE_LINE_SCAN_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    count += int(chunk.count(b"\n"))
+                    if count > LARGE_FILE_WARNING_LINE_THRESHOLD:
+                        line_count = count + 1
+                        break
+            if line_count is None and count > LARGE_FILE_WARNING_LINE_THRESHOLD:
+                line_count = count + 1
+        except Exception:
+            line_count = None
+
+    if not warn_for_size and (line_count is None or line_count <= LARGE_FILE_WARNING_LINE_THRESHOLD):
+        return None
+    return LargeFileAnalysis(path=cpath, size_bytes=size_bytes, line_count=line_count)
+
+
+def prompt_large_file_open(parent: QWidget | None, analysis: LargeFileAnalysis) -> tuple[bool, bool]:
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle("Large File")
+    msg.setText("This file is large and may make the editor unresponsive.")
+    details = [
+        f"File: {os.path.basename(analysis.path)}",
+        f"Size: {_format_byte_count(analysis.size_bytes)}",
+    ]
+    if analysis.line_count is not None:
+        details.append(f"Lines: {int(analysis.line_count):,}+")
+    msg.setInformativeText(
+        "\n".join(details)
+        + "\n\nReduced capability mode disables the heaviest editor features to improve responsiveness."
+    )
+    reduced_button = msg.addButton("Open Reduced Mode", QMessageBox.AcceptRole)
+    full_button = msg.addButton("Open Full", QMessageBox.DestructiveRole)
+    cancel_button = msg.addButton(QMessageBox.Cancel)
+    msg.setDefaultButton(reduced_button)
+    msg.setEscapeButton(cancel_button)
+    msg.exec()
+    clicked = msg.clickedButton()
+    if clicked is cancel_button:
+        return False, False
+    return True, bool(clicked is reduced_button)
 
 
 def _is_workspace_document_widget(widget: object) -> bool:
@@ -207,6 +295,10 @@ class EditorWidget(CodeEditor):
         self._workspace = workspace
         self._doc_record: DocumentRecord | None = None
         self._file_path_local: str | None = None
+        self._reduced_capability_mode = False
+        self._large_file_analysis: LargeFileAnalysis | None = None
+        self._saved_overview_cfg_for_reduced_mode: dict | None = None
+        self._saved_spellcheck_cfg_for_reduced_mode: dict | None = None
         self.editor_id = str(uuid.uuid4())
 
         self.setLineWrapMode(CodeEditor.LineWrapMode.NoWrap)
@@ -259,6 +351,52 @@ class EditorWidget(CodeEditor):
     def document_record(self) -> DocumentRecord | None:
         return self._doc_record
 
+    def is_reduced_capability_mode(self) -> bool:
+        return bool(self._reduced_capability_mode)
+
+    def large_file_analysis(self) -> LargeFileAnalysis | None:
+        return self._large_file_analysis
+
+    def apply_reduced_capability_mode(
+        self,
+        enabled: bool,
+        *,
+        analysis: LargeFileAnalysis | None = None,
+    ) -> None:
+        requested = bool(enabled)
+        self._large_file_analysis = analysis if requested else None
+        if requested == self._reduced_capability_mode:
+            if self._doc_record is not None:
+                self._doc_record.reduced_capability_mode = requested
+                self._doc_record.large_file_analysis = self._large_file_analysis
+            return
+
+        self._reduced_capability_mode = requested
+        if requested:
+            self._saved_overview_cfg_for_reduced_mode = dict(getattr(self, "_overview_cfg", {}))
+            self._saved_spellcheck_cfg_for_reduced_mode = dict(getattr(self, "_spellcheck_visual_cfg", {}))
+            self.set_occurrence_highlighting_enabled(False)
+            self.set_code_folding_enabled(False)
+            self.set_syntax_highlighting_enabled(False)
+            self.update_overview_marker_settings(
+                dict(self._saved_overview_cfg_for_reduced_mode, enabled=False)
+            )
+            self.update_spellcheck_visual_settings(
+                dict(self._saved_spellcheck_cfg_for_reduced_mode, enabled=False)
+            )
+        else:
+            self.set_syntax_highlighting_enabled(True)
+            self.set_code_folding_enabled(True)
+            self.set_occurrence_highlighting_enabled(True)
+            if isinstance(self._saved_overview_cfg_for_reduced_mode, dict):
+                self.update_overview_marker_settings(self._saved_overview_cfg_for_reduced_mode)
+            if isinstance(self._saved_spellcheck_cfg_for_reduced_mode, dict):
+                self.update_spellcheck_visual_settings(self._saved_spellcheck_cfg_for_reduced_mode)
+
+        if self._doc_record is not None:
+            self._doc_record.reduced_capability_mode = requested
+            self._doc_record.large_file_analysis = self._large_file_analysis
+
     def attach_document_record(self, record: DocumentRecord, *, adopt_current_document: bool = False):
         if not isinstance(record, DocumentRecord):
             return
@@ -274,6 +412,10 @@ class EditorWidget(CodeEditor):
         self._doc_record = record
         record.views.add(self)
         self._file_path_local = record.file_path
+        self.apply_reduced_capability_mode(
+            bool(record.reduced_capability_mode),
+            analysis=record.large_file_analysis,
+        )
 
         if adopt_current_document:
             record.document = self.document()
@@ -298,7 +440,14 @@ class EditorWidget(CodeEditor):
     def display_name(self) -> str:
         return os.path.basename(self.file_path) if self.file_path else "File"
 
-    def load_file(self, path: str, *, show_errors: bool = True) -> bool:
+    def load_file(
+        self,
+        path: str,
+        *,
+        show_errors: bool = True,
+        reduced_capability_mode: bool = False,
+        large_file_analysis: LargeFileAnalysis | None = None,
+    ) -> bool:
         if not os.path.exists(path):
             if show_errors:
                 QMessageBox.warning(self, "Open Error", f"File does not exist:\n{path}")
@@ -306,9 +455,12 @@ class EditorWidget(CodeEditor):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.setPlainText(f.read())
+            self.apply_reduced_capability_mode(
+                reduced_capability_mode,
+                analysis=large_file_analysis,
+            )
             self.file_path = path
             self.document().setModified(False)
-            self.set_file_path(path)
             return True
         except Exception as e:
             if show_errors:
@@ -1647,6 +1799,14 @@ class EditorWorkspace(QWidget):
                 return existing
         record = self._documents.get(cpath)
         if record is None:
+            reduced_capability_mode = False
+            large_file_analysis: LargeFileAnalysis | None = None
+            if os.path.exists(cpath):
+                large_file_analysis = analyze_large_text_file(cpath)
+                if large_file_analysis is not None:
+                    should_open, reduced_capability_mode = prompt_large_file_open(self, large_file_analysis)
+                    if not should_open:
+                        return None
             ed = EditorWidget(
                 None,
                 font_size=self._effective_font_size(font_size),
@@ -1654,7 +1814,12 @@ class EditorWorkspace(QWidget):
                 workspace=self,
             )
             if os.path.exists(cpath):
-                if not ed.load_file(cpath, show_errors=show_errors):
+                if not ed.load_file(
+                    cpath,
+                    show_errors=show_errors,
+                    reduced_capability_mode=reduced_capability_mode,
+                    large_file_analysis=large_file_analysis,
+                ):
                     ed.deleteLater()
                     return None
             else:
@@ -1663,6 +1828,8 @@ class EditorWorkspace(QWidget):
                 key=cpath,
                 document=ed.document(),
                 file_path=cpath,
+                reduced_capability_mode=bool(reduced_capability_mode),
+                large_file_analysis=large_file_analysis,
             )
             self._documents[cpath] = record
             self._adopt_record_document(record, fallback_editor=ed)

@@ -2472,7 +2472,15 @@ class PythonIDE(Window):
         if not callable(setter):
             return
         try:
-            setter(self.spellcheck_manager.visual_settings_payload())
+            payload = self.spellcheck_manager.visual_settings_payload()
+            reduced_getter = getattr(widget, "is_reduced_capability_mode", None)
+            if callable(reduced_getter):
+                try:
+                    if bool(reduced_getter()):
+                        payload = dict(payload, enabled=False)
+                except Exception:
+                    pass
+            setter(payload)
         except Exception:
             pass
 
@@ -2825,7 +2833,15 @@ class PythonIDE(Window):
         if not callable(setter):
             return
         try:
-            setter(self._editor_overview_config())
+            payload = self._editor_overview_config()
+            reduced_getter = getattr(ed, "is_reduced_capability_mode", None)
+            if callable(reduced_getter):
+                try:
+                    if bool(reduced_getter()):
+                        payload = dict(payload, enabled=False)
+                except Exception:
+                    pass
+            setter(payload)
         except Exception:
             pass
 
@@ -2857,7 +2873,8 @@ class PythonIDE(Window):
             self._request_lint_for_editor(ed, reason="idle", include_source_if_modified=True)
         elif self._is_tdoc_related_path(ed.file_path):
             self._schedule_tdoc_validation(ed.file_path)
-        self.spellcheck_manager.on_document_text_changed(ed)
+        if not ed.is_reduced_capability_mode():
+            self.spellcheck_manager.on_document_text_changed(ed)
         self._request_completion_for_editor(ed, reason="auto")
         self._request_ai_inline_for_editor(ed, reason="passive")
 
@@ -6048,6 +6065,11 @@ class PythonIDE(Window):
             self._schedule_tdoc_validation(cpath, delay_ms=0)
         self._refresh_runtime_action_states()
         self.spellcheck_manager.refresh_active_widget(immediate=True)
+        if isinstance(opened_editor, EditorWidget) and opened_editor.is_reduced_capability_mode():
+            self.statusBar().showMessage(
+                "Opened large file in reduced capability mode for better responsiveness.",
+                4200,
+            )
 
         QTimer.singleShot(0, self.apply_default_layout)
         QTimer.singleShot(80, self.apply_default_layout)

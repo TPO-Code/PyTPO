@@ -81,6 +81,7 @@ from .keypress_handlers import (
     language_enter_indent_adjustment,
 )
 from .syntax_highlighters import (
+    clear_editor_highlighter,
     ensure_highlighter as ensure_editor_highlighter,
     set_highlighter_for_file as set_editor_highlighter_for_file,
 )
@@ -98,6 +99,10 @@ _THEME_EDITOR_OVERVIEW_GAP_PROP = "theme.editor.overview.gap"
 _THEME_EDITOR_SEARCH_TOP_MARGIN_DEFAULT = 30
 _THEME_EDITOR_OVERVIEW_GAP_DEFAULT = 1
 _THEME_PX_RE = re.compile(r"^\s*(-?\d+)\s*(px)?\s*$", re.IGNORECASE)
+_OCCURRENCE_REFRESH_LINE_THRESHOLD = 15000
+_OCCURRENCE_REFRESH_CHAR_THRESHOLD = 900000
+_FOLD_AUTO_REFRESH_LINE_THRESHOLD = 12000
+_FOLD_AUTO_REFRESH_CHAR_THRESHOLD = 700000
 
 
 def _coerce_theme_px(value: object, *, default: int, minimum: int = 0) -> int:
@@ -421,6 +426,9 @@ class CodeEditor(QPlainTextEdit):
         self._editor_background_cache_pixmap: QPixmap | None = None
         self._change_region_dirty_lines: set[int] = set()
         self._change_region_uncommitted_lines: set[int] = set()
+        self._syntax_highlighting_enabled = True
+        self._folding_enabled = True
+        self._occurrence_highlighting_enabled = True
         self._change_region_dirty_color = parse_editor_overlay_color(
             DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
             DEFAULT_EDITOR_DIRTY_BACKGROUND_HEX,
@@ -625,6 +633,41 @@ class CodeEditor(QPlainTextEdit):
         self._apply_highlighter()
         self._apply_fold_provider()
 
+    def syntax_highlighting_enabled(self) -> bool:
+        return bool(self._syntax_highlighting_enabled)
+
+    def set_syntax_highlighting_enabled(self, enabled: bool) -> None:
+        requested = bool(enabled)
+        if requested == bool(self._syntax_highlighting_enabled):
+            return
+        self._syntax_highlighting_enabled = requested
+        self._apply_highlighter()
+        self.viewport().update()
+
+    def code_folding_enabled(self) -> bool:
+        return bool(self._folding_enabled)
+
+    def set_code_folding_enabled(self, enabled: bool) -> None:
+        requested = bool(enabled)
+        if requested == bool(self._folding_enabled):
+            return
+        self._folding_enabled = requested
+        self._apply_fold_provider()
+
+    def occurrence_highlighting_enabled(self) -> bool:
+        return bool(self._occurrence_highlighting_enabled)
+
+    def set_occurrence_highlighting_enabled(self, enabled: bool) -> None:
+        requested = bool(enabled)
+        if requested == bool(self._occurrence_highlighting_enabled):
+            return
+        self._occurrence_highlighting_enabled = requested
+        self._occurrence_refresh_timer.stop()
+        if requested:
+            self._schedule_occurrence_marker_refresh()
+            return
+        self._clear_occurrence_markers()
+
     def is_word_wrap_enabled(self) -> bool:
         return self.lineWrapMode() != QPlainTextEdit.LineWrapMode.NoWrap
 
@@ -659,9 +702,18 @@ class CodeEditor(QPlainTextEdit):
         self._rebuild_extra_selections()
 
     def _apply_highlighter(self):
+        if not self._syntax_highlighting_enabled:
+            clear_editor_highlighter(self)
+            return
         ensure_editor_highlighter(self)
 
     def _apply_fold_provider(self):
+        if not self._folding_enabled:
+            self._fold_provider = None
+            self._clear_folding()
+            self.updateLineNumberAreaWidth(0)
+            self.lineNumberArea.update()
+            return
         provider = get_fold_provider(self.language_id())
         self._fold_provider = provider
         if provider is None:
@@ -680,6 +732,9 @@ class CodeEditor(QPlainTextEdit):
 
     def _schedule_fold_refresh(self, immediate: bool = False):
         if self._fold_provider is None:
+            return
+        if not immediate and not self._automatic_fold_refresh_allowed():
+            self._fold_refresh_timer.stop()
             return
         if immediate:
             self._fold_refresh_timer.stop()
@@ -1617,27 +1672,24 @@ class CodeEditor(QPlainTextEdit):
             self._schedule_search_refresh(immediate=False)
 
     def _schedule_occurrence_marker_refresh(self):
-        if not bool(self._overview_cfg.get("enabled", True)):
+        if not self._automatic_occurrence_refresh_allowed():
+            self._occurrence_refresh_timer.stop()
+            self._clear_occurrence_markers()
             return
         self._occurrence_refresh_timer.start()
 
     def _refresh_occurrence_markers(self):
+        if not self._automatic_occurrence_refresh_allowed():
+            self._clear_occurrence_markers()
+            return
         term, pattern, flags = self._occurrence_pattern_from_cursor()
         if not term or not pattern:
-            self._overview_occurrence_term = ""
-            self._overview_occurrence_lines = set()
-            self._occurrence_highlight_selections = []
-            self._rebuild_extra_selections()
-            self._refresh_overview_marker_area()
+            self._clear_occurrence_markers()
             return
 
         source = self.toPlainText()
         if not source:
-            self._overview_occurrence_term = ""
-            self._overview_occurrence_lines = set()
-            self._occurrence_highlight_selections = []
-            self._rebuild_extra_selections()
-            self._refresh_overview_marker_area()
+            self._clear_occurrence_markers()
             return
 
         try:
@@ -1648,11 +1700,7 @@ class CodeEditor(QPlainTextEdit):
         try:
             regex = re.compile(pattern, flags)
         except Exception:
-            self._overview_occurrence_term = ""
-            self._overview_occurrence_lines = set()
-            self._occurrence_highlight_selections = []
-            self._rebuild_extra_selections()
-            self._refresh_overview_marker_area()
+            self._clear_occurrence_markers()
             return
 
         try:
@@ -1694,6 +1742,51 @@ class CodeEditor(QPlainTextEdit):
         self._occurrence_highlight_selections = highlights
         self._rebuild_extra_selections()
         self._refresh_overview_marker_area()
+
+    def _clear_occurrence_markers(self) -> None:
+        if (
+            not self._overview_occurrence_term
+            and not self._overview_occurrence_lines
+            and not self._occurrence_highlight_selections
+        ):
+            return
+        self._overview_occurrence_term = ""
+        self._overview_occurrence_lines = set()
+        self._occurrence_highlight_selections = []
+        self._rebuild_extra_selections()
+        self._refresh_overview_marker_area()
+
+    def _document_character_count(self) -> int:
+        try:
+            return max(0, int(self.document().characterCount()) - 1)
+        except Exception:
+            return len(self.toPlainText())
+
+    def _document_exceeds_threshold(self, *, line_threshold: int, char_threshold: int) -> bool:
+        try:
+            if int(self.document().blockCount()) > max(0, int(line_threshold)):
+                return True
+        except Exception:
+            pass
+        return self._document_character_count() > max(0, int(char_threshold))
+
+    def _automatic_occurrence_refresh_allowed(self) -> bool:
+        if not self._occurrence_highlighting_enabled:
+            return False
+        if not bool(self._overview_cfg.get("enabled", True)):
+            return False
+        return not self._document_exceeds_threshold(
+            line_threshold=_OCCURRENCE_REFRESH_LINE_THRESHOLD,
+            char_threshold=_OCCURRENCE_REFRESH_CHAR_THRESHOLD,
+        )
+
+    def _automatic_fold_refresh_allowed(self) -> bool:
+        if not self._folding_enabled:
+            return False
+        return not self._document_exceeds_threshold(
+            line_threshold=_FOLD_AUTO_REFRESH_LINE_THRESHOLD,
+            char_threshold=_FOLD_AUTO_REFRESH_CHAR_THRESHOLD,
+        )
 
     def _occurrence_pattern_from_cursor(self) -> tuple[str, str, int]:
         cur = self.textCursor()

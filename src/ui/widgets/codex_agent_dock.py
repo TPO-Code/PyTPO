@@ -939,10 +939,10 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines: list[str] = []
         self._post_tokens_replay_index = 0
-        self._suppress_user_echo = False
-        self._user_echo_expected_lines: list[str] = []
-        self._user_echo_index = 0
-        self._user_echo_source_text = ""
+        self._suppress_prompt_echo = False
+        self._prompt_echo_expected_lines: list[str] = []
+        self._prompt_echo_index = 0
+        self._prompt_echo_source_text = ""
         self._latest_assistant_bubble_text = ""
         self._transcript_entries: list[_TranscriptEntry] = []
         self._transcript_bubbles: list[ChatMarkdownBubble] = []
@@ -1968,7 +1968,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
-        self._clear_user_echo_suppression()
+        self._clear_prompt_echo_suppression()
         self._latest_assistant_bubble_text = ""
         self._reset_bubble_debug_log()
         self._clear_transcript()
@@ -2347,19 +2347,19 @@ class CodexAgentDockWidget(QWidget):
         self._post_tokens_replay_index = 0
         self._suppress_post_tokens_echo = bool(expected)
 
-    def _begin_user_echo_suppression(self, user_text: str) -> None:
-        source = str(user_text or "")
+    def _begin_prompt_echo_suppression(self, prompt_text: str) -> None:
+        source = str(prompt_text or "")
         expected = [line.strip() for line in source.splitlines() if line.strip()]
-        self._user_echo_expected_lines = expected
-        self._user_echo_index = 0
-        self._user_echo_source_text = source
-        self._suppress_user_echo = bool(expected)
+        self._prompt_echo_expected_lines = expected
+        self._prompt_echo_index = 0
+        self._prompt_echo_source_text = source
+        self._suppress_prompt_echo = bool(expected)
 
-    def _clear_user_echo_suppression(self) -> None:
-        self._suppress_user_echo = False
-        self._user_echo_expected_lines = []
-        self._user_echo_index = 0
-        self._user_echo_source_text = ""
+    def _clear_prompt_echo_suppression(self) -> None:
+        self._suppress_prompt_echo = False
+        self._prompt_echo_expected_lines = []
+        self._prompt_echo_index = 0
+        self._prompt_echo_source_text = ""
 
     @staticmethod
     def _paraphrase_overlap_score(source: str, candidate: str) -> float:
@@ -2383,13 +2383,13 @@ class CodexAgentDockWidget(QWidget):
         self.rate_limits_label.setText(label)
         self.rate_limits_label.setToolTip("Live rate limits from Codex output")
 
-    def _consume_user_echo_line(self, line: str) -> bool:
-        if not self._suppress_user_echo:
+    def _consume_prompt_echo_line(self, line: str) -> bool:
+        if not self._suppress_prompt_echo:
             return False
-        expected = self._user_echo_expected_lines
-        index = int(self._user_echo_index)
+        expected = self._prompt_echo_expected_lines
+        index = int(self._prompt_echo_index)
         if index < 0 or index >= len(expected):
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
             return False
         incoming = str(line or "").strip()
         if not incoming:
@@ -2397,15 +2397,15 @@ class CodexAgentDockWidget(QWidget):
         wanted = str(expected[index] or "").strip()
         if incoming != wanted:
             if index == 0:
-                overlap = self._paraphrase_overlap_score(self._user_echo_source_text, incoming)
+                overlap = self._paraphrase_overlap_score(self._prompt_echo_source_text, incoming)
                 if overlap >= 0.6 and len(incoming) <= 220:
-                    self._clear_user_echo_suppression()
+                    self._clear_prompt_echo_suppression()
                     return True
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
             return False
-        self._user_echo_index = index + 1
-        if self._user_echo_index >= len(expected):
-            self._clear_user_echo_suppression()
+        self._prompt_echo_index = index + 1
+        if self._prompt_echo_index >= len(expected):
+            self._clear_prompt_echo_suppression()
         return True
 
     def _consume_post_tokens_replay_line(self, line: str) -> bool:
@@ -2684,7 +2684,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
-        self._clear_user_echo_suppression()
+        self._clear_prompt_echo_suppression()
         self._latest_assistant_bubble_text = ""
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
@@ -2779,7 +2779,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
-        self._clear_user_echo_suppression()
+        self._clear_prompt_echo_suppression()
         attachment_refs, attachment_failures = self._stage_attachments_for_turn(project)
         if attachment_failures:
             self._add_bubble(
@@ -2796,7 +2796,6 @@ class CodexAgentDockWidget(QWidget):
             return
 
         self._add_bubble("user", user_text, timestamp=_timestamp())
-        self._begin_user_echo_suppression(user_text)
         if attachment_refs:
             self._add_bubble(
                 "meta",
@@ -2812,6 +2811,7 @@ class CodexAgentDockWidget(QWidget):
             command_template=run_command,
             prompt_text=prompt,
         )
+        self._begin_prompt_echo_suppression(prompt)
         self.input_edit.clear()
         self._runner.start(invocation)
         self._clear_selected_attachments_after_send()
@@ -2887,24 +2887,24 @@ class CodexAgentDockWidget(QWidget):
             return
         if marker in {"user", "assistant", "system", "meta", "tools", "diff"}:
             if marker == "tools":
-                self._clear_user_echo_suppression()
+                self._clear_prompt_echo_suppression()
                 self._stream_mode = "tools"
             elif marker == "diff":
-                self._clear_user_echo_suppression()
+                self._clear_prompt_echo_suppression()
                 self._stream_mode = "diff"
             else:
                 self._stream_mode = "assistant"
             return
         if marker == "thinking":
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
             self._stream_mode = "thinking"
             return
         if marker == "codex":
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
             self._stream_mode = "assistant"
             return
         if marker == "exec":
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
             self._stream_mode = "tools"
             return
         if stripped.startswith("tokens used"):
@@ -2925,10 +2925,10 @@ class CodexAgentDockWidget(QWidget):
             self._post_tokens_replay_expected_lines = []
             self._post_tokens_replay_index = 0
         if role == "assistant":
-            if self._consume_user_echo_line(raw_line):
+            if self._consume_prompt_echo_line(raw_line):
                 return
         elif role != "meta":
-            self._clear_user_echo_suppression()
+            self._clear_prompt_echo_suppression()
         self._add_bubble(role, raw_line, merge=True)
 
     def _append_raw(self, text: str) -> None:
@@ -3104,7 +3104,7 @@ class CodexAgentDockWidget(QWidget):
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []
         self._post_tokens_replay_index = 0
-        self._clear_user_echo_suppression()
+        self._clear_prompt_echo_suppression()
         self._update_rate_limits_label()
         self._append_turn_changed_files_bubble()
         if int(code) == 0:

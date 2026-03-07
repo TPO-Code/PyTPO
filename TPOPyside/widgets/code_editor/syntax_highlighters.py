@@ -1427,7 +1427,7 @@ LANGUAGE_HIGHLIGHTER_MAP: dict[str, type[QSyntaxHighlighter]] = {
 }
 
 
-def _clear_editor_highlighter(editor: "CodeEditor") -> None:
+def clear_editor_highlighter(editor: "CodeEditor") -> None:
     old = getattr(editor, "_highlighter", None)
     try:
         editor._highlighter = None
@@ -1445,7 +1445,7 @@ def _clear_editor_highlighter(editor: "CodeEditor") -> None:
 
 
 def set_language_highlighter(editor: "CodeEditor", language_id: str) -> None:
-    _clear_editor_highlighter(editor)
+    clear_editor_highlighter(editor)
 
     raw_language = str(language_id or "").strip().lower()
     highlighter_cls = LANGUAGE_HIGHLIGHTER_MAP.get(raw_language)
@@ -1493,6 +1493,7 @@ __all__ = [
     "SYNTAX_TOKEN_DEFAULTS",
     "SYNTAX_LANGUAGE_LABELS",
     "canonicalize_syntax_language",
+    "clear_editor_highlighter",
     "set_syntax_color_resolver",
     "syntax_language_labels",
     "syntax_token_defaults",

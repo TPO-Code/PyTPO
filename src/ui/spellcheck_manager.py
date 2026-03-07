@@ -247,8 +247,12 @@ class SpellcheckManager(QObject):
         self._active_widget_ref = weakref.ref(current) if current is not None else None
         if current is not None:
             self._apply_visual_settings_to_widget(current)
+            if self._widget_uses_reduced_capability_mode(current):
+                self._clear_widget_highlights(current)
 
         if not self._enabled or current is None:
+            return
+        if self._widget_uses_reduced_capability_mode(current):
             return
         self._schedule_check(immediate=immediate)
 
@@ -257,6 +261,9 @@ class SpellcheckManager(QObject):
             return
         target = self._coerce_spellcheck_widget(widget)
         if target is None:
+            return
+        if self._widget_uses_reduced_capability_mode(target):
+            self._clear_widget_highlights(target)
             return
         active = self._active_widget()
         if active is None or active is not target:
@@ -284,6 +291,8 @@ class SpellcheckManager(QObject):
     ) -> None:
         widget_obj = self._coerce_spellcheck_widget(widget)
         if widget_obj is None:
+            return
+        if self._widget_uses_reduced_capability_mode(widget_obj):
             return
         if not isinstance(menu_obj, QMenu):
             return
@@ -380,6 +389,9 @@ class SpellcheckManager(QObject):
             return
         widget = self._active_widget()
         if widget is None:
+            return
+        if self._widget_uses_reduced_capability_mode(widget):
+            self._clear_widget_highlights(widget)
             return
         text = self._document_text(widget)
         if not text:
@@ -645,9 +657,22 @@ class SpellcheckManager(QObject):
         if not callable(setter):
             return
         try:
-            setter(self.visual_settings_payload())
+            payload = self.visual_settings_payload()
+            if self._widget_uses_reduced_capability_mode(widget):
+                payload = dict(payload, enabled=False)
+            setter(payload)
         except Exception:
             pass
+
+    @staticmethod
+    def _widget_uses_reduced_capability_mode(widget: object) -> bool:
+        getter = getattr(widget, "is_reduced_capability_mode", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getter())
+        except Exception:
+            return False
 
     def _set_widget_diagnostics(
         self,
