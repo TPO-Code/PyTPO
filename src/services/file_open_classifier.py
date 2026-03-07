@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import mimetypes
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtGui import QImageReader
+from PySide6.QtMultimedia import QMediaFormat
 
 
 IMAGE_SUFFIXES: frozenset[str] = frozenset({
@@ -22,6 +25,7 @@ IMAGE_SUFFIXES: frozenset[str] = frozenset({
 class FileOpenKind(str, Enum):
     TEXT = "text"
     IMAGE = "image"
+    AUDIO = "audio"
     BINARY = "binary"
 
 
@@ -46,6 +50,34 @@ def is_image_file(path: str) -> bool:
         pass
 
     return is_image_extension(target)
+
+
+@lru_cache(maxsize=1)
+def supported_audio_suffixes() -> frozenset[str]:
+    suffixes: set[str] = set()
+    try:
+        formats = QMediaFormat().supportedFileFormats(QMediaFormat.ConversionMode.Decode)
+    except Exception:
+        formats = []
+
+    for file_format in formats:
+        try:
+            mime_name = QMediaFormat(file_format).mimeType().name()
+        except Exception:
+            mime_name = ""
+        if not mime_name.startswith("audio/"):
+            continue
+        for ext in mimetypes.guess_all_extensions(mime_name, strict=False):
+            clean = str(ext or "").strip().lower()
+            if clean.startswith(".") and len(clean) > 1:
+                suffixes.add(clean)
+
+    suffixes.update({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"})
+    return frozenset(suffixes)
+
+
+def is_audio_extension(path: str) -> bool:
+    return _canonical_suffix(path) in supported_audio_suffixes()
 
 
 def _sample_file_bytes(path: str, *, sample_size: int = 8192) -> bytes | None:
@@ -84,6 +116,8 @@ def is_probably_text_file(path: str) -> bool:
 def classify_file_for_open(path: str) -> FileOpenKind:
     if is_image_file(path):
         return FileOpenKind.IMAGE
+    if is_audio_extension(path):
+        return FileOpenKind.AUDIO
     if is_probably_text_file(path):
         return FileOpenKind.TEXT
     return FileOpenKind.BINARY

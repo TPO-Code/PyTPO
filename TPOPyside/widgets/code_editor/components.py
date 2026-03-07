@@ -107,31 +107,31 @@ class _EditorSearchBar(QFrame):
         self._replace_visible = False
         self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName("editorSearchBar")
-        self.setStyleSheet(
-            """
-            QFrame#editorSearchBar {
-                background: #252526;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-            }
-            QLineEdit, QPushButton, QCheckBox {
-                font-size: 10pt;
-            }
-            QLineEdit {
-                min-height: 24px;
-                padding: 2px 6px;
-                border: 1px solid #4a4a4a;
-                background: #1e1e1e;
-            }
-            QPushButton {
-                min-height: 24px;
-                padding: 0 8px;
-            }
-            QCheckBox {
-                spacing: 4px;
-            }
-            """
-        )
+        # self.setStyleSheet(
+            # """
+            # QFrame#editorSearchBar {
+                # background: #252526;
+                # border: 1px solid #3a3a3a;
+                # border-radius: 4px;
+            # }
+            # QLineEdit, QPushButton, QCheckBox {
+                # font-size: 10pt;
+            # }
+            # QLineEdit {
+                # min-height: 24px;
+                # padding: 2px 6px;
+                # border: 1px solid #4a4a4a;
+                # background: #1e1e1e;
+            # }
+            # QPushButton {
+                # min-height: 24px;
+                # padding: 0 8px;
+            # }
+            # QCheckBox {
+                # spacing: 4px;
+            # }
+            # """
+        # )
 
         self.find_edit = _build_search_line_edit(self._editor, self, role="find")
         self.find_edit.setPlaceholderText("Find")

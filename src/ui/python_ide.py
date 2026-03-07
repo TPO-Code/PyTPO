@@ -80,6 +80,7 @@ from src.ui.widgets.codex_agent_dock import CodexAgentDockWidget
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.image_viewer import ImageViewerWidget
 from src.ui.widgets.markdown_editor_tab import MarkdownEditorTab
+from src.ui.widgets.sound_player_editor import SoundPlayerEditorWidget
 from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
@@ -1264,6 +1265,7 @@ class PythonIDE(Window):
 
         widget = CodexAgentDockWidget(
             project_dir_provider=lambda: str(self.project_root or ""),
+            tree_path_excluded_predicate=self._is_tree_path_excluded,
             settings_provider=self._codex_agent_settings,
             settings_saver=self._save_codex_agent_settings,
             file_opener=self._open_codex_agent_file,
@@ -2801,6 +2803,22 @@ class PythonIDE(Window):
             setter(color)
         except Exception:
             pass
+
+    def _open_sound_player_tab(self, cpath: str, *, show_errors: bool) -> SoundPlayerEditorWidget | None:
+        viewer = SoundPlayerEditorWidget(parent=self.editor_workspace)
+        if not viewer.load_file(cpath):
+            viewer.deleteLater()
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "Open Audio",
+                    f"Could not open audio file:\n{cpath}",
+                )
+            return None
+        self._apply_image_viewer_background_to_widget(viewer)
+        tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+        tabs.add_editor(viewer)
+        return viewer
 
     def _apply_editor_overview_settings_to_editor(self, ed: object) -> None:
         setter = getattr(ed, "update_overview_marker_settings", None)
@@ -5999,6 +6017,8 @@ class PythonIDE(Window):
         opened: QWidget | None
         if kind is FileOpenKind.IMAGE:
             opened = self._open_image_viewer_tab(cpath, show_errors=show_errors)
+        elif kind is FileOpenKind.AUDIO:
+            opened = self._open_sound_player_tab(cpath, show_errors=show_errors)
         elif kind is FileOpenKind.TEXT:
             if self._is_markdown_file_path(cpath):
                 opened = self._open_markdown_editor_tab(cpath, show_errors=show_errors)
@@ -6500,7 +6520,7 @@ class PythonIDE(Window):
                     clear_inline = getattr(widget, "clear_inline_suggestion", None)
                     if callable(clear_inline):
                         clear_inline()
-            elif isinstance(widget, ImageViewerWidget):
+            elif isinstance(widget, (ImageViewerWidget, SoundPlayerEditorWidget)):
                 self._apply_image_viewer_background_to_widget(widget)
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._track_widget_change_highlights(self.commit_md_editor)

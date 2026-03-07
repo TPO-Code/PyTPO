@@ -912,6 +912,7 @@ class CodexAgentDockWidget(QWidget):
         self,
         *,
         project_dir_provider: Callable[[], str],
+        tree_path_excluded_predicate: Callable[[str, bool], bool] | None = None,
         settings_provider: Callable[[], dict[str, Any]],
         settings_saver: Callable[[dict[str, Any]], None],
         file_opener: Callable[[str], None] | None = None,
@@ -919,6 +920,7 @@ class CodexAgentDockWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self._project_dir_provider = project_dir_provider
+        self._tree_path_excluded_predicate = tree_path_excluded_predicate
         self._settings_provider = settings_provider
         self._settings_saver = settings_saver
         self._file_opener = file_opener
@@ -1006,27 +1008,13 @@ class CodexAgentDockWidget(QWidget):
         self.chat_splitter = QSplitter(Qt.Vertical)
         self.chat_splitter.setChildrenCollapsible(False)
         self.chat_splitter.setHandleWidth(7)
-        self.chat_splitter.setStyleSheet(
-            """
-            QSplitter::handle:vertical { background: #273140; }
-            QSplitter::handle:vertical:hover { background: #324055; }
-            """
-        )
-
+        
         self.transcript_scroll = QScrollArea()
         self.transcript_scroll.setObjectName("codexTranscript")
         self.transcript_scroll.setWidgetResizable(True)
         self.transcript_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.transcript_scroll.verticalScrollBar().setSingleStep(18)
-        self.transcript_scroll.setStyleSheet(
-            """
-            QScrollArea#codexTranscript {
-                background: #0f131a;
-                border: 1px solid #2c3440;
-                border-radius: 0px;
-            }
-            """
-        )
+        
         self._transcript_container = QWidget()
         self._transcript_layout = QVBoxLayout(self._transcript_container)
         self._transcript_layout.setContentsMargins(8, 8, 8, 8)
@@ -1069,6 +1057,12 @@ class CodexAgentDockWidget(QWidget):
         input_row.setSpacing(8)
         self.input_hint_label = QLabel("Enter: new line  |  Ctrl+Enter: send")
         self.input_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.rate_limits_label = QLabel(_RATE_LIMITS_UNAVAILABLE)
+        self.rate_limits_label.setObjectName("CodexRateLimits")
+        self.rate_limits_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.rate_limits_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.rate_limits_label.setWordWrap(False)
+        self.rate_limits_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.agent_options_toggle_btn = QToolButton()
         self.agent_options_toggle_btn.setCheckable(True)
         self.agent_options_toggle_btn.setChecked(True)
@@ -1081,7 +1075,7 @@ class CodexAgentDockWidget(QWidget):
         self.add_file_btn.setFixedWidth(26)
         self.send_btn = QPushButton("Send")
         input_row.addWidget(self.input_hint_label)
-        input_row.addStretch(1)
+        input_row.addWidget(self.rate_limits_label, 1)
         input_row.addWidget(self.agent_options_toggle_btn)
         input_row.addWidget(self.add_file_btn)
         input_row.addWidget(self.send_btn)
@@ -1132,12 +1126,6 @@ class CodexAgentDockWidget(QWidget):
         for label, value in _PERMISSION_CHOICES:
             self.permissions_combo.addItem(label, value)
         options_grid.addWidget(self.permissions_combo, 3, 0, 1, 2)
-        self.rate_limits_label = QLabel(_RATE_LIMITS_UNAVAILABLE)
-        self.rate_limits_label.setObjectName("CodexRateLimits")
-        self.rate_limits_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.rate_limits_label.setWordWrap(True)
-        self.rate_limits_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        options_grid.addWidget(self.rate_limits_label, 4, 0, 1, 2)
         options_grid.setColumnStretch(0, 1)
         options_grid.setColumnStretch(1, 1)
         agent_options_layout.addWidget(self.options_container)
@@ -1463,6 +1451,15 @@ class CodexAgentDockWidget(QWidget):
                 return manager
         return None
 
+    def _is_tree_path_excluded(self, path: str, is_dir: bool) -> bool:
+        predicate = self._tree_path_excluded_predicate
+        if not callable(predicate):
+            return False
+        try:
+            return bool(predicate(path, is_dir))
+        except Exception:
+            return False
+
     def _refresh_attachment_summary(self) -> None:
         total = len(self._attached_source_files)
         if total <= 0:
@@ -1621,13 +1618,18 @@ class CodexAgentDockWidget(QWidget):
                 for dirname in dirnames:
                     if str(dirname or "") in _MENTION_SKIP_DIRS:
                         continue
+                    abs_dir = os.path.join(dirpath, dirname)
+                    if self._is_tree_path_excluded(abs_dir, True):
+                        continue
                     pruned_dirs.append(dirname)
                 dirnames[:] = pruned_dirs
 
                 for filename in filenames:
+                    absolute = os.path.join(dirpath, filename)
+                    if self._is_tree_path_excluded(absolute, False):
+                        continue
                     if len(collected) >= _MENTION_MAX_FILES:
                         break
-                    absolute = os.path.join(dirpath, filename)
                     try:
                         relative = os.path.relpath(absolute, project_text)
                     except Exception:
