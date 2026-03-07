@@ -65,6 +65,16 @@ Check:
 
 See [Run Configurations](configuration/run-configurations.md).
 
+## App relaunch reports a crash
+
+If PyTPO exits unexpectedly after a relaunch or restart attempt:
+
+- read the crash dialog shown by the launch monitor
+- use the dialog's copyable full-text view when reporting the issue
+- open the saved crash log path shown in the dialog to inspect recent output
+
+The launch monitor keeps the most useful tail of stdout/stderr in a temporary crash log so failures such as non-zero exits and signal-style crashes are easier to diagnose.
+
 ## C/C++ diagnostics are weak or missing
 
 Most common causes:
@@ -103,7 +113,7 @@ Check:
 - `codex --version` works in your shell
 - project is open (Codex dock requires project root)
 - `File -> Settings... -> Code Intelligence -> Code Agents` command template is valid
-- selected permission mode matches your task (`Default` vs `Full Access`)
+- selected sandbox mode matches your task (`read-only`, `workspace-write`, or `danger-full-access`)
 - if using attachments, ensure files were successfully staged
 
 Common symptoms:
@@ -113,9 +123,11 @@ Common symptoms:
 - process exits with non-zero code
   - inspect transcript `System` bubble and `Tools` lines for failure reason
 - resume/session mismatch
-  - start `New Chat` or pick a recent session from the dock dropdown
+  - start `New Chat`, pick a session from `Recent Sessions`, or reopen it from `Manage Sessions...`
 - no rate limit values shown
   - session log may not yet contain token/rate-limit payloads
+- mention suggestions miss expected files
+  - confirm the file or folder is not excluded in the project explorer
 
 See [Codex Agent Dock](features/codex-agent.md).
 

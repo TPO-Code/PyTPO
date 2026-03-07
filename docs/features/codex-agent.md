@@ -12,6 +12,7 @@ Use Codex Agent Dock when you want:
 - clickable file links directly from agent output
 - quick model/reasoning/permission controls per conversation
 - resumable Codex sessions from recent history
+- session management from a dedicated recent-sessions menu
 
 Use [AI Assist](ai-assist.md) for inline editor completion behavior.
 
@@ -50,11 +51,16 @@ Default template:
 codex exec --skip-git-repo-check --sandbox workspace-write -
 ```
 
+Note:
+
+- PyTPO only adds `--skip-git-repo-check` automatically when the project is not under source control.
+- Resume turns use a resume-safe command shape and do not reapply unsupported sandbox flags.
+
 ## Dock layout
 
 Top row:
 
-- recent session dropdown
+- `Recent Sessions` menu
 - `New Chat`
 - `Stop`
 
@@ -66,8 +72,14 @@ Composer:
 
 - multiline input box
 - attachment summary row (`Attached (...)`) with `Clear`
-- bottom control row: compact `Agent` settings toggle, `+` attachment button, `Send`
+- bottom control row: compact `Agent` settings toggle, visible usage-limit labels, `+` attachment button, `Send`
 - toggleable agent section with system preamble, model, reasoning, permissions, and rate-limits
+
+While a turn is running:
+
+- the input stays editable so you can draft the next message
+- `Send` stays disabled until the active turn finishes
+- the composer border shows a shimmer state to indicate background work
 
 ## Keyboard behavior
 
@@ -105,7 +117,7 @@ The dock exposes three runtime controls:
 
 - `Model`
 - `Reasoning` (`Low`, `Medium`, `High`, `Extra High`)
-- `Permissions` (`Default Permissions`, `Full Access`)
+- `Permissions` / sandbox mode (`read-only`, `workspace-write`, `danger-full-access`)
 
 When options change, active session attachment is reset and a new chat session begins for safety/consistency.
 
@@ -116,7 +128,14 @@ The dock can attach to recent Codex sessions:
 - recent sessions are loaded from `~/.codex/sessions`
 - list is filtered to current project `cwd`
 - labels use first user message (friendly preview) + timestamp
-- selecting an entry restores visible user/assistant transcript
+- selecting an entry restores user messages, assistant replies, reasoning blocks, and tool activity
+
+From `Recent Sessions`, you can also open `Manage Sessions...` to:
+
+- switch between current-project and all-project session scope
+- search saved sessions
+- attach an older session back into the dock
+- delete stale sessions
 
 Session resets happen automatically when:
 
@@ -140,6 +159,13 @@ At end of turn:
 - a clickable `Changed files:` list is appended when file changes are detected
 - links open files directly in the IDE
 
+Rendering details:
+
+- streamed output keeps paragraph spacing intact
+- tool bubbles start collapsed by default for easier scanning
+- long diff bubbles scroll internally after they become tall
+- system/meta chatter is filtered so normal transcript flow stays focused on the actual conversation
+
 ## File mentions with `@`
 
 In composer input:
@@ -152,6 +178,7 @@ In composer input:
 Notes:
 
 - suggestion index is project-local and excludes common heavy folders like `.git`, `node_modules`, `target`, `dist`, `.venv`
+- explorer-excluded files and folders are also skipped before matches are cached
 - mention target paths are home-relative when possible, otherwise absolute
 
 ## Attach files with `+`
@@ -187,6 +214,11 @@ Data source:
 
 If unavailable, placeholder is shown.
 
+Notes:
+
+- labels stay visible in the main composer row instead of inside the collapsible options section
+- reset timestamps are shown in `dd/mm/yyyy`
+
 ## Command compatibility notes
 
 The dock normalizes common Codex command variants to reduce failure modes:
@@ -207,6 +239,8 @@ For temporary UI verification, the dock writes bubble snapshots to:
 
 This file is conversation-scoped and reset when a new chat starts.
 
+Temporary rate-limit refresh tracing may also appear under `.tide` when debugging usage-label issues.
+
 ## Limitations and expectations
 
 - No built-in CLI undo command is exposed by this integration.
@@ -218,7 +252,7 @@ This file is conversation-scoped and reset when a new chat starts.
 
 1. open project
 2. open Codex Agent Dock
-3. keep `Permissions = Default` unless a task requires broader access
+3. keep sandbox mode at `workspace-write` unless a task clearly needs `read-only` or `danger-full-access`
 4. attach files with `+` only when needed
 5. use `@` mentions for precise file references
 6. review `Diff` and `Changed files` bubbles after each turn
