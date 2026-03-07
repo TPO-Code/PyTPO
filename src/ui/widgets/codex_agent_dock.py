@@ -978,6 +978,9 @@ class CodexAgentDockWidget(QWidget):
         self._sessions_refresh_token = 0
         self._rate_limits_refresh_token = 0
         self._transcript_scroll_pending = False
+        self._transcript_follow_after_layout = False
+        self._transcript_scroll_animated = False
+        self._transcript_internal_scroll = False
         self._last_rate_limits_text = _RATE_LIMITS_UNAVAILABLE
         self._last_rate_limits_tooltip = "Rate limit data unavailable"
 
@@ -985,6 +988,13 @@ class CodexAgentDockWidget(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(300)
         self._save_timer.timeout.connect(self._persist_settings)
+
+        self._transcript_scroll_animation = QVariantAnimation(self)
+        self._transcript_scroll_animation.setDuration(180)
+        self._transcript_scroll_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._transcript_scroll_animation.valueChanged.connect(
+            self._on_transcript_scroll_animation_value_changed
+        )
 
         self._build_ui()
         self._wire_signals()
@@ -1176,6 +1186,12 @@ class CodexAgentDockWidget(QWidget):
         self._runner.output.connect(self._append_raw)
         self._runner.busyChanged.connect(self._on_busy_changed)
         self._runner.exitCode.connect(self._on_exit_code)
+        self.transcript_scroll.verticalScrollBar().valueChanged.connect(
+            self._on_transcript_scrollbar_value_changed
+        )
+        self.transcript_scroll.verticalScrollBar().sliderPressed.connect(
+            self._transcript_scroll_animation.stop
+        )
 
     def _load_settings_icon(self) -> QIcon:
         icon_path = _APP_ROOT / "src" / "icons" / "settings.png"
@@ -1214,12 +1230,15 @@ class CodexAgentDockWidget(QWidget):
         *,
         scroll_to_bottom: bool = True,
         immediate: bool = False,
+        animated: bool = False,
     ) -> None:
+        self._transcript_follow_after_layout = bool(scroll_to_bottom)
+        self._transcript_scroll_animated = bool(animated)
         if not scroll_to_bottom:
             return
         if immediate:
             self._transcript_scroll_pending = False
-            self._scroll_transcript_to_bottom()
+            self._scroll_transcript_to_bottom(animated=False)
             return
         if self._transcript_scroll_pending:
             return
@@ -1228,11 +1247,51 @@ class CodexAgentDockWidget(QWidget):
 
     def _flush_scheduled_transcript_render(self) -> None:
         self._transcript_scroll_pending = False
-        self._scroll_transcript_to_bottom()
+        if not self._transcript_follow_after_layout:
+            return
+        self._scroll_transcript_to_bottom(animated=self._transcript_scroll_animated)
 
-    def _scroll_transcript_to_bottom(self) -> None:
+    def _is_transcript_at_bottom(self, tolerance: int = 4) -> bool:
         bar = self.transcript_scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        return bar.value() >= max(0, bar.maximum() - max(0, tolerance))
+
+    def _scroll_transcript_to_bottom(self, *, animated: bool = False) -> None:
+        bar = self.transcript_scroll.verticalScrollBar()
+        maximum = bar.maximum()
+        if not animated or bar.value() >= maximum:
+            self._transcript_scroll_animation.stop()
+            self._transcript_internal_scroll = True
+            try:
+                bar.setValue(maximum)
+            finally:
+                self._transcript_internal_scroll = False
+            return
+        self._transcript_scroll_animation.stop()
+        self._transcript_scroll_animation.setStartValue(bar.value())
+        self._transcript_scroll_animation.setEndValue(maximum)
+        self._transcript_scroll_animation.start()
+
+    def _on_transcript_scroll_animation_value_changed(self, value: Any) -> None:
+        bar = self.transcript_scroll.verticalScrollBar()
+        try:
+            self._transcript_internal_scroll = True
+            bar.setValue(int(value))
+        except (TypeError, ValueError):
+            return
+        finally:
+            self._transcript_internal_scroll = False
+
+    def _on_transcript_scrollbar_value_changed(self, _value: int) -> None:
+        if self._transcript_internal_scroll:
+            return
+        self._transcript_follow_after_layout = self._is_transcript_at_bottom()
+
+    def _on_transcript_bubble_size_hint_changed(self) -> None:
+        if self._transcript_follow_after_layout or self._is_transcript_at_bottom():
+            self._schedule_transcript_render(
+                scroll_to_bottom=True,
+                animated=self._transcript_scroll_animated,
+            )
 
     @staticmethod
     def _append_transcript_line(current_text: str, line: str) -> str:
@@ -1313,7 +1372,7 @@ class CodexAgentDockWidget(QWidget):
             }}
             """
         )
-        bubble.sizeHintChanged.connect(self._schedule_transcript_render)
+        bubble.sizeHintChanged.connect(self._on_transcript_bubble_size_hint_changed)
         return bubble
 
     def _load_model_choices(self, selected_model: str) -> None:
@@ -2594,6 +2653,7 @@ class CodexAgentDockWidget(QWidget):
     ) -> None:
         if role in {"meta", "system"}:
             return
+        follow_output = self._transcript_follow_after_layout or self._is_transcript_at_bottom()
         line = str(text).rstrip("\n")
         last_entry = self._transcript_entries[-1] if self._transcript_entries else None
         force_boundary = self._consume_forced_bubble_boundary(role)
@@ -2643,7 +2703,10 @@ class CodexAgentDockWidget(QWidget):
                 event="bubble",
             )
             self._prune_replayed_transcript_tail()
-        self._schedule_transcript_render(scroll_to_bottom=True)
+        self._schedule_transcript_render(
+            scroll_to_bottom=follow_output,
+            animated=follow_output,
+        )
 
     def _on_bubble_link_activated(self, href: str) -> None:
         target = str(href or "").strip()
