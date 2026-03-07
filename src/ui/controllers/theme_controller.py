@@ -14,14 +14,18 @@ from src.services.theme_compiler import (
     compile_qsst_file_with_tokens,
 )
 from src.ui.theme_runtime import (
+    DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH,
+    DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR,
     DEFAULT_EDITOR_OVERVIEW_GAP,
     DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN,
     DEFAULT_SETTINGS_COLOR_SWATCH_HEIGHT,
     DEFAULT_SETTINGS_COLOR_SWATCH_WIDTH,
     coerce_metric_px,
     coerce_metric_px_min,
+    refresh_codex_agent_widgets,
     refresh_editor_viewport_widgets,
     refresh_settings_color_swatch_widgets,
+    set_codex_agent_bubble_theme,
     set_editor_viewport_spacing,
     set_settings_color_swatch_size,
 )
@@ -157,6 +161,29 @@ class ThemeController:
         )
         return search_top_margin, overview_gap
 
+    @staticmethod
+    def _codex_agent_bubble_theme(tokens: dict[str, Any] | None) -> tuple[str, str, dict[str, dict[str, str]]]:
+        text_color = DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR
+        border_width = DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH
+        role_colors: dict[str, dict[str, str]] = {}
+        if isinstance(tokens, dict):
+            text_color = str(
+                tokens.get("components.codex_agent.bubble.text_color") or text_color
+            ).strip() or text_color
+            border_width = str(
+                tokens.get("components.codex_agent.bubble.border_width") or border_width
+            ).strip() or border_width
+            for role_name in ("default", "user", "assistant", "thinking", "tools", "diff", "system", "meta"):
+                role_colors[role_name] = {
+                    "border_color": str(
+                        tokens.get(f"components.codex_agent.roles.{role_name}.border_color") or ""
+                    ).strip(),
+                    "background_color": str(
+                        tokens.get(f"components.codex_agent.roles.{role_name}.background_color") or ""
+                    ).strip(),
+                }
+        return text_color, border_width, role_colors
+
     def available_themes(self) -> list[str]:
         return [name for name, _ in self._theme_candidates()]
 
@@ -224,7 +251,15 @@ class ThemeController:
             overview_gap=editor_overview_gap,
             app=app,
         )
+        codex_text_color, codex_border_width, codex_role_colors = self._codex_agent_bubble_theme(tokens)
+        set_codex_agent_bubble_theme(
+            text_color=codex_text_color,
+            border_width=codex_border_width,
+            role_colors=codex_role_colors,
+            app=app,
+        )
         refresh_editor_viewport_widgets(app=app)
+        refresh_codex_agent_widgets(app=app)
         if resolved_name != self.ide.theme_name:
             self.ide.theme_name = resolved_name
             self.settings_manager.set("theme", resolved_name, "ide")

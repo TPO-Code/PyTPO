@@ -55,6 +55,7 @@ from src.ui.codex_session_store import (
     session_preview_text,
 )
 from src.ui.dialogs.codex_sessions_dialog import CodexSessionsDialog
+from src.ui.theme_runtime import current_codex_agent_bubble_theme
 from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
@@ -1310,37 +1311,15 @@ class CodexAgentDockWidget(QWidget):
         self._pending_diff_lines.clear()
         self._add_bubble("diff", text, merge=True)
 
-    @staticmethod
-    def _role_bubble_palette(role: str) -> tuple[str, str]:
-        role_name = str(role or "").strip()
-        if role_name == "user":
-            return "#2e6ad9", "#16386f"
-        if role_name == "assistant":
-            return "#2f3f5e", "#1a1f2a"
-        if role_name == "thinking":
-            return "#7d5ba6", "#2a2234"
-        if role_name == "tools":
-            return "#2e5c47", "#1d2a24"
-        if role_name == "diff":
-            return "#2c6a4f", "#111a14"
-        if role_name in {"system", "meta"}:
-            return "#3f4b5f", "#232b38"
-        return "#2f3746", "#1a1f2a"
-
-    def _new_transcript_bubble(self, entry: _TranscriptEntry) -> ChatMarkdownBubble:
-        role = str(entry.role or "").strip()
-        border_color, background_color = self._role_bubble_palette(role)
-        bubble = ChatMarkdownBubble(
-            role=role,
-            text=str(entry.text or ""),
-            timestamp=str(entry.timestamp or "").strip() or None,
-            link_activated=self._on_bubble_link_activated,
-            role_label=_ROLE_LABELS.get(role, role.title()),
-        )
-        bubble.setStyleSheet(
-            f"""
+    def _bubble_stylesheet(self, role: str) -> str:
+        theme = current_codex_agent_bubble_theme(role)
+        border_width = str(theme["border_width"] or "1px")
+        border_color = str(theme["border_color"] or "#2f3746")
+        background_color = str(theme["background_color"] or "#1a1f2a")
+        text_color = str(theme["text_color"] or "#e6edf3")
+        return f"""
             QFrame#codexBubble {{
-                border: 1px solid {border_color};
+                border: {border_width} solid {border_color};
                 background-color: {background_color};
                 border-radius: 0px;
             }}
@@ -1362,7 +1341,7 @@ class CodexAgentDockWidget(QWidget):
                 font-size: 12px;
             }}
             QTextEdit#codexBubbleBody {{
-                color: #e6edf3;
+                color: {text_color};
                 background-color: transparent;
                 font-size: 13px;
                 border: none;
@@ -1371,7 +1350,26 @@ class CodexAgentDockWidget(QWidget):
                 border-radius: 0px;
             }}
             """
+
+    def _apply_bubble_theme(self, bubble: ChatMarkdownBubble) -> None:
+        if not isinstance(bubble, ChatMarkdownBubble):
+            return
+        bubble.setStyleSheet(self._bubble_stylesheet(str(bubble.role or "")))
+
+    def _apply_codex_agent_theme(self) -> None:
+        for bubble in self._transcript_bubbles:
+            self._apply_bubble_theme(bubble)
+
+    def _new_transcript_bubble(self, entry: _TranscriptEntry) -> ChatMarkdownBubble:
+        role = str(entry.role or "").strip()
+        bubble = ChatMarkdownBubble(
+            role=role,
+            text=str(entry.text or ""),
+            timestamp=str(entry.timestamp or "").strip() or None,
+            link_activated=self._on_bubble_link_activated,
+            role_label=_ROLE_LABELS.get(role, role.title()),
         )
+        self._apply_bubble_theme(bubble)
         bubble.sizeHintChanged.connect(self._on_transcript_bubble_size_hint_changed)
         return bubble
 

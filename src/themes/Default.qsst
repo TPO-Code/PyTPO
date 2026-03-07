@@ -201,6 +201,42 @@ overview_gap = "1px"
 [components.terminal]
 font_family = '"Consolas"'
 
+[components.codex_agent.bubble]
+text_color = "#e6edf3"
+border_width = "0px"
+
+[components.codex_agent.roles.default]
+border_color = "#2f3746"
+background_color = "#1a1f2a00"
+
+[components.codex_agent.roles.user]
+border_color = "#2e6ad9"
+background_color = "#313131"
+
+[components.codex_agent.roles.assistant]
+border_color = "#2f3f5e"
+background_color = "#1a1f2a00"
+
+[components.codex_agent.roles.thinking]
+border_color = "#7d5ba6"
+background_color = "#2a223400"
+
+[components.codex_agent.roles.tools]
+border_color = "#2e5c47"
+background_color = "#1d2a2400"
+
+[components.codex_agent.roles.diff]
+border_color = "#2c6a4f"
+background_color = "#111a1400"
+
+[components.codex_agent.roles.system]
+border_color = "#3f4b5f"
+background_color = "#232b3800"
+
+[components.codex_agent.roles.meta]
+border_color = "#3f4b5f"
+background_color = "#232b3800"
+
 # -------------------------------------------------------------------
 # Rule output (ordered)
 # -------------------------------------------------------------------

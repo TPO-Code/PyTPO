@@ -10,11 +10,26 @@ APP_PROP_SETTINGS_COLOR_SWATCH_WIDTH = "theme.settings.color_swatch.width"
 APP_PROP_SETTINGS_COLOR_SWATCH_HEIGHT = "theme.settings.color_swatch.height"
 APP_PROP_EDITOR_SEARCH_TOP_MARGIN_MIN = "theme.editor.search.top_margin_min"
 APP_PROP_EDITOR_OVERVIEW_GAP = "theme.editor.overview.gap"
+APP_PROP_CODEX_AGENT_BUBBLE_TEXT_COLOR = "theme.codex_agent.bubble.text_color"
+APP_PROP_CODEX_AGENT_BUBBLE_BORDER_WIDTH = "theme.codex_agent.bubble.border_width"
 
 DEFAULT_SETTINGS_COLOR_SWATCH_WIDTH = 34
 DEFAULT_SETTINGS_COLOR_SWATCH_HEIGHT = 20
 DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN = 30
 DEFAULT_EDITOR_OVERVIEW_GAP = 1
+DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR = "#e6edf3"
+DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH = "1px"
+
+_CODEX_AGENT_ROLE_DEFAULTS: dict[str, dict[str, str]] = {
+    "default": {"border_color": "#2f3746", "background_color": "#1a1f2a"},
+    "user": {"border_color": "#2e6ad9", "background_color": "#16386f"},
+    "assistant": {"border_color": "#2f3f5e", "background_color": "#1a1f2a"},
+    "thinking": {"border_color": "#7d5ba6", "background_color": "#2a2234"},
+    "tools": {"border_color": "#2e5c47", "background_color": "#1d2a24"},
+    "diff": {"border_color": "#2c6a4f", "background_color": "#111a14"},
+    "system": {"border_color": "#3f4b5f", "background_color": "#232b38"},
+    "meta": {"border_color": "#3f4b5f", "background_color": "#232b38"},
+}
 
 _PX_RE = re.compile(r"^\s*(-?\d+)\s*(px)?\s*$", re.IGNORECASE)
 
@@ -186,5 +201,98 @@ def refresh_editor_viewport_widgets(*, app: QApplication | None = None) -> None:
         if callable(position_search):
             try:
                 position_search()
+            except Exception:
+                pass
+
+
+def current_codex_agent_bubble_theme(
+    role: str,
+    *,
+    app: QApplication | None = None,
+) -> dict[str, str]:
+    qapp = app or QApplication.instance()
+    normalized_role = str(role or "").strip() or "default"
+    role_defaults = _CODEX_AGENT_ROLE_DEFAULTS.get(normalized_role, _CODEX_AGENT_ROLE_DEFAULTS["default"])
+    text_color = DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR
+    border_width = DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH
+    border_color = role_defaults["border_color"]
+    background_color = role_defaults["background_color"]
+    if qapp is None:
+        return {
+            "text_color": text_color,
+            "border_width": border_width,
+            "border_color": border_color,
+            "background_color": background_color,
+        }
+    text_color = str(qapp.property(APP_PROP_CODEX_AGENT_BUBBLE_TEXT_COLOR) or text_color)
+    border_width = str(qapp.property(APP_PROP_CODEX_AGENT_BUBBLE_BORDER_WIDTH) or border_width)
+    border_color = str(
+        qapp.property(f"theme.codex_agent.roles.{normalized_role}.border_color") or border_color
+    )
+    background_color = str(
+        qapp.property(f"theme.codex_agent.roles.{normalized_role}.background_color") or background_color
+    )
+    return {
+        "text_color": text_color,
+        "border_width": border_width,
+        "border_color": border_color,
+        "background_color": background_color,
+    }
+
+
+def set_codex_agent_bubble_theme(
+    *,
+    text_color: Any,
+    border_width: Any,
+    role_colors: dict[str, dict[str, Any]] | None = None,
+    app: QApplication | None = None,
+) -> dict[str, Any]:
+    qapp = app or QApplication.instance()
+    normalized_text_color = str(text_color or DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR).strip()
+    if not normalized_text_color:
+        normalized_text_color = DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR
+    normalized_border_width = str(border_width or DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH).strip()
+    if not normalized_border_width:
+        normalized_border_width = DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH
+
+    normalized_roles: dict[str, dict[str, str]] = {}
+    for role_name, defaults in _CODEX_AGENT_ROLE_DEFAULTS.items():
+        provided = role_colors.get(role_name, {}) if isinstance(role_colors, dict) else {}
+        border_color = str(provided.get("border_color") or defaults["border_color"]).strip()
+        background_color = str(provided.get("background_color") or defaults["background_color"]).strip()
+        normalized_roles[role_name] = {
+            "border_color": border_color or defaults["border_color"],
+            "background_color": background_color or defaults["background_color"],
+        }
+
+    if qapp is not None:
+        qapp.setProperty(APP_PROP_CODEX_AGENT_BUBBLE_TEXT_COLOR, normalized_text_color)
+        qapp.setProperty(APP_PROP_CODEX_AGENT_BUBBLE_BORDER_WIDTH, normalized_border_width)
+        for role_name, values in normalized_roles.items():
+            qapp.setProperty(
+                f"theme.codex_agent.roles.{role_name}.border_color",
+                values["border_color"],
+            )
+            qapp.setProperty(
+                f"theme.codex_agent.roles.{role_name}.background_color",
+                values["background_color"],
+            )
+
+    return {
+        "text_color": normalized_text_color,
+        "border_width": normalized_border_width,
+        "roles": normalized_roles,
+    }
+
+
+def refresh_codex_agent_widgets(*, app: QApplication | None = None) -> None:
+    qapp = app or QApplication.instance()
+    if qapp is None:
+        return
+    for widget in qapp.allWidgets():
+        apply_theme = getattr(widget, "_apply_codex_agent_theme", None)
+        if callable(apply_theme):
+            try:
+                apply_theme()
             except Exception:
                 pass
