@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Callable
 
 import markdown
@@ -279,7 +280,7 @@ class ChatMarkdownBubble(QFrame):
 
     @staticmethod
     def _render_markdown_html(text: str) -> str:
-        source = str(text or "")
+        source = ChatMarkdownBubble._normalize_chat_markdown(text)
         parser = markdown.Markdown(
             extensions=[
                 "fenced_code",
@@ -294,6 +295,7 @@ class ChatMarkdownBubble(QFrame):
             "body { color: #e6edf3; font-size: 13px; }"
             "p { margin: 0.1em 0 0.45em 0; }"
             "ul, ol { margin: 0.15em 0 0.45em 1.25em; }"
+            "li > p { margin: 0; }"
             "blockquote { margin: 0.25em 0; padding-left: 8px; border-left: 2px solid #3a4558; color: #c2cfdf; }"
             "pre { background: #111722; border: 1px solid #2f3f56; border-radius: 6px; padding: 8px; }"
             "code { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }"
@@ -304,6 +306,61 @@ class ChatMarkdownBubble(QFrame):
             "</style>"
             f"{body}"
         )
+
+    @staticmethod
+    def _normalize_chat_markdown(text: str) -> str:
+        source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not source.strip():
+            return source
+        lines = source.split("\n")
+        normalized: list[str] = []
+        in_fence = False
+        in_list = False
+        for line in lines:
+            stripped = line.strip()
+            if ChatMarkdownBubble._is_fence_line(line):
+                in_fence = not in_fence
+                in_list = False
+                normalized.append(line)
+                continue
+            if in_fence:
+                normalized.append(line)
+                continue
+            if ChatMarkdownBubble._is_list_item_line(line):
+                if normalized and normalized[-1].strip():
+                    normalized.append("")
+                in_list = True
+                normalized.append(line)
+                continue
+            if in_list:
+                if not stripped:
+                    in_list = False
+                    normalized.append(line)
+                    continue
+                if ChatMarkdownBubble._is_list_continuation_line(line):
+                    normalized.append(line)
+                    continue
+                normalized.append("")
+                in_list = False
+            normalized.append(line)
+        return "\n".join(normalized)
+
+    @staticmethod
+    def _is_list_item_line(line: str) -> bool:
+        return bool(re.match(r"^\s{0,3}(?:[-*+]\s+\S+|\d+[.)]\s+\S+)", str(line or "")))
+
+    @staticmethod
+    def _is_list_continuation_line(line: str) -> bool:
+        text = str(line or "")
+        if not text.strip():
+            return False
+        if ChatMarkdownBubble._is_list_item_line(text):
+            return False
+        return bool(re.match(r"^\s{2,}\S+", text))
+
+    @staticmethod
+    def _is_fence_line(line: str) -> bool:
+        return bool(re.match(r"^\s{0,3}(?:```|~~~)", str(line or "")))
 
     @staticmethod
     def _render_diff_html(text: str) -> str:
