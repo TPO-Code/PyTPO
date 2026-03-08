@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 import os
 from enum import Enum
 
@@ -9,12 +10,33 @@ class SavePolicy(Enum):
     REQUIRE_SAVE = "require_save"
 
 
+class LaunchTargetKind(Enum):
+    ACTIVE_FILE = "active_file"
+    MODULE = "module"
+    NAMED_TARGET = "named_target"
+
+
+@dataclass(slots=True)
+class NamedLaunchTarget:
+    name: str
+    kind: LaunchTargetKind
+    file_path: str = ""
+    module_name: str = ""
+    working_directory: str = ""
+    arguments: tuple[str, ...] = field(default_factory=tuple)
+    environment: dict[str, str] = field(default_factory=dict)
+
+
 class DebugSessionContext(QObject):
     filePathChanged = Signal(str)
     workingDirectoryChanged = Signal(str)
     argumentsChanged = Signal(tuple)
     environmentChanged = Signal(dict)
     savePolicyChanged = Signal(str)
+    launchTargetKindChanged = Signal(str)
+    moduleNameChanged = Signal(str)
+    selectedTargetChanged = Signal(str)
+    namedTargetsChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,6 +45,10 @@ class DebugSessionContext(QObject):
         self._arguments = ()
         self._environment = {}
         self._save_policy = SavePolicy.DEBUG_BUFFER
+        self._launch_target_kind = LaunchTargetKind.ACTIVE_FILE
+        self._module_name = ""
+        self._selected_target_name = ""
+        self._named_targets = {}
 
     def file_path(self):
         return self._file_path
@@ -67,6 +93,53 @@ class DebugSessionContext(QObject):
             return
         self._environment = normalized
         self.environmentChanged.emit(dict(self._environment))
+
+    def launch_target_kind(self):
+        return self._launch_target_kind
+
+    def set_launch_target_kind(self, launch_target_kind):
+        if self._launch_target_kind == launch_target_kind:
+            return
+        self._launch_target_kind = launch_target_kind
+        self.launchTargetKindChanged.emit(launch_target_kind.value)
+
+    def module_name(self):
+        return self._module_name
+
+    def set_module_name(self, module_name):
+        normalized = (module_name or "").strip()
+        if self._module_name == normalized:
+            return
+        self._module_name = normalized
+        self.moduleNameChanged.emit(self._module_name)
+
+    def selected_target_name(self):
+        return self._selected_target_name
+
+    def set_selected_target_name(self, target_name):
+        normalized = (target_name or "").strip()
+        if self._selected_target_name == normalized:
+            return
+        self._selected_target_name = normalized
+        self.selectedTargetChanged.emit(self._selected_target_name)
+
+    def named_targets(self):
+        return dict(self._named_targets)
+
+    def set_named_target(self, target: NamedLaunchTarget):
+        self._named_targets[target.name] = target
+        self.namedTargetsChanged.emit()
+
+    def remove_named_target(self, target_name):
+        if target_name not in self._named_targets:
+            return
+        del self._named_targets[target_name]
+        if self._selected_target_name == target_name:
+            self.set_selected_target_name("")
+        self.namedTargetsChanged.emit()
+
+    def selected_named_target(self):
+        return self._named_targets.get(self._selected_target_name)
 
     def save_policy(self):
         return self._save_policy

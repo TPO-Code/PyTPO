@@ -112,6 +112,9 @@ class PythonRunConfigsSettingsPage(QWidget):
         form.setVerticalSpacing(8)
 
         self.name_edit = QLineEdit(self)
+        self.launch_kind_combo = QComboBox(self)
+        self.launch_kind_combo.addItem("Script", "script")
+        self.launch_kind_combo.addItem("Module", "module")
 
         script_holder = QWidget(self)
         script_row = QHBoxLayout(script_holder)
@@ -124,6 +127,8 @@ class PythonRunConfigsSettingsPage(QWidget):
         script_row.addWidget(self.script_path_edit, 1)
         script_row.addWidget(self.script_browse_btn)
 
+        self.module_name_edit = QLineEdit(self)
+        self.module_name_edit.setPlaceholderText("Example: package.cli or package.__main__")
         self.args_edit = QLineEdit(self)
         self.working_dir_edit = QLineEdit(self)
         self.working_dir_edit.setPlaceholderText("Optional. Defaults to policy/script folder.")
@@ -144,7 +149,9 @@ class PythonRunConfigsSettingsPage(QWidget):
         self.env_edit.setMinimumHeight(110)
 
         form.addRow("Name", self.name_edit)
+        form.addRow("Launch Type", self.launch_kind_combo)
         form.addRow("Script", script_holder)
+        form.addRow("Module", self.module_name_edit)
         form.addRow("Arguments", self.args_edit)
         form.addRow("Working Directory", wd_holder)
         form.addRow("Interpreter", self.interpreter_edit)
@@ -160,7 +167,10 @@ class PythonRunConfigsSettingsPage(QWidget):
         root.addWidget(self.status_label)
 
         self.name_edit.textChanged.connect(self._on_editor_changed)
+        self.launch_kind_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.launch_kind_combo.currentIndexChanged.connect(self._update_launch_fields_enabled)
         self.script_path_edit.textChanged.connect(self._on_editor_changed)
+        self.module_name_edit.textChanged.connect(self._on_editor_changed)
         self.args_edit.textChanged.connect(self._on_editor_changed)
         self.working_dir_edit.textChanged.connect(self._on_editor_changed)
         self.interpreter_edit.textChanged.connect(self._on_editor_changed)
@@ -229,7 +239,9 @@ class PythonRunConfigsSettingsPage(QWidget):
             env = []
         return {
             "name": name,
+            "launch_kind": "module" if str(cfg.get("launch_kind") or "").strip().lower() == "module" else "script",
             "script_path": str(cfg.get("script_path") or "").strip(),
+            "module_name": str(cfg.get("module_name") or cfg.get("module") or "").strip(),
             "args": str(cfg.get("args") or "").strip(),
             "working_dir": str(cfg.get("working_dir") or "").strip(),
             "interpreter": str(cfg.get("interpreter") or "").strip(),
@@ -285,7 +297,9 @@ class PythonRunConfigsSettingsPage(QWidget):
         env = [line.strip() for line in str(self.env_edit.toPlainText() or "").splitlines() if line.strip()]
         return {
             "name": name,
+            "launch_kind": str(self.launch_kind_combo.currentData(Qt.UserRole) or "script"),
             "script_path": str(self.script_path_edit.text() or "").strip(),
+            "module_name": str(self.module_name_edit.text() or "").strip(),
             "args": str(self.args_edit.text() or "").strip(),
             "working_dir": str(self.working_dir_edit.text() or "").strip(),
             "interpreter": str(self.interpreter_edit.text() or "").strip(),
@@ -305,7 +319,9 @@ class PythonRunConfigsSettingsPage(QWidget):
             has_item = row >= 0
             for widget in (
                 self.name_edit,
+                self.launch_kind_combo,
                 self.script_path_edit,
+                self.module_name_edit,
                 self.args_edit,
                 self.working_dir_edit,
                 self.interpreter_edit,
@@ -319,17 +335,24 @@ class PythonRunConfigsSettingsPage(QWidget):
             if not has_item:
                 self._editor_row = -1
                 self.name_edit.setText("")
+                self.launch_kind_combo.setCurrentIndex(0)
                 self.script_path_edit.setText("")
+                self.module_name_edit.setText("")
                 self.args_edit.setText("")
                 self.working_dir_edit.setText("")
                 self.interpreter_edit.setText("")
                 self.env_edit.setPlainText("")
+                self._update_launch_fields_enabled()
                 return
             cfg = self._working_configs[row]
             self._editor_row = row
             self._last_selected_name = str(cfg.get("name") or "").strip()
             self.name_edit.setText(str(cfg.get("name") or ""))
+            launch_kind = "module" if str(cfg.get("launch_kind") or "").strip().lower() == "module" else "script"
+            combo_index = self.launch_kind_combo.findData(launch_kind, Qt.UserRole, Qt.MatchExactly)
+            self.launch_kind_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
             self.script_path_edit.setText(str(cfg.get("script_path") or ""))
+            self.module_name_edit.setText(str(cfg.get("module_name") or ""))
             self.args_edit.setText(str(cfg.get("args") or ""))
             self.working_dir_edit.setText(str(cfg.get("working_dir") or ""))
             self.interpreter_edit.setText(str(cfg.get("interpreter") or ""))
@@ -337,6 +360,7 @@ class PythonRunConfigsSettingsPage(QWidget):
             if not isinstance(env_items, list):
                 env_items = []
             self.env_edit.setPlainText("\n".join(str(item).strip() for item in env_items if str(item).strip()))
+            self._update_launch_fields_enabled()
         finally:
             self._loading = False
 
@@ -376,7 +400,9 @@ class PythonRunConfigsSettingsPage(QWidget):
             self._normalize_config(
                 {
                     "name": name,
+                    "launch_kind": "script",
                     "script_path": "",
+                    "module_name": "",
                     "args": "",
                     "working_dir": "",
                     "interpreter": "",
@@ -432,6 +458,13 @@ class PythonRunConfigsSettingsPage(QWidget):
     def _mark_dirty(self) -> None:
         self._refresh_status()
         self._notify_pending_changed()
+
+    def _update_launch_fields_enabled(self, *_args) -> None:
+        launch_kind = str(self.launch_kind_combo.currentData(Qt.UserRole) or "script")
+        use_script = launch_kind != "module"
+        self.script_path_edit.setEnabled(use_script and self._editor_row >= 0)
+        self.script_browse_btn.setEnabled(use_script and self._editor_row >= 0)
+        self.module_name_edit.setEnabled((not use_script) and self._editor_row >= 0)
 
     def _refresh_status(self) -> None:
         self.status_label.setText("Unsaved Python run configuration changes." if self.has_pending_settings_changes() else "No Python run configuration changes.")

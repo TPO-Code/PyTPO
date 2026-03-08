@@ -333,7 +333,6 @@ class DebuggerWidget(QWidget):
 
     def stop_debugging(self, clean_only=False):
         self.controller.stop_debugging(clean_only=clean_only)
-        self.editor.clear_execution_line()
 
     def send_command(self, action, extra=None):
         self.controller.send_command(action, extra)
@@ -358,7 +357,6 @@ class DebuggerWidget(QWidget):
         function_name = data.get("function", "<unknown>")
         file_name = os.path.basename(data.get("file", ""))
 
-        self.editor.set_execution_line(line_no)
         self._set_variables(data)
         self._append_console(
             f"<i>Paused at {self._escape_plain(file_name)}:{line_no} in {self._escape_plain(function_name)}()</i>"
@@ -385,7 +383,6 @@ class DebuggerWidget(QWidget):
 
     def _handle_session_finished(self):
         self._append_console("<i>Execution finished</i>")
-        self.editor.clear_execution_line()
 
     @staticmethod
     def _escape_plain(text):

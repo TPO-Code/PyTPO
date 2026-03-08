@@ -15,6 +15,7 @@ from src.ui.widgets.terminal_widget import TerminalWidget
 _CPP_RUNNABLE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx"}
 _CPP_BUILDABLE_SUFFIXES = _CPP_RUNNABLE_SUFFIXES | {".h", ".hpp", ".hh", ".hxx"}
 _RUST_RUNNABLE_SUFFIXES = {".rs"}
+_PYTHON_RUNNABLE_SUFFIXES = {".py"}
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class ExecutionController:
@@ -30,6 +31,41 @@ class ExecutionController:
         sessions = [session for session in self.console_run_manager.running_sessions() if isinstance(session.file_key, str)]
         sessions.sort(key=lambda item: ((item.label or item.file_key).lower(), item.file_key.lower()))
         return sessions
+
+    def _debugger_widget(self):
+        return getattr(self.ide, "debugger_dock_widget", None)
+
+    def _has_active_debugger_session(self) -> bool:
+        debugger = self._debugger_widget()
+        session = debugger.active_session() if debugger is not None else None
+        return bool(session is not None and session.is_active())
+
+    def _active_debugger_item(self) -> dict | None:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            return None
+        session = debugger.active_session()
+        if session is None or not session.is_active():
+            return None
+        return {
+            "kind": "debugger",
+            "key": str(session.session_key() or "__debugger__"),
+            "label": str(session.session_label() or "Python debug session"),
+        }
+
+    def _running_debugger_sessions(self) -> list[dict]:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            return []
+        return list(debugger.running_sessions())
+
+    def _show_debugger_dock(self) -> None:
+        dock = getattr(self.ide, "dock_debugger", None)
+        if dock is None:
+            return
+        dock.show()
+        if self._run_config().get("focus_output_on_run", True):
+            dock.raise_()
 
     def _stop_running_session(self, file_key: str) -> None:
         if not self.console_run_manager:
@@ -50,15 +86,20 @@ class ExecutionController:
         return f"Force kill sent to {label}."
 
     def _stop_all_running_sessions(self) -> None:
-        if not self.console_run_manager:
-            return
+        total = 0
+        debugger = self._debugger_widget()
+        for debugger_item in self._running_debugger_sessions():
+            if debugger is not None:
+                debugger.request_stop_for_key(str(debugger_item.get("key") or ""))
+                total += 1
         sessions = self._running_script_sessions()
-        if not sessions:
+        if not sessions and total == 0:
             self.ide.statusBar().showMessage("No running scripts.", 1200)
             return
         for session in sessions:
             self.console_run_manager.stop_file(session.file_key)
-        self.ide.statusBar().showMessage(f"Stop signal sent for {len(sessions)} running script(s).", 1600)
+            total += 1
+        self.ide.statusBar().showMessage(f"Stop signal sent for {total} active run(s).", 1600)
         self._update_toolbar_run_controls()
 
     def _rebuild_toolbar_stop_menu(self) -> None:
@@ -67,16 +108,28 @@ class ExecutionController:
             return
         menu.clear()
 
+        debugger_items = self._running_debugger_sessions()
+        debugger_item = self._active_debugger_item()
         sessions = self._running_script_sessions()
-        if not sessions:
+        total_count = len(sessions) + len(debugger_items)
+        if total_count <= 0:
             empty = menu.addAction("No Active Runs")
             empty.setEnabled(False)
             return
 
-        if len(sessions) > 1:
-            stop_all = menu.addAction(f"Stop All ({len(sessions)})")
+        if total_count > 1:
+            stop_all = menu.addAction(f"Stop All ({total_count})")
             stop_all.triggered.connect(self._stop_all_running_sessions)
             menu.addSeparator()
+
+        for item in debugger_items:
+            label = str(item.get("label") or "Python debug session")
+            key = str(item.get("key") or "")
+            action = menu.addAction(f"Stop Debugger: {label}")
+            if debugger_item is not None and key == str(debugger_item.get("key") or ""):
+                action.triggered.connect(lambda _checked=False: self.stop_current_run())
+            else:
+                action.triggered.connect(lambda _checked=False, session_key=key: self._stop_debugger_session(session_key))
 
         for session in sessions:
             rel = self._rel_to_project(session.file_key)
@@ -85,16 +138,16 @@ class ExecutionController:
             action.triggered.connect(lambda _checked=False, key=session.file_key: self._stop_running_session(key))
 
     def _toolbar_stop_clicked(self) -> None:
-        sessions = self._running_script_sessions()
-        if not sessions:
-            self.ide.statusBar().showMessage("No running scripts.", 1200)
+        active_count = len(self._running_script_sessions()) + len(self._running_debugger_sessions())
+        if not active_count:
+            self.ide.statusBar().showMessage("No active runs.", 1200)
             self._update_toolbar_run_controls()
             return
         self.stop_current_run()
         self._update_toolbar_run_controls()
 
     def _update_toolbar_run_controls(self) -> None:
-        running_count = len(self._running_script_sessions())
+        running_count = len(self._running_script_sessions()) + len(self._running_debugger_sessions())
         stop_btn = self.ide._toolbar_stop_btn
         if stop_btn is not None:
             stop_btn.setEnabled(running_count > 0)
@@ -108,9 +161,12 @@ class ExecutionController:
             if running_count > 1:
                 stop_btn.setToolTip(f"Stop Running Scripts ({running_count})")
             elif running_count == 1:
-                stop_btn.setToolTip("Stop Current Run (click again to force)")
+                if self._has_active_debugger_session():
+                    stop_btn.setToolTip("Stop Debug Session (click again to escalate)")
+                else:
+                    stop_btn.setToolTip("Stop Current Run (click again to force)")
             else:
-                stop_btn.setToolTip("No running scripts")
+                stop_btn.setToolTip("No active runs")
 
             if not bool(stop_btn.property("icon_loaded")):
                 stop_btn.setText("Stop" if running_count <= 1 else f"Stop ({running_count})")
@@ -120,6 +176,12 @@ class ExecutionController:
         ed = self.current_editor()
         if not ed:
             self.ide.statusBar().showMessage("No active editor to run.", 1500)
+            return
+
+        current_path = getattr(ed, "file_path", "") or ""
+        if self._is_python_runnable_file(current_path):
+            if self._start_debugger_for_current_file():
+                return
             return
 
         if not self._save_all_dirty_editors_for_run():
@@ -171,10 +233,15 @@ class ExecutionController:
                 name = f"{name_base} ({suffix})"
                 suffix += 1
             seen.add(name.lower())
+            launch_kind = str(cfg.get("launch_kind") or cfg.get("target_kind") or "script").strip().lower()
+            if launch_kind not in {"script", "module"}:
+                launch_kind = "script"
             out.append(
                 {
                     "name": name,
+                    "launch_kind": launch_kind,
                     "script_path": str(cfg.get("script_path") or "").strip(),
+                    "module_name": str(cfg.get("module_name") or cfg.get("module") or "").strip(),
                     "args": str(cfg.get("args") or "").strip(),
                     "working_dir": str(cfg.get("working_dir") or "").strip(),
                     "interpreter": str(cfg.get("interpreter") or "").strip(),
@@ -278,24 +345,6 @@ class ExecutionController:
             self.ide.statusBar().showMessage(f"Run config not found: {name}", 2200)
             return False
 
-        script_spec = str(chosen.get("script_path") or "").strip()
-        if not script_spec:
-            self.ide.statusBar().showMessage(f"Run config '{name}' has no script path.", 2600)
-            return False
-        if os.path.isabs(script_spec):
-            script_path = self._canonical_path(script_spec)
-        else:
-            script_path = self._canonical_path(os.path.join(self.project_root, script_spec))
-        if not os.path.isfile(script_path):
-            self.ide.statusBar().showMessage(f"Run config '{name}' script not found: {script_path}", 3200)
-            return False
-
-        if not self._save_all_dirty_editors_for_run():
-            return False
-
-        if not self.console_run_manager:
-            return False
-
         run_in_spec = str(chosen.get("working_dir") or "").strip()
         if run_in_spec:
             run_in = (
@@ -304,34 +353,66 @@ class ExecutionController:
                 else self._canonical_path(os.path.join(self.project_root, run_in_spec))
             )
         else:
-            run_in = self.resolve_run_in(script_path)
+            run_in = self.project_root
         if not os.path.isdir(run_in):
-            run_in = os.path.dirname(script_path) or self.project_root
+            run_in = self.project_root
 
-        interpreter = str(chosen.get("interpreter") or "").strip() or self.resolve_interpreter(script_path)
-        args_text = str(chosen.get("args") or "").strip()
+        launch_kind = str(chosen.get("launch_kind") or "script").strip().lower()
         env_assignments = self._normalize_env_assignments(chosen.get("env"))
+        arguments = self._split_args(str(chosen.get("args") or ""))
+        if arguments is None:
+            self.ide.statusBar().showMessage(f"Run config '{name}' has invalid shell-style arguments.", 2800)
+            return False
 
-        command_block = self._build_python_run_command(
-            run_in=run_in,
-            interpreter=interpreter,
-            script_path=script_path,
-            args_text=args_text,
-            env_assignments=env_assignments,
-        )
-        file_key = f"{script_path}::pycfg::{name}"
-        self.console_run_manager.run_custom_command(
-            file_key=file_key,
-            label=f"Run: {name}",
-            run_in=run_in,
-            command_block=command_block,
-        )
-        self.dock_terminal.show()
-        if self._run_config().get("focus_output_on_run", True):
-            self.dock_terminal.raise_()
+        if not self._save_all_dirty_editors_for_run():
+            return False
+
+        ok = False
+        if launch_kind == "module":
+            module_name = str(chosen.get("module_name") or "").strip()
+            if not module_name:
+                self.ide.statusBar().showMessage(f"Run config '{name}' has no module name.", 2600)
+                return False
+            interpreter = str(chosen.get("interpreter") or "").strip() or self.resolve_interpreter(run_in or self.project_root)
+            ok = self._start_debugger_for_module(
+                module_name=module_name,
+                interpreter=interpreter,
+                working_directory=run_in,
+                arguments=arguments,
+                environment=dict(env_assignments),
+                resolved_file_path=self._resolve_python_module_entry_path(module_name, run_in),
+                session_label=name,
+            )
+        else:
+            script_spec = str(chosen.get("script_path") or "").strip()
+            if not script_spec:
+                self.ide.statusBar().showMessage(f"Run config '{name}' has no script path.", 2600)
+                return False
+            if os.path.isabs(script_spec):
+                script_path = self._canonical_path(script_spec)
+            else:
+                script_path = self._canonical_path(os.path.join(self.project_root, script_spec))
+            if not os.path.isfile(script_path):
+                self.ide.statusBar().showMessage(f"Run config '{name}' script not found: {script_path}", 3200)
+                return False
+            if not run_in_spec:
+                run_in = self.resolve_run_in(script_path)
+                if not os.path.isdir(run_in):
+                    run_in = os.path.dirname(script_path) or self.project_root
+            interpreter = str(chosen.get("interpreter") or "").strip() or self.resolve_interpreter(script_path)
+            ok = self._start_debugger_for_script(
+                script_path=script_path,
+                interpreter=interpreter,
+                working_directory=run_in,
+                arguments=arguments,
+                environment=dict(env_assignments),
+                session_label=name,
+            )
+        if not ok:
+            return False
         if set_active:
             self.set_active_python_run_config(name)
-        self.ide.statusBar().showMessage(f"Running config '{name}'", 2200)
+        self.ide.statusBar().showMessage(f"Debugging config '{name}'", 2200)
         return True
 
     def _is_rust_runnable_file(self, file_path: str) -> bool:
@@ -662,6 +743,16 @@ class ExecutionController:
         self._run_cpp_cmake_pipeline(file_path, status_prefix="Building + running", run_executable=True)
 
     def rerun_current_file(self):
+        active_python = self.active_python_run_config_name()
+        if active_python:
+            self.run_named_python_config(active_python, set_active=False)
+            return
+
+        ed = self.current_editor()
+        if ed and self._is_python_runnable_file(getattr(ed, "file_path", "") or ""):
+            self.run_current_file()
+            return
+
         if not self.console_run_manager:
             return
 
@@ -692,6 +783,17 @@ class ExecutionController:
         self.ide.statusBar().showMessage(f"Rerunning {os.path.basename(target)}", 1500)
 
     def stop_current_run(self):
+        debugger_item = self._active_debugger_item()
+        if debugger_item is not None:
+            debugger = self._debugger_widget()
+            stage = int(debugger.request_stop_active() or 0) if debugger is not None else 0
+            self.ide.statusBar().showMessage(
+                self._debugger_stop_status_message(stage, target=str(debugger_item.get("label") or "")),
+                2200,
+            )
+            self._update_toolbar_run_controls()
+            return
+
         if not self.console_run_manager:
             return
 
@@ -803,6 +905,10 @@ class ExecutionController:
     def _is_cpp_runnable_file(self, file_path: str) -> bool:
         suffix = os.path.splitext(str(file_path or ""))[1].lower()
         return suffix in _CPP_RUNNABLE_SUFFIXES
+
+    def _is_python_runnable_file(self, file_path: str) -> bool:
+        suffix = os.path.splitext(str(file_path or ""))[1].lower()
+        return suffix in _PYTHON_RUNNABLE_SUFFIXES
 
     def _is_cpp_buildable_file(self, file_path: str) -> bool:
         suffix = os.path.splitext(str(file_path or ""))[1].lower()
@@ -923,6 +1029,142 @@ class ExecutionController:
             seen.add(dedupe)
             out.append((key, value))
         return out
+
+    @staticmethod
+    def _split_args(raw_args: str) -> tuple[str, ...] | None:
+        text = str(raw_args or "").strip()
+        if not text:
+            return ()
+        try:
+            return tuple(str(part) for part in shlex.split(text))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _debugger_stop_status_message(stage: int, *, target: str = "") -> str:
+        label = str(target or "").strip() or "debug session"
+        if stage <= 0:
+            return f"No active debug session to stop for {label}."
+        if stage == 1:
+            return f"Polite stop requested for {label}. Click Stop again to escalate."
+        if stage == 2:
+            return f"Forceful stop requested for {label}. Click Stop again to kill it."
+        return f"Kill signal sent to {label}."
+
+    def _start_debugger_for_current_file(self) -> bool:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            self.ide.statusBar().showMessage("Debugger is not available.", 2200)
+            return False
+        ok = bool(debugger.start_current_file_debugging())
+        if ok:
+            self._show_debugger_dock()
+            session = debugger.active_session()
+            self.ide.statusBar().showMessage(
+                f"Debugging {session.session_label() if session is not None else 'Python file'}",
+                1800,
+            )
+            self._update_toolbar_run_controls()
+        return ok
+
+    def _start_debugger_for_script(
+        self,
+        *,
+        script_path: str,
+        interpreter: str,
+        working_directory: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        session_label: str,
+    ) -> bool:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            self.ide.statusBar().showMessage("Debugger is not available.", 2200)
+            return False
+        ok = bool(
+            debugger.start_script_debugging(
+                file_path=script_path,
+                interpreter=interpreter,
+                working_directory=working_directory,
+                arguments=arguments,
+                environment=environment,
+                session_label=session_label,
+                session_key=f"{script_path}::pycfg::script::{session_label}" if session_label else script_path,
+            )
+        )
+        if ok:
+            self._show_debugger_dock()
+            self._update_toolbar_run_controls()
+        return ok
+
+    def _start_debugger_for_module(
+        self,
+        *,
+        module_name: str,
+        interpreter: str,
+        working_directory: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        resolved_file_path: str,
+        session_label: str,
+    ) -> bool:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            self.ide.statusBar().showMessage("Debugger is not available.", 2200)
+            return False
+        ok = bool(
+            debugger.start_module_debugging(
+                module_name=module_name,
+                interpreter=interpreter,
+                working_directory=working_directory,
+                arguments=arguments,
+                environment=environment,
+                resolved_file_path=resolved_file_path,
+                session_label=session_label,
+                session_key=f"module::{module_name}::pycfg::{session_label}" if session_label else f"module::{module_name}",
+            )
+        )
+        if ok:
+            self._show_debugger_dock()
+            self._update_toolbar_run_controls()
+        return ok
+
+    def _resolve_python_module_entry_path(self, module_name: str, working_directory: str) -> str:
+        module = str(module_name or "").strip()
+        if not module:
+            return ""
+
+        parts = [part for part in module.split(".") if part]
+        if not parts:
+            return ""
+
+        roots: list[str] = []
+        for candidate in (working_directory, self.project_root):
+            text = str(candidate or "").strip()
+            if text and text not in roots:
+                roots.append(text)
+
+        for root in roots:
+            module_file = self._canonical_path(os.path.join(root, *parts) + ".py")
+            if os.path.isfile(module_file):
+                return module_file
+            package_main = self._canonical_path(os.path.join(root, *parts, "__main__.py"))
+            if os.path.isfile(package_main):
+                return package_main
+        return ""
+
+    def _stop_debugger_session(self, session_key: str) -> None:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            return
+        session = debugger.session_for_key(session_key)
+        label = session.session_label() if session is not None else session_key
+        stage = int(debugger.request_stop_for_key(session_key) or 0)
+        self.ide.statusBar().showMessage(
+            self._debugger_stop_status_message(stage, target=label),
+            2200,
+        )
+        self._update_toolbar_run_controls()
 
     def _normalized_cmake_build_configs(self) -> list[dict]:
         project_build = self.settings_manager.get("build.cmake", scope_preference="project", default={})

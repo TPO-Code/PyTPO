@@ -267,6 +267,11 @@ class ActionRegistry:
         ide._panel_toggle_actions.append(act_panel_debug)
         view.addAction(act_panel_debug)
 
+        act_panel_debugger = ide.dock_debugger.toggleViewAction()
+        act_panel_debugger.setText("Debugger Dock")
+        ide._panel_toggle_actions.append(act_panel_debugger)
+        view.addAction(act_panel_debugger)
+
         act_panel_terminal = ide.dock_terminal.toggleViewAction()
         act_panel_terminal.setText("Terminal Dock")
         ide._panel_toggle_actions.append(act_panel_terminal)

@@ -7,7 +7,9 @@ behavior can be added without coupling ``TPOPyside`` to the IDE.
 
 import re
 
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QTextCursor, QTextFormat
+from PySide6.QtWidgets import QLineEdit, QTextEdit
 
 from TPOPyside.widgets.code_editor import (
     CodeEditor as BaseCodeEditor,
@@ -23,6 +25,128 @@ class CodeEditor(BaseCodeEditor):
     Starts as a behavior-preserving pass-through; extend here for IDE-only
     editor features.
     """
+
+    debuggerBreakpointToggled = Signal(int, bool)
+
+    def __init__(self, *args, **kwargs):
+        self._debugger_breakpoints: set[int] = set()
+        self._debugger_execution_line = -1
+        super().__init__(*args, **kwargs)
+
+    def lineNumberAreaWidth(self):
+        return super().lineNumberAreaWidth() + 14
+
+    def lineNumberAreaPaintEvent(self, event):
+        super().lineNumberAreaPaintEvent(event)
+        if not self._debugger_breakpoints and self._debugger_execution_line <= 0:
+            return
+
+        painter = QPainter(self.lineNumberArea)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        bottom = top + self.blockBoundingRect(block).height()
+        fold_gutter = int(self._fold_gutter_width) if self._fold_provider is not None else 0
+        marker_center_x = fold_gutter + 7
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                line_number = int(block_number + 1)
+                line_height = int(self.fontMetrics().height())
+                marker_y = int(top + max(2, (line_height - 9) // 2))
+
+                if line_number in self._debugger_breakpoints:
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor("#d54a3a"))
+                    painter.drawEllipse(marker_center_x - 4, marker_y, 9, 9)
+
+                if line_number == self._debugger_execution_line:
+                    painter.setPen(QColor("#f2c94c"))
+                    painter.drawText(
+                        marker_center_x + 5,
+                        int(top),
+                        10,
+                        line_height,
+                        Qt.AlignLeft | Qt.AlignVCenter,
+                        "▶",
+                    )
+
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+            block_number += 1
+
+        painter.end()
+
+    def lineNumberAreaMousePressEvent(self, event):
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        fold_gutter = int(self._fold_gutter_width) if self._fold_provider is not None else 0
+        if point.x() > fold_gutter:
+            block_number = self._block_number_at_y(int(point.y()))
+            if block_number >= 0:
+                self.toggle_debugger_breakpoint(block_number + 1)
+                event.accept()
+                return
+        super().lineNumberAreaMousePressEvent(event)
+
+    def _rebuild_extra_selections(self):
+        super()._rebuild_extra_selections()
+        if self._debugger_execution_line <= 0:
+            return
+
+        block = self.document().findBlockByLineNumber(self._debugger_execution_line - 1)
+        if not block.isValid():
+            return
+
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = QTextCursor(block)
+        selection.cursor.clearSelection()
+        selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+        selection.format.setBackground(QColor(255, 230, 120, 90))
+
+        extra_selections = list(self.extraSelections())
+        extra_selections.append(selection)
+        self.setExtraSelections(extra_selections)
+
+    def debugger_breakpoints(self) -> set[int]:
+        return set(self._debugger_breakpoints)
+
+    def set_debugger_breakpoints(self, lines: set[int]) -> None:
+        normalized = {int(line) for line in lines if int(line) > 0}
+        if normalized == self._debugger_breakpoints:
+            return
+        self._debugger_breakpoints = normalized
+        self.lineNumberArea.update()
+
+    def toggle_debugger_breakpoint(self, line_number: int) -> bool:
+        line = int(line_number)
+        if line <= 0:
+            return False
+        enabled = line not in self._debugger_breakpoints
+        if enabled:
+            self._debugger_breakpoints.add(line)
+        else:
+            self._debugger_breakpoints.discard(line)
+        self.lineNumberArea.update()
+        self.debuggerBreakpointToggled.emit(line, enabled)
+        return enabled
+
+    def set_debugger_execution_line(self, line_number: int) -> None:
+        normalized = int(line_number)
+        if self._debugger_execution_line == normalized:
+            return
+        self._debugger_execution_line = normalized
+        self._rebuild_extra_selections()
+        self.lineNumberArea.update()
+
+    def clear_debugger_execution_line(self) -> None:
+        if self._debugger_execution_line <= 0:
+            return
+        self._debugger_execution_line = -1
+        self._rebuild_extra_selections()
+        self.lineNumberArea.update()
 
     def _resolve_completion_insert_text(
         self,

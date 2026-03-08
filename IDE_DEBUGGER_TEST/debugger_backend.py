@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
 from abc import abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
 
 from PySide6.QtCore import QObject, Signal
@@ -13,9 +13,16 @@ class ExecutionState(Enum):
     STOPPING = "stopping"
 
 
+class DebugLaunchKind(Enum):
+    SCRIPT = "script"
+    MODULE = "module"
+
+
 @dataclass(slots=True)
 class DebugLaunchRequest:
+    launch_kind: DebugLaunchKind = DebugLaunchKind.SCRIPT
     file_path: str = ""
+    module_name: str = ""
     source_text: str = ""
     working_directory: str = ""
     arguments: tuple[str, ...] = field(default_factory=tuple)

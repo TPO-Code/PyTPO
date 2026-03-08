@@ -75,6 +75,7 @@ from src.ui.syntax_highlighting_runtime import configure_syntax_highlighting_run
 from src.ui.editor_workspace import EditorTabs, EditorWidget, EditorWorkspace
 from src.ui.lint_manager import LintManager
 from src.ui.spellcheck_manager import SpellcheckManager
+from src.ui.debugger import DebuggerDockWidget
 from src.ui.widgets.code_editor import CodeEditor
 from src.ui.widgets.codex_agent_dock import CodexAgentDockWidget
 from src.ui.widgets.file_system_tree import FileSystemTreeWidget
@@ -754,6 +755,7 @@ class PythonIDE(Window):
         for dock, area in (
             (self.dock_project, Qt.LeftDockWidgetArea),
             (self.dock_debug, Qt.BottomDockWidgetArea),
+            (self.dock_debugger, Qt.BottomDockWidgetArea),
             (self.dock_terminal, Qt.BottomDockWidgetArea),
             (self.dock_problems, Qt.BottomDockWidgetArea),
             (self.dock_usages, Qt.BottomDockWidgetArea),
@@ -776,6 +778,8 @@ class PythonIDE(Window):
 
         self.dock_project.show()
         self.dock_debug.show()
+        if self.dock_debugger is not None:
+            self.dock_debugger.hide()
         self.dock_terminal.hide()
         if self.dock_problems is not None:
             self.dock_problems.hide()
@@ -1097,6 +1101,18 @@ class PythonIDE(Window):
         self.debug_output.setMinimumHeight(80)
         self.dock_debug.setWidget(self.debug_output)
 
+        self.dock_debugger = QDockWidget("Debugger", self)
+        self.dock_debugger.setObjectName("dock_debugger")
+        self.dock_debugger.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self.dock_debugger.setFeatures(features)
+        self.dock_debugger.setMinimumHeight(90)
+
+        self.debugger_dock_widget = DebuggerDockWidget(self, self.dock_debugger)
+        self.dock_debugger.setWidget(self.debugger_dock_widget)
+        self.debugger_dock_widget.runStateChanged.connect(
+            lambda: self.execution_controller._update_toolbar_run_controls()
+        )
+
         self.dock_terminal = QDockWidget("Terminal", self)
         self.dock_terminal.setObjectName("dock_console")
         self.dock_terminal.setAllowedAreas(Qt.BottomDockWidgetArea)
@@ -1171,16 +1187,19 @@ class PythonIDE(Window):
         self.console_tabs.tabCloseRequested.connect(self._on_console_tab_close_requested)
 
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_debug)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_debugger)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_terminal)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_problems)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_usages)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_outline)
-        self.tabifyDockWidget(self.dock_debug, self.dock_terminal)
+        self.tabifyDockWidget(self.dock_debug, self.dock_debugger)
+        self.tabifyDockWidget(self.dock_debugger, self.dock_terminal)
         self.tabifyDockWidget(self.dock_terminal, self.dock_problems)
         self.tabifyDockWidget(self.dock_problems, self.dock_usages)
         self._apply_tree_font_settings_to_all()
         self.dock_outline.hide()
         self.dock_debug.show()
+        self.dock_debugger.hide()
 
     def setup_commit_md_dock(self) -> None:
         features = (
@@ -2031,6 +2050,7 @@ class PythonIDE(Window):
         docks = [
             self.dock_project,
             self.dock_debug,
+            self.dock_debugger,
             self.dock_terminal,
             self.dock_problems,
             self.dock_usages,
@@ -2166,6 +2186,13 @@ class PythonIDE(Window):
         self._bind_editor_tab_action_hooks()
         if running_count is None:
             running_count = len(self._running_script_sessions())
+            debugger_widget = getattr(self, "debugger_dock_widget", None)
+            running_sessions = getattr(debugger_widget, "running_sessions", None)
+            if callable(running_sessions):
+                try:
+                    running_count += len(running_sessions())
+                except Exception:
+                    pass
 
         project_loaded = self._has_project_loaded()
         active_editor = self.current_editor()
@@ -5907,6 +5934,9 @@ class PythonIDE(Window):
         except Exception:
             pass
         self._assign_dock_identity(ed)
+        debugger_widget = getattr(self, "debugger_dock_widget", None)
+        if debugger_widget is not None:
+            debugger_widget.bind_editor(ed)
         return True
 
     def _wrap_editor_in_markdown_tab(self, ed: EditorWidget) -> MarkdownEditorTab | None:
@@ -6015,6 +6045,9 @@ class PythonIDE(Window):
             existing_editor = self._editor_from_document_widget(existing)
             if isinstance(existing_editor, EditorWidget):
                 self._attach_editor_lint_hooks(existing_editor)
+                debugger_widget = getattr(self, "debugger_dock_widget", None)
+                if debugger_widget is not None:
+                    debugger_widget.bind_editor(existing_editor)
             self._schedule_symbol_outline_refresh(immediate=True)
             self._focus_document_widget(existing)
             if self._is_tdoc_related_path(cpath):
@@ -6655,7 +6688,7 @@ class PythonIDE(Window):
 
         bottom = [
             d
-            for d in (self.dock_debug, self.dock_terminal, self.dock_problems, self.dock_usages)
+            for d in (self.dock_debug, self.dock_debugger, self.dock_terminal, self.dock_problems, self.dock_usages)
             if self._is_resizable_docked(d)
         ]
         if bottom:

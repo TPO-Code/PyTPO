@@ -5,13 +5,15 @@ import tempfile
 
 from PySide6.QtCore import QProcess, QProcessEnvironment
 
-from debugger_backend import DebugLaunchRequest, DebuggerBackend, ExecutionState
+from debugger_backend import DebugLaunchKind, DebugLaunchRequest, DebuggerBackend, ExecutionState
 
 
 DEBUGGER_HARNESS_CODE = r'''
 import bdb
+import importlib.util
 import json
 import os
+import runpy
 import sys
 import traceback
 
@@ -138,20 +140,51 @@ class RemoteDebugger(bdb.Bdb):
 
         self.runctx(code, globals_dict, globals_dict)
 
+    def run_module(self, module_name, argv):
+        spec = importlib.util.find_spec(module_name)
+        if spec is None or not spec.origin:
+            raise ModuleNotFoundError(module_name)
+
+        self.mainpyfile = self.canonic(spec.origin)
+
+        module_dir = os.path.dirname(os.path.abspath(spec.origin))
+        if module_dir and module_dir not in sys.path:
+            sys.path.insert(0, module_dir)
+
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [spec.origin, *argv]
+            self.runctx(
+                "runpy.run_module(module_name, run_name='__main__', alter_sys=False)",
+                {"runpy": runpy, "module_name": module_name},
+                {},
+            )
+        finally:
+            sys.argv = original_argv
+
 
 def main():
-    if len(sys.argv) < 2:
-        send_event("fatal", {"message": "Missing target script path"})
+    if len(sys.argv) < 3:
+        send_event("fatal", {"message": "Missing launch mode or target"})
         raise SystemExit(1)
 
-    target_script = os.path.abspath(sys.argv[1])
-    sys.argv = [target_script, *sys.argv[2:]]
+    launch_mode = sys.argv[1]
+    launch_target = sys.argv[2]
+    launch_args = sys.argv[3:]
     debugger = RemoteDebugger()
 
-    send_event("started", {"file": debugger.canonic(target_script)})
-
     try:
-        debugger.run_script(target_script)
+        if launch_mode == "module":
+            spec = importlib.util.find_spec(launch_target)
+            if spec is None or not spec.origin:
+                raise ModuleNotFoundError(launch_target)
+            send_event("started", {"file": debugger.canonic(spec.origin), "module": launch_target})
+            debugger.run_module(launch_target, launch_args)
+        else:
+            target_script = os.path.abspath(launch_target)
+            sys.argv = [target_script, *launch_args]
+            send_event("started", {"file": debugger.canonic(target_script)})
+            debugger.run_script(target_script)
     except SystemExit:
         pass
     except Exception:
@@ -201,7 +234,9 @@ class PythonDebuggerBackend(DebuggerBackend):
         self.runner_script_path = runner_tmp.name
 
         target_script_path = launch_request.file_path
-        if launch_request.use_source_snapshot or not target_script_path:
+        if launch_request.launch_kind == DebugLaunchKind.SCRIPT and (
+            launch_request.use_source_snapshot or not target_script_path
+        ):
             user_tmp = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".py", encoding="utf-8")
             user_tmp.write(launch_request.source_text)
             user_tmp.close()
@@ -221,9 +256,10 @@ class PythonDebuggerBackend(DebuggerBackend):
             process_environment.insert(str(key), str(value))
         self.process.setProcessEnvironment(process_environment)
 
+        launch_target = launch_request.module_name if launch_request.launch_kind == DebugLaunchKind.MODULE else target_script_path
         self.process.start(
             sys.executable,
-            [self.runner_script_path, target_script_path, *launch_request.arguments],
+            [self.runner_script_path, launch_request.launch_kind.value, launch_target, *launch_request.arguments],
         )
 
     def stop_debugging(self, clean_only=False):
