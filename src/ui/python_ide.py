@@ -1105,7 +1105,7 @@ class PythonIDE(Window):
         self.dock_debugger.setObjectName("dock_debugger")
         self.dock_debugger.setAllowedAreas(Qt.BottomDockWidgetArea)
         self.dock_debugger.setFeatures(features)
-        self.dock_debugger.setMinimumHeight(90)
+        self.dock_debugger.setMinimumHeight(48)
 
         self.debugger_dock_widget = DebuggerDockWidget(self, self.dock_debugger)
         self.dock_debugger.setWidget(self.debugger_dock_widget)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import re
 import shlex
@@ -245,10 +246,26 @@ class ExecutionController:
                     "args": str(cfg.get("args") or "").strip(),
                     "working_dir": str(cfg.get("working_dir") or "").strip(),
                     "interpreter": str(cfg.get("interpreter") or "").strip(),
+                    "just_my_code": self._coerce_bool(cfg.get("just_my_code"), default=self._debugger_just_my_code_default()),
                     "env": [f"{k}={v}" for k, v in self._normalize_env_assignments(cfg.get("env"))],
                 }
             )
         return out
+
+    def _debugger_just_my_code_default(self) -> bool:
+        raw = self.settings_manager.get("debugger.just_my_code", scope_preference="project", default=True)
+        return self._coerce_bool(raw, default=True)
+
+    @staticmethod
+    def _coerce_bool(value: object, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
 
     def python_run_config_names(self) -> list[str]:
         names: list[str] = []
@@ -380,6 +397,7 @@ class ExecutionController:
                 working_directory=run_in,
                 arguments=arguments,
                 environment=dict(env_assignments),
+                just_my_code=bool(chosen.get("just_my_code")),
                 resolved_file_path=self._resolve_python_module_entry_path(module_name, run_in),
                 session_label=name,
             )
@@ -406,6 +424,7 @@ class ExecutionController:
                 working_directory=run_in,
                 arguments=arguments,
                 environment=dict(env_assignments),
+                just_my_code=bool(chosen.get("just_my_code")),
                 session_label=name,
             )
         if not ok:
@@ -1075,6 +1094,7 @@ class ExecutionController:
         working_directory: str,
         arguments: tuple[str, ...],
         environment: dict[str, str],
+        just_my_code: bool,
         session_label: str,
     ) -> bool:
         debugger = self._debugger_widget()
@@ -1088,6 +1108,7 @@ class ExecutionController:
                 working_directory=working_directory,
                 arguments=arguments,
                 environment=environment,
+                just_my_code=just_my_code,
                 session_label=session_label,
                 session_key=f"{script_path}::pycfg::script::{session_label}" if session_label else script_path,
             )
@@ -1105,6 +1126,7 @@ class ExecutionController:
         working_directory: str,
         arguments: tuple[str, ...],
         environment: dict[str, str],
+        just_my_code: bool,
         resolved_file_path: str,
         session_label: str,
     ) -> bool:
@@ -1119,6 +1141,7 @@ class ExecutionController:
                 working_directory=working_directory,
                 arguments=arguments,
                 environment=environment,
+                just_my_code=just_my_code,
                 resolved_file_path=resolved_file_path,
                 session_label=session_label,
                 session_key=f"module::{module_name}::pycfg::{session_label}" if session_label else f"module::{module_name}",
@@ -1133,24 +1156,36 @@ class ExecutionController:
         module = str(module_name or "").strip()
         if not module:
             return ""
-
-        parts = [part for part in module.split(".") if part]
-        if not parts:
-            return ""
-
-        roots: list[str] = []
+        search_roots: list[str] = []
+        seen: set[str] = set()
         for candidate in (working_directory, self.project_root):
-            text = str(candidate or "").strip()
-            if text and text not in roots:
-                roots.append(text)
+            base = str(candidate or "").strip()
+            if not base:
+                continue
+            for root in (base, os.path.join(base, "src")):
+                resolved = self._canonical_path(root)
+                if resolved in seen or not os.path.isdir(resolved):
+                    continue
+                seen.add(resolved)
+                search_roots.append(resolved)
 
-        for root in roots:
-            module_file = self._canonical_path(os.path.join(root, *parts) + ".py")
-            if os.path.isfile(module_file):
-                return module_file
-            package_main = self._canonical_path(os.path.join(root, *parts, "__main__.py"))
-            if os.path.isfile(package_main):
-                return package_main
+        for root in search_roots:
+            try:
+                spec = importlib.machinery.PathFinder.find_spec(module, [root])
+            except Exception:
+                spec = None
+            if spec is not None and getattr(spec, "submodule_search_locations", None):
+                try:
+                    main_spec = importlib.machinery.PathFinder.find_spec(f"{module}.__main__", list(spec.submodule_search_locations))
+                except Exception:
+                    main_spec = None
+                main_origin = str(getattr(main_spec, "origin", "") or "").strip() if main_spec is not None else ""
+                if main_origin and main_origin not in {"built-in", "frozen"} and os.path.isfile(main_origin):
+                    return self._canonical_path(main_origin)
+            origin = str(getattr(spec, "origin", "") or "").strip() if spec is not None else ""
+            if origin and origin not in {"built-in", "frozen"} and os.path.isfile(origin):
+                return self._canonical_path(origin)
+
         return ""
 
     def _stop_debugger_session(self, session_key: str) -> None:

@@ -86,6 +86,7 @@ class DebuggerController(QObject):
             working_directory=os.path.dirname(file_path),
             arguments=(),
             environment={},
+            just_my_code=self._resolved_just_my_code(),
             session_label=os.path.basename(file_path) or file_path,
         )
 
@@ -97,6 +98,7 @@ class DebuggerController(QObject):
         working_directory: str = "",
         arguments: tuple[str, ...] = (),
         environment: dict[str, str] | None = None,
+        just_my_code: bool | None = None,
         session_label: str = "",
         session_key: str = "",
     ) -> bool:
@@ -119,6 +121,7 @@ class DebuggerController(QObject):
             working_directory=str(working_directory or os.path.dirname(target_path) or "").strip(),
             arguments=tuple(str(arg) for arg in arguments),
             environment=dict(environment or {}),
+            just_my_code=self._resolved_just_my_code(just_my_code),
             use_source_snapshot=False,
         )
         return self._start_launch(
@@ -136,6 +139,7 @@ class DebuggerController(QObject):
         working_directory: str = "",
         arguments: tuple[str, ...] = (),
         environment: dict[str, str] | None = None,
+        just_my_code: bool | None = None,
         resolved_file_path: str = "",
         session_label: str = "",
         session_key: str = "",
@@ -159,6 +163,7 @@ class DebuggerController(QObject):
             working_directory=str(working_directory or self.ide.project_root or "").strip(),
             arguments=tuple(str(arg) for arg in arguments),
             environment=dict(environment or {}),
+            just_my_code=self._resolved_just_my_code(just_my_code),
             use_source_snapshot=False,
         )
         return self._start_launch(
@@ -344,3 +349,16 @@ class DebuggerController(QObject):
     def _is_python_file(editor: EditorWidget) -> bool:
         file_path = str(editor.file_path or "")
         return bool(file_path) and os.path.splitext(file_path)[1].lower() == ".py"
+
+    def _resolved_just_my_code(self, override: bool | None = None) -> bool:
+        if isinstance(override, bool):
+            return override
+        raw = self.ide.settings_manager.get("debugger.just_my_code", scope_preference="project", default=True)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw or "").strip().lower()
+        if text in {"0", "false", "no", "off"}:
+            return False
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        return True

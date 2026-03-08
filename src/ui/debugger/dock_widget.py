@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -52,6 +53,7 @@ class DebuggerDockWidget(QWidget):
         working_directory: str = "",
         arguments: tuple[str, ...] = (),
         environment: dict[str, str] | None = None,
+        just_my_code: bool | None = None,
         session_label: str = "",
         session_key: str = "",
     ) -> bool:
@@ -66,6 +68,7 @@ class DebuggerDockWidget(QWidget):
                 working_directory=working_directory,
                 arguments=arguments,
                 environment=environment,
+                just_my_code=just_my_code,
                 session_label=label,
                 session_key=key,
             )
@@ -85,6 +88,7 @@ class DebuggerDockWidget(QWidget):
         working_directory: str = "",
         arguments: tuple[str, ...] = (),
         environment: dict[str, str] | None = None,
+        just_my_code: bool | None = None,
         resolved_file_path: str = "",
         session_label: str = "",
         session_key: str = "",
@@ -100,6 +104,7 @@ class DebuggerDockWidget(QWidget):
                 working_directory=working_directory,
                 arguments=arguments,
                 environment=environment,
+                just_my_code=just_my_code,
                 resolved_file_path=resolved_file_path,
                 session_label=label,
                 session_key=key,
@@ -170,29 +175,40 @@ class DebuggerDockWidget(QWidget):
         self._refresh_active_state()
         return stage
 
+    def minimumSizeHint(self) -> QSize:
+        return QSize(360, 70)
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(4)
 
         self.btn_run = QPushButton("Debug Current File")
+        self.btn_run.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_run.clicked.connect(self.start_current_file_debugging)
 
         self.btn_step_over = QPushButton("Step Over")
+        self.btn_step_over.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_step_over.clicked.connect(lambda: self._send_active_command("next"))
 
         self.btn_step_in = QPushButton("Step In")
+        self.btn_step_in.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_step_in.clicked.connect(lambda: self._send_active_command("step"))
 
         self.btn_continue = QPushButton("Continue")
+        self.btn_continue.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_continue.clicked.connect(lambda: self._send_active_command("continue"))
 
         self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_stop.clicked.connect(self.request_stop_active)
 
         self.status_label = QLabel("Idle")
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         toolbar.addWidget(self.btn_run)
         toolbar.addWidget(self.btn_step_over)
@@ -206,6 +222,8 @@ class DebuggerDockWidget(QWidget):
         self.session_tabs.setDocumentMode(True)
         self.session_tabs.setMovable(True)
         self.session_tabs.setTabsClosable(True)
+        self.session_tabs.setMinimumHeight(0)
+        self.session_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.session_tabs.currentChanged.connect(self._on_current_tab_changed)
         self.session_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
 

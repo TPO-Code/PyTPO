@@ -1,16 +1,22 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+import html
+import os
+import re
+
+from PySide6.QtCore import QSize, Qt, QUrl, QUrlQuery, Signal
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
+    QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -26,13 +32,23 @@ class DebuggerSessionWidget(QWidget):
     stateChanged = Signal(str)
     finished = Signal()
     watchExpressionsChanged = Signal(list)
+    _RE_PY_TRACEBACK = re.compile(r'File "([^"]+)", line (\d+)(?:, in .*)?$')
+    _RE_CXX_DIAG = re.compile(
+        r"^\s*(?P<path>[^:\n][^:\n]*):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?:fatal\s+error|error)\b",
+        re.IGNORECASE,
+    )
+    _RE_GENERIC_LOCATION = re.compile(
+        r"(?:^|(?<=\s)|(?<=[(\"']))(?P<path>(?:[A-Za-z]:[\\/][^:\n]+|/[^:\n]+|(?:\./|\.\./|~/)[^:\n]+|[^:\s]+\.[A-Za-z0-9_+-]+)):(?P<line>\d+)(?::(?P<col>\d+))?"
+    )
+    _STEP_SKIP_LINE = 'Frame skipped from debugging during step-in.'
+    _STEP_SKIP_NOTE_PREFIX = 'Note: may have been skipped because of "justMyCode" option'
 
     def __init__(self, ide, *, session_key: str, session_label: str, parent=None):
         super().__init__(parent)
         self.ide = ide
         self._session_key = str(session_key or "")
         self._session_label = str(session_label or self._session_key or "Python debug session")
-        self.controller = DebuggerController(ide, PythonDebuggerBackend(self), self)
+        self.controller = DebuggerController(ide, PythonDebuggerBackend(self, ide=ide), self)
         self._state = ExecutionState.IDLE
         self._last_visual_state = "idle"
         self._stack_frames: list[dict] = []
@@ -111,57 +127,99 @@ class DebuggerSessionWidget(QWidget):
             return "Finished"
         return "Idle"
 
+    def minimumSizeHint(self) -> QSize:
+        return QSize(320, 60)
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
         self.summary_label = QLabel("Idle", self)
         self.summary_label.setWordWrap(True)
+        self.summary_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self.main_splitter = QSplitter(Qt.Horizontal, self)
+        self.main_splitter.setChildrenCollapsible(True)
+        self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
 
-        self.output_view = QPlainTextEdit(self)
+        self.output_view = QTextBrowser(self)
         self.output_view.setReadOnly(True)
+        self.output_view.setOpenLinks(False)
+        self.output_view.setOpenExternalLinks(False)
+        self.output_view.anchorClicked.connect(self._on_output_link_activated)
         self.output_view.setPlaceholderText("Debugger output...")
+        self.output_view.setMinimumHeight(0)
+        self.output_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.output_view.document().setDefaultStyleSheet(
+            """
+            .dbg-line { margin: 0; white-space: pre-wrap; font-family: monospace; }
+            .dbg-stdout { color: palette(text); }
+            .dbg-stderr { color: #c1121f; }
+            .dbg-protocol { color: #b54708; }
+            .dbg-debug { color: #667085; }
+            .dbg-eval { color: #175cd3; }
+            .dbg-exception { color: #c1121f; font-weight: 600; }
+            .dbg-fatal { color: #b42318; font-weight: 600; }
+            a { color: palette(link); text-decoration: underline; }
+            """
+        )
 
         self.inspector_splitter = QSplitter(Qt.Vertical, self)
+        self.inspector_splitter.setChildrenCollapsible(True)
+        self.inspector_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
 
         self.stack_view = QListWidget(self)
         self.stack_view.setAlternatingRowColors(True)
+        self.stack_view.setMinimumHeight(0)
+        self.stack_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.stack_view.currentRowChanged.connect(self._on_stack_selection_changed)
 
         self.inspector_tabs = QTabWidget(self)
         self.inspector_tabs.setDocumentMode(True)
+        self.inspector_tabs.setMinimumHeight(0)
+        self.inspector_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
 
         self.variables_view = QTreeWidget(self)
         self.variables_view.setColumnCount(2)
         self.variables_view.setHeaderLabels(["Name", "Value"])
         self.variables_view.setAlternatingRowColors(True)
+        self.variables_view.setMinimumHeight(0)
+        self.variables_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
 
         self.watches_host = QWidget(self)
+        self.watches_host.setMinimumHeight(0)
+        self.watches_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         watch_layout = QVBoxLayout(self.watches_host)
         watch_layout.setContentsMargins(0, 0, 0, 0)
         watch_bar = QHBoxLayout()
         watch_bar.setContentsMargins(0, 0, 0, 0)
         self.watch_input = QLineEdit(self)
         self.watch_input.setPlaceholderText("Expression to watch")
+        self.watch_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.watch_input.returnPressed.connect(self._add_watch_expression)
         self.add_watch_button = QPushButton("Add", self)
+        self.add_watch_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.add_watch_button.clicked.connect(self._add_watch_expression)
         self.remove_watch_button = QPushButton("Remove", self)
+        self.remove_watch_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.remove_watch_button.clicked.connect(self._remove_selected_watch)
         self.evaluate_button = QPushButton("Evaluate", self)
+        self.evaluate_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.evaluate_button.clicked.connect(self._evaluate_current_expression)
         watch_bar.addWidget(self.watch_input, 1)
         watch_bar.addWidget(self.add_watch_button)
         watch_bar.addWidget(self.remove_watch_button)
         watch_bar.addWidget(self.evaluate_button)
         self.watch_list = QListWidget(self)
+        self.watch_list.setMinimumHeight(0)
+        self.watch_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.watch_list.currentTextChanged.connect(self._on_watch_selection_changed)
         self.watch_values = QTreeWidget(self)
         self.watch_values.setColumnCount(3)
         self.watch_values.setHeaderLabels(["Expression", "Value", "Status"])
         self.watch_values.setAlternatingRowColors(True)
+        self.watch_values.setMinimumHeight(0)
+        self.watch_values.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         watch_layout.addLayout(watch_bar)
         watch_layout.addWidget(self.watch_list, 1)
         watch_layout.addWidget(self.watch_values, 2)
@@ -170,6 +228,8 @@ class DebuggerSessionWidget(QWidget):
         self.issues_view.setColumnCount(2)
         self.issues_view.setHeaderLabels(["Field", "Value"])
         self.issues_view.setAlternatingRowColors(True)
+        self.issues_view.setMinimumHeight(0)
+        self.issues_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
 
         self.inspector_tabs.addTab(self.variables_view, "Variables")
         self.inspector_tabs.addTab(self.watches_host, "Watches")
@@ -190,9 +250,9 @@ class DebuggerSessionWidget(QWidget):
 
     def _connect_controller(self) -> None:
         self.controller.stateChanged.connect(self._on_state_changed)
-        self.controller.stdoutReceived.connect(lambda text: self._append_output(text))
-        self.controller.stderrReceived.connect(lambda text: self._append_output(text, prefix="[stderr] "))
-        self.controller.protocolError.connect(lambda text: self._append_output(text, prefix="[protocol] "))
+        self.controller.stdoutReceived.connect(self._on_stdout_received)
+        self.controller.stderrReceived.connect(lambda text: self._append_output(text, prefix="[stderr] ", category="stderr"))
+        self.controller.protocolError.connect(lambda text: self._append_output(text, prefix="[protocol] ", category="protocol"))
         self.controller.started.connect(self._on_started)
         self.controller.breakpointsSet.connect(self._on_breakpoints_set)
         self.controller.paused.connect(self._on_paused)
@@ -204,6 +264,10 @@ class DebuggerSessionWidget(QWidget):
         self.controller.finished.connect(self._on_finished)
         self.main_splitter.splitterMoved.connect(self._persist_layout)
         self.inspector_splitter.splitterMoved.connect(self._persist_layout)
+
+    def _on_stdout_received(self, text: str) -> None:
+        line, category = self._normalize_stream_output(text, category="stdout")
+        self._append_output(line, category=category)
 
     def _layout_settings(self) -> dict:
         raw = self.ide.settings_manager.get("debugger.layout", scope_preference="ide", default={})
@@ -237,10 +301,22 @@ class DebuggerSessionWidget(QWidget):
     def _set_summary(self, text: str) -> None:
         self.summary_label.setText(str(text or "").strip() or "Idle")
 
-    def _append_output(self, text: str, *, prefix: str = "") -> None:
+    def _append_output(self, text: str, *, prefix: str = "", category: str = "stdout") -> None:
         line = f"{prefix}{text}" if prefix else str(text or "")
-        if line:
-            self.output_view.appendPlainText(line)
+        if not line:
+            return
+        scroll_bar = self.output_view.verticalScrollBar()
+        stick_to_bottom = scroll_bar.value() >= max(0, scroll_bar.maximum() - 4)
+        parts = line.splitlines() or [line]
+        cursor = self.output_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        for part in parts:
+            if not self.output_view.document().isEmpty():
+                cursor.insertBlock()
+            cursor.insertHtml(self._render_output_html(part, category=category))
+        self.output_view.setTextCursor(cursor)
+        if stick_to_bottom:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     def _clear_issue_view(self) -> None:
         self.issues_view.clear()
@@ -278,16 +354,16 @@ class DebuggerSessionWidget(QWidget):
         module_name = str(data.get("module") or "").strip()
         summary = f"Running {module_name}" if module_name else "Running"
         if file_path:
-            self._append_output(f"[debug] started {file_path}")
+            self._append_output(f"[debug] started {file_path}", category="debug")
             summary = f"Running {file_path}"
         if module_name:
-            self._append_output(f"[debug] module {module_name}")
+            self._append_output(f"[debug] module {module_name}", category="debug")
         self._set_summary(summary)
         self.stateChanged.emit(self._state.value)
 
     def _on_breakpoints_set(self, data: dict) -> None:
         files = data.get("files") or []
-        self._append_output(f"[debug] breakpoints set: {files}")
+        self._append_output(f"[debug] breakpoints set: {files}", category="debug")
 
     def _on_paused(self, data: dict) -> None:
         file_path = str(data.get("file") or "")
@@ -296,7 +372,7 @@ class DebuggerSessionWidget(QWidget):
         label = f"{file_path}:{line_number}" if file_path else f"line {line_number}"
         if function_name:
             label = f"{label} in {function_name}"
-        self._append_output(f"[debug] paused at {label}")
+        self._append_output(f"[debug] paused at {label}", category="debug")
         self._last_visual_state = "paused"
         self._set_summary(f"Paused at {label}")
         self._render_pause_data(data)
@@ -310,7 +386,7 @@ class DebuggerSessionWidget(QWidget):
         expression = str(data.get("expression") or "")
         status = str(data.get("status") or "ok")
         value = str(data.get("value") or data.get("error") or "")
-        self._append_output(f"[eval] {expression} => {value}")
+        self._append_output(f"[eval] {expression} => {value}", category="eval")
         self._set_issue_data(
             "Evaluation",
             [("Expression", expression), ("Status", status), ("Value", value)],
@@ -321,11 +397,11 @@ class DebuggerSessionWidget(QWidget):
         message = str(data.get("message") or "")
         file_path = str(data.get("file") or "")
         line_number = str(data.get("line") or "")
-        self._append_output(f"[exception] {exc_type}: {message}")
+        self._append_output(f"[exception] {exc_type}: {message}", category="exception")
         traceback_text = str(data.get("traceback") or "").strip()
         if traceback_text:
             for line in traceback_text.splitlines():
-                self._append_output(line)
+                self._append_output(line, category="exception")
         self._set_summary(f"Exception: {exc_type}")
         self._set_issue_data(
             "Exception",
@@ -336,10 +412,10 @@ class DebuggerSessionWidget(QWidget):
         self._last_visual_state = "failed"
         message = str(data.get("message") or "Debugger failed.")
         traceback_text = str(data.get("traceback") or "").strip()
-        self._append_output(f"[fatal] {message}")
+        self._append_output(f"[fatal] {message}", category="fatal")
         if traceback_text:
             for line in traceback_text.splitlines():
-                self._append_output(line)
+                self._append_output(line, category="fatal")
         self._set_summary(f"Failed: {message}")
         self._set_issue_data("Fatal Error", [("Message", message), ("Traceback", traceback_text)])
         self.stateChanged.emit(self._state.value)
@@ -348,7 +424,7 @@ class DebuggerSessionWidget(QWidget):
         exit_code = int(data.get("exit_code") or 0)
         exit_status = str(data.get("exit_status") or "finished")
         status = f"Process {exit_status} ({exit_code})"
-        self._append_output(f"[debug] {status}")
+        self._append_output(f"[debug] {status}", category="debug")
         if exit_code != 0 or exit_status != "finished":
             self._set_issue_data(
                 "Process",
@@ -357,12 +433,122 @@ class DebuggerSessionWidget(QWidget):
             self._set_summary(status)
 
     def _on_finished(self) -> None:
-        self._append_output("[debug] finished")
+        self._append_output("[debug] finished", category="debug")
         if self._last_visual_state not in {"failed", "paused"}:
             self._last_visual_state = "finished"
             self._set_summary("Finished")
         self.finished.emit()
         self.stateChanged.emit(self._state.value)
+
+    @classmethod
+    def _normalize_stream_output(cls, text: str, *, category: str) -> tuple[str, str]:
+        line = str(text or "")
+        stripped = line.strip()
+        if stripped == cls._STEP_SKIP_LINE:
+            return "[debug] step-in skipped a library or framework frame.", "debug"
+        if stripped.startswith(cls._STEP_SKIP_NOTE_PREFIX):
+            return "[debug] Just My Code is enabled, so non-project frames are skipped during step-in. Disable it in the debugger settings or this run config to step into them.", "debug"
+        return line, category
+
+    def _on_output_link_activated(self, url: QUrl) -> None:
+        if not isinstance(url, QUrl) or url.scheme() != "pytpo-debug":
+            return
+        query = QUrlQuery(url)
+        raw_path = query.queryItemValue("path")
+        line = max(1, int(query.queryItemValue("line") or 1))
+        column = max(1, int(query.queryItemValue("col") or 1))
+        file_path = self._resolve_output_path(raw_path)
+        if not file_path or not os.path.isfile(file_path):
+            return
+        self.ide._on_problem_activated(file_path, line, column)
+
+    def _resolve_output_path(self, raw_path: str) -> str:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            return ""
+        expanded = os.path.expanduser(path_text)
+        if os.path.isabs(expanded):
+            return os.path.abspath(expanded)
+        launch_path = str(getattr(self.controller.context, "file_path", "") or "").strip()
+        if launch_path:
+            candidate = os.path.abspath(os.path.join(os.path.dirname(launch_path), expanded))
+            if os.path.exists(candidate):
+                return candidate
+        project_root = str(getattr(self.ide, "project_root", "") or "").strip()
+        if project_root:
+            candidate = os.path.abspath(os.path.join(project_root, expanded))
+            if os.path.exists(candidate):
+                return candidate
+        resolver = getattr(self.ide, "_resolve_path_from_project_no_symlink_resolve", None)
+        if callable(resolver):
+            try:
+                candidate = str(resolver(expanded) or "").strip()
+            except Exception:
+                candidate = ""
+            if candidate:
+                return os.path.abspath(os.path.expanduser(candidate))
+        return os.path.abspath(expanded)
+
+    @classmethod
+    def _extract_output_reference(cls, text: str) -> tuple[int, int, str, int, int] | None:
+        source = str(text or "")
+        py_match = cls._RE_PY_TRACEBACK.search(source)
+        if py_match:
+            raw_path = str(py_match.group(1) or "").strip()
+            if raw_path and not raw_path.startswith("<"):
+                return py_match.start(1), py_match.end(2), raw_path, max(1, int(py_match.group(2) or 1)), 1
+
+        cxx_match = cls._RE_CXX_DIAG.search(source)
+        if cxx_match:
+            raw_path = str(cxx_match.group("path") or "").strip()
+            if raw_path and not raw_path.startswith("<"):
+                return (
+                    cxx_match.start("path"),
+                    cxx_match.end("col") if cxx_match.group("col") else cxx_match.end("line"),
+                    raw_path,
+                    max(1, int(cxx_match.group("line") or 1)),
+                    max(1, int(cxx_match.group("col") or 1)),
+                )
+
+        generic_match = cls._RE_GENERIC_LOCATION.search(source)
+        if generic_match:
+            raw_path = str(generic_match.group("path") or "").strip()
+            if raw_path and not raw_path.startswith("<"):
+                return (
+                    generic_match.start("path"),
+                    generic_match.end("col") if generic_match.group("col") else generic_match.end("line"),
+                    raw_path,
+                    max(1, int(generic_match.group("line") or 1)),
+                    max(1, int(generic_match.group("col") or 1)),
+                )
+        return None
+
+    @classmethod
+    def _render_output_html(cls, text: str, *, category: str) -> str:
+        source = str(text or "")
+        ref = cls._extract_output_reference(source)
+        if ref is None:
+            body = html.escape(source) or "&nbsp;"
+        else:
+            start, end, raw_path, line, column = ref
+            link = cls._build_output_href(raw_path, line, column)
+            body = (
+                f"{html.escape(source[:start])}"
+                f"<a href=\"{html.escape(link, quote=True)}\">{html.escape(source[start:end])}</a>"
+                f"{html.escape(source[end:])}"
+            ) or "&nbsp;"
+        return f"<div class=\"dbg-line dbg-{html.escape(category, quote=True)}\">{body}</div>"
+
+    @staticmethod
+    def _build_output_href(file_path: str, line: int, column: int) -> str:
+        url = QUrl()
+        url.setScheme("pytpo-debug")
+        query = QUrlQuery()
+        query.addQueryItem("path", str(file_path or ""))
+        query.addQueryItem("line", str(max(1, int(line or 1))))
+        query.addQueryItem("col", str(max(1, int(column or 1))))
+        url.setQuery(query)
+        return url.toString()
 
     def _render_pause_data(self, data: dict) -> None:
         raw_stack = data.get("stack")

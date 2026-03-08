@@ -30,6 +30,7 @@ class DebugLaunchRequest:
     working_directory: str = ""
     arguments: tuple[str, ...] = field(default_factory=tuple)
     environment: dict[str, str] = field(default_factory=dict)
+    just_my_code: bool = True
     use_source_snapshot: bool = False
 
 
