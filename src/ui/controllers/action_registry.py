@@ -267,6 +267,11 @@ class ActionRegistry:
         ide._panel_toggle_actions.append(act_panel_debug)
         view.addAction(act_panel_debug)
 
+        act_panel_debugger = ide.dock_debugger.toggleViewAction()
+        act_panel_debugger.setText("Debugger Dock")
+        ide._panel_toggle_actions.append(act_panel_debugger)
+        view.addAction(act_panel_debugger)
+
         act_panel_terminal = ide.dock_terminal.toggleViewAction()
         act_panel_terminal.setText("Terminal Dock")
         ide._panel_toggle_actions.append(act_panel_terminal)
@@ -423,6 +428,9 @@ class ActionRegistry:
         run_cfg_menu = run_menu.addMenu("Run Configuration")
         run_cfg_menu.aboutToShow.connect(ide.populate_python_run_config_menu)
         ide._run_python_config_menu = run_cfg_menu
+        debug_cfg_menu = run_menu.addMenu("Debug Configuration")
+        debug_cfg_menu.aboutToShow.connect(ide.populate_python_debug_config_menu)
+        ide._run_python_debug_menu = debug_cfg_menu
         cargo_cfg_menu = run_menu.addMenu("Cargo Configuration")
         cargo_cfg_menu.aboutToShow.connect(ide.populate_cargo_run_config_menu)
         ide._run_cargo_config_menu = cargo_cfg_menu
@@ -462,6 +470,11 @@ class ActionRegistry:
         )
         run_menu.addAction(act_run)
         ide._act_run_current = act_run
+
+        act_debug = QAction("Debug", ide)
+        act_debug.triggered.connect(ide.debug_primary_python_target)
+        run_menu.addAction(act_debug)
+        ide._act_debug_current = act_debug
 
         act_rerun = QAction("Rerun Current File", ide)
         act_rerun.triggered.connect(ide.rerun_current_file)

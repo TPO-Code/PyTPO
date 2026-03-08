@@ -727,12 +727,18 @@ class SettingsManager:
         def _norm_python_run_cfg(raw_cfg: Any, index: int) -> dict[str, Any]:
             cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
             name = str(cfg.get("name") or "").strip() or f"Run Config {index + 1}"
+            launch_kind = str(cfg.get("launch_kind") or cfg.get("target_kind") or "script").strip().lower()
+            if launch_kind not in {"script", "module"}:
+                launch_kind = "script"
             norm = {
                 "name": name,
+                "launch_kind": launch_kind,
                 "script_path": str(cfg.get("script_path") or "").strip(),
+                "module_name": str(cfg.get("module_name") or cfg.get("module") or "").strip(),
                 "args": str(cfg.get("args") or "").strip(),
                 "working_dir": str(cfg.get("working_dir") or "").strip(),
                 "interpreter": str(cfg.get("interpreter") or "").strip(),
+                "just_my_code": _coerce_bool(cfg.get("just_my_code"), default=True),
                 "env": _norm_env_entries(cfg.get("env")),
             }
             return norm

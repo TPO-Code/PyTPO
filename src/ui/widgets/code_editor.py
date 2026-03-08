@@ -7,13 +7,16 @@ behavior can be added without coupling ``TPOPyside`` to the IDE.
 
 import re
 
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QTextCursor, QTextFormat
+from PySide6.QtWidgets import QInputDialog, QLineEdit, QMenu, QMessageBox, QTextEdit
 
 from TPOPyside.widgets.code_editor import (
     CodeEditor as BaseCodeEditor,
     _extract_compact_signature,
     _normalize_signature_text,
 )
+from src.ui.debugger_support import debugger_breakpoints_supported_for_editor
 from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit
 
 
@@ -23,6 +26,349 @@ class CodeEditor(BaseCodeEditor):
     Starts as a behavior-preserving pass-through; extend here for IDE-only
     editor features.
     """
+
+    debuggerBreakpointToggled = Signal(int, bool)
+    debuggerBreakpointsChanged = Signal()
+
+    def __init__(self, *args, **kwargs):
+        self._debugger_breakpoints: dict[int, dict] = {}
+        self._debugger_execution_line = -1
+        super().__init__(*args, **kwargs)
+
+    def lineNumberAreaWidth(self):
+        return super().lineNumberAreaWidth() + 14
+
+    def lineNumberAreaPaintEvent(self, event):
+        super().lineNumberAreaPaintEvent(event)
+        if not self.debugger_breakpoints_supported():
+            return
+        if not self._debugger_breakpoints and self._debugger_execution_line <= 0:
+            return
+
+        painter = QPainter(self.lineNumberArea)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        bottom = top + self.blockBoundingRect(block).height()
+        fold_gutter = int(self._fold_gutter_width) if self._fold_provider is not None else 0
+        marker_center_x = fold_gutter + 7
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                line_number = int(block_number + 1)
+                line_height = int(self.fontMetrics().height())
+                marker_y = int(top + max(2, (line_height - 9) // 2))
+
+                spec = self._debugger_breakpoints.get(line_number)
+                if spec is not None:
+                    marker_color = QColor("#d54a3a")
+                    if str(spec.get("log_message") or "").strip():
+                        marker_color = QColor("#2d9c6b")
+                    elif str(spec.get("condition") or "").strip() or int(spec.get("hit_count") or 0) > 0:
+                        marker_color = QColor("#c98f1d")
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(marker_color)
+                    painter.drawEllipse(marker_center_x - 4, marker_y, 9, 9)
+                    badge = ""
+                    if str(spec.get("log_message") or "").strip():
+                        badge = "L"
+                    elif str(spec.get("condition") or "").strip():
+                        badge = "?"
+                    elif int(spec.get("hit_count") or 0) > 0:
+                        badge = "#"
+                    if badge:
+                        painter.setPen(QColor("white"))
+                        painter.drawText(
+                            marker_center_x - 5,
+                            int(top),
+                            9,
+                            line_height,
+                            Qt.AlignCenter,
+                            badge,
+                        )
+
+                if line_number == self._debugger_execution_line:
+                    painter.setPen(QColor("#f2c94c"))
+                    painter.drawText(
+                        marker_center_x + 5,
+                        int(top),
+                        10,
+                        line_height,
+                        Qt.AlignLeft | Qt.AlignVCenter,
+                        "▶",
+                    )
+
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+            block_number += 1
+
+        painter.end()
+
+    def lineNumberAreaMousePressEvent(self, event):
+        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        fold_gutter = int(self._fold_gutter_width) if self._fold_provider is not None else 0
+        if self.debugger_breakpoints_supported() and point.x() > fold_gutter:
+            block_number = self._block_number_at_y(int(point.y()))
+            if block_number >= 0:
+                line_number = block_number + 1
+                if event.button() == Qt.RightButton:
+                    self._show_debugger_breakpoint_menu(line_number, self.mapToGlobal(point))
+                else:
+                    self.toggle_debugger_breakpoint(line_number)
+                event.accept()
+                return
+        super().lineNumberAreaMousePressEvent(event)
+
+    def _rebuild_extra_selections(self):
+        super()._rebuild_extra_selections()
+        if self._debugger_execution_line <= 0:
+            return
+
+        block = self.document().findBlockByLineNumber(self._debugger_execution_line - 1)
+        if not block.isValid():
+            return
+
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = QTextCursor(block)
+        selection.cursor.clearSelection()
+        selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+        selection.format.setBackground(QColor(255, 230, 120, 90))
+
+        extra_selections = list(self.extraSelections())
+        extra_selections.append(selection)
+        self.setExtraSelections(extra_selections)
+
+    def debugger_breakpoints(self) -> set[int]:
+        return set(self._debugger_breakpoints)
+
+    def debugger_breakpoints_supported(self) -> bool:
+        return debugger_breakpoints_supported_for_editor(self)
+
+    def debugger_breakpoint_specs(self) -> list[dict]:
+        return [
+            {
+                "line": int(line),
+                "condition": str(spec.get("condition") or ""),
+                "hit_count": max(0, int(spec.get("hit_count") or 0)),
+                "log_message": str(spec.get("log_message") or ""),
+            }
+            for line, spec in sorted(self._debugger_breakpoints.items())
+        ]
+
+    def set_debugger_breakpoints(self, lines: set[int]) -> None:
+        self.set_debugger_breakpoint_specs([{"line": int(line)} for line in lines if int(line) > 0])
+
+    def set_debugger_breakpoint_specs(self, specs: list[dict]) -> None:
+        if not self.debugger_breakpoints_supported():
+            specs = []
+        normalized: dict[int, dict] = {}
+        for raw in specs:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                line = int(raw.get("line") or 0)
+            except Exception:
+                continue
+            if line <= 0:
+                continue
+            normalized[line] = {
+                "condition": str(raw.get("condition") or "").strip(),
+                "hit_count": max(0, int(raw.get("hit_count") or 0)),
+                "log_message": str(raw.get("log_message") or "").strip(),
+            }
+        if normalized == self._debugger_breakpoints:
+            return
+        self._debugger_breakpoints = normalized
+        self.lineNumberArea.update()
+        self.debuggerBreakpointsChanged.emit()
+
+    def toggle_debugger_breakpoint(self, line_number: int) -> bool:
+        if not self.debugger_breakpoints_supported():
+            return False
+        line = int(line_number)
+        if line <= 0:
+            return False
+        enabled = line not in self._debugger_breakpoints
+        if enabled:
+            self._debugger_breakpoints[line] = {
+                "condition": "",
+                "hit_count": 0,
+                "log_message": "",
+            }
+        else:
+            self._debugger_breakpoints.pop(line, None)
+        self.lineNumberArea.update()
+        self.debuggerBreakpointToggled.emit(line, enabled)
+        self.debuggerBreakpointsChanged.emit()
+        return enabled
+
+    def set_debugger_breakpoint_options(
+        self,
+        line_number: int,
+        *,
+        condition: str | None = None,
+        hit_count: int | None = None,
+        log_message: str | None = None,
+    ) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
+        line = int(line_number)
+        if line <= 0:
+            return
+        spec = dict(self._debugger_breakpoints.get(line) or {})
+        spec["condition"] = str(condition if condition is not None else spec.get("condition") or "").strip()
+        spec["hit_count"] = max(0, int(hit_count if hit_count is not None else spec.get("hit_count") or 0))
+        spec["log_message"] = str(log_message if log_message is not None else spec.get("log_message") or "").strip()
+        self._debugger_breakpoints[line] = spec
+        self.lineNumberArea.update()
+        self.debuggerBreakpointsChanged.emit()
+
+    def clear_debugger_breakpoint_options(self, line_number: int) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
+        line = int(line_number)
+        if line <= 0 or line not in self._debugger_breakpoints:
+            return
+        self._debugger_breakpoints[line] = {
+            "condition": "",
+            "hit_count": 0,
+            "log_message": "",
+        }
+        self.lineNumberArea.update()
+        self.debuggerBreakpointsChanged.emit()
+
+    def _show_debugger_breakpoint_menu(self, line_number: int, global_pos) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
+        menu = QMenu(self)
+        has_breakpoint = line_number in self._debugger_breakpoints
+        if has_breakpoint:
+            edit_action = menu.addAction("Edit Breakpoint…")
+            clear_options_action = menu.addAction("Clear Breakpoint Options")
+            remove_action = menu.addAction("Remove Breakpoint")
+        else:
+            edit_action = menu.addAction("Add Breakpoint…")
+            clear_options_action = None
+            remove_action = None
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is edit_action:
+            self._edit_debugger_breakpoint(line_number)
+            return
+        if clear_options_action is not None and chosen is clear_options_action:
+            self.clear_debugger_breakpoint_options(line_number)
+            return
+        if remove_action is not None and chosen is remove_action:
+            self._debugger_breakpoints.pop(int(line_number), None)
+            self.lineNumberArea.update()
+            self.debuggerBreakpointToggled.emit(int(line_number), False)
+            self.debuggerBreakpointsChanged.emit()
+
+    def _edit_debugger_breakpoint(self, line_number: int) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
+        line = int(line_number)
+        if line <= 0:
+            return
+        created = line not in self._debugger_breakpoints
+        if line not in self._debugger_breakpoints:
+            self._debugger_breakpoints[line] = {"condition": "", "hit_count": 0, "log_message": ""}
+
+        spec = dict(self._debugger_breakpoints.get(line) or {})
+        options = [
+            "Normal breakpoint",
+            "Conditional breakpoint",
+            "Hit-count breakpoint",
+            "Logpoint",
+        ]
+        current_index = 0
+        if str(spec.get("log_message") or "").strip():
+            current_index = 3
+        elif int(spec.get("hit_count") or 0) > 0:
+            current_index = 2
+        elif str(spec.get("condition") or "").strip():
+            current_index = 1
+        label, ok = QInputDialog.getItem(
+            self,
+            "Breakpoint",
+            f"Breakpoint type for line {line}:",
+            options,
+            current_index,
+            False,
+        )
+        if not ok:
+            if created:
+                self._debugger_breakpoints.pop(line, None)
+            return
+
+        selection = str(label or options[0])
+        condition = ""
+        hit_count = 0
+        log_message = ""
+        if selection == "Conditional breakpoint":
+            condition, ok = QInputDialog.getText(
+                self,
+                "Conditional Breakpoint",
+                "Pause when this expression is truthy:",
+                text=str(spec.get("condition") or ""),
+            )
+            if not ok:
+                return
+            condition = str(condition or "").strip()
+            if not condition:
+                QMessageBox.warning(self, "Breakpoint", "A conditional breakpoint requires an expression.")
+                return
+        elif selection == "Hit-count breakpoint":
+            hit_count, ok = QInputDialog.getInt(
+                self,
+                "Hit-count Breakpoint",
+                "Pause after this many hits:",
+                value=max(1, int(spec.get("hit_count") or 1)),
+                minValue=1,
+                maxValue=999999,
+            )
+            if not ok:
+                return
+        elif selection == "Logpoint":
+            log_message, ok = QInputDialog.getText(
+                self,
+                "Logpoint",
+                "Message to print when this line is hit:",
+                text=str(spec.get("log_message") or ""),
+            )
+            if not ok:
+                return
+            log_message = str(log_message or "").strip()
+            if not log_message:
+                QMessageBox.warning(self, "Breakpoint", "A logpoint requires a message.")
+                return
+
+        self._debugger_breakpoints[line] = {
+            "condition": condition,
+            "hit_count": int(hit_count),
+            "log_message": log_message,
+        }
+        self.lineNumberArea.update()
+        self.debuggerBreakpointsChanged.emit()
+
+    def set_debugger_execution_line(self, line_number: int) -> None:
+        normalized = int(line_number)
+        if self._debugger_execution_line == normalized:
+            return
+        self._debugger_execution_line = normalized
+        self._rebuild_extra_selections()
+        self.lineNumberArea.update()
+
+    def clear_debugger_execution_line(self) -> None:
+        if self._debugger_execution_line <= 0:
+            return
+        self._debugger_execution_line = -1
+        self._rebuild_extra_selections()
+        self.lineNumberArea.update()
 
     def _resolve_completion_insert_text(
         self,

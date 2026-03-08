@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QFormLayout,
@@ -48,6 +49,8 @@ class PythonRunConfigsSettingsPage(QWidget):
         self._base_active_name: str = ""
         self._working_configs: list[dict[str, Any]] = []
         self._working_active_name: str = ""
+        self._base_just_my_code_default: bool = True
+        self._working_just_my_code_default: bool = True
         self._last_selected_name: str = ""
         self._editor_row: int = -1
 
@@ -68,6 +71,16 @@ class PythonRunConfigsSettingsPage(QWidget):
         self.active_combo.currentIndexChanged.connect(self._on_active_changed)
         top_row.addWidget(self.active_combo, 1)
         root.addLayout(top_row)
+
+        debugger_row = QHBoxLayout()
+        debugger_row.setContentsMargins(0, 0, 0, 0)
+        debugger_row.setSpacing(8)
+        self.default_just_my_code_checkbox = QCheckBox('Default "Just My Code" for current-file debugging', self)
+        self.default_just_my_code_checkbox.setToolTip("When enabled, stepping stays in your project code unless a run config overrides it.")
+        self.default_just_my_code_checkbox.toggled.connect(self._on_default_just_my_code_changed)
+        debugger_row.addWidget(self.default_just_my_code_checkbox)
+        debugger_row.addStretch(1)
+        root.addLayout(debugger_row)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +125,9 @@ class PythonRunConfigsSettingsPage(QWidget):
         form.setVerticalSpacing(8)
 
         self.name_edit = QLineEdit(self)
+        self.launch_kind_combo = QComboBox(self)
+        self.launch_kind_combo.addItem("Script", "script")
+        self.launch_kind_combo.addItem("Module", "module")
 
         script_holder = QWidget(self)
         script_row = QHBoxLayout(script_holder)
@@ -124,11 +140,15 @@ class PythonRunConfigsSettingsPage(QWidget):
         script_row.addWidget(self.script_path_edit, 1)
         script_row.addWidget(self.script_browse_btn)
 
+        self.module_name_edit = QLineEdit(self)
+        self.module_name_edit.setPlaceholderText("Example: package.cli or package.__main__")
         self.args_edit = QLineEdit(self)
         self.working_dir_edit = QLineEdit(self)
         self.working_dir_edit.setPlaceholderText("Optional. Defaults to policy/script folder.")
         self.interpreter_edit = QLineEdit(self)
         self.interpreter_edit.setPlaceholderText("Optional. Defaults to project policy resolution.")
+        self.just_my_code_checkbox = QCheckBox('Just My Code', self)
+        self.just_my_code_checkbox.setToolTip("Skip library/framework frames during step-in unless this run config disables the filter.")
 
         wd_holder = QWidget(self)
         wd_row = QHBoxLayout(wd_holder)
@@ -144,10 +164,13 @@ class PythonRunConfigsSettingsPage(QWidget):
         self.env_edit.setMinimumHeight(110)
 
         form.addRow("Name", self.name_edit)
+        form.addRow("Launch Type", self.launch_kind_combo)
         form.addRow("Script", script_holder)
+        form.addRow("Module", self.module_name_edit)
         form.addRow("Arguments", self.args_edit)
         form.addRow("Working Directory", wd_holder)
         form.addRow("Interpreter", self.interpreter_edit)
+        form.addRow("Debugger", self.just_my_code_checkbox)
         form.addRow("Environment", self.env_edit)
         right_layout.addLayout(form)
         right_layout.addStretch(1)
@@ -160,10 +183,14 @@ class PythonRunConfigsSettingsPage(QWidget):
         root.addWidget(self.status_label)
 
         self.name_edit.textChanged.connect(self._on_editor_changed)
+        self.launch_kind_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.launch_kind_combo.currentIndexChanged.connect(self._update_launch_fields_enabled)
         self.script_path_edit.textChanged.connect(self._on_editor_changed)
+        self.module_name_edit.textChanged.connect(self._on_editor_changed)
         self.args_edit.textChanged.connect(self._on_editor_changed)
         self.working_dir_edit.textChanged.connect(self._on_editor_changed)
         self.interpreter_edit.textChanged.connect(self._on_editor_changed)
+        self.just_my_code_checkbox.toggled.connect(self._on_editor_changed)
         self.env_edit.textChanged.connect(self._on_editor_changed)
         self.script_browse_btn.clicked.connect(self._browse_script)
         self.wd_browse_btn.clicked.connect(self._browse_working_dir)
@@ -215,6 +242,9 @@ class PythonRunConfigsSettingsPage(QWidget):
             active = str(self._working_configs[0].get("name") or "").strip() if self._working_configs else ""
         self._base_active_name = active
         self._working_active_name = active
+        raw_just_my_code = self._manager.get("debugger.just_my_code", scope_preference="project", default=True)
+        self._base_just_my_code_default = self._coerce_bool(raw_just_my_code, default=True)
+        self._working_just_my_code_default = self._base_just_my_code_default
 
     @staticmethod
     def _normalize_config(raw: Any, index: int) -> dict[str, Any]:
@@ -229,12 +259,26 @@ class PythonRunConfigsSettingsPage(QWidget):
             env = []
         return {
             "name": name,
+            "launch_kind": "module" if str(cfg.get("launch_kind") or "").strip().lower() == "module" else "script",
             "script_path": str(cfg.get("script_path") or "").strip(),
+            "module_name": str(cfg.get("module_name") or cfg.get("module") or "").strip(),
             "args": str(cfg.get("args") or "").strip(),
             "working_dir": str(cfg.get("working_dir") or "").strip(),
             "interpreter": str(cfg.get("interpreter") or "").strip(),
+            "just_my_code": PythonRunConfigsSettingsPage._coerce_bool(cfg.get("just_my_code"), default=True),
             "env": env,
         }
+
+    @staticmethod
+    def _coerce_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
 
     def _refresh_ui(self) -> None:
         self._loading = True
@@ -244,6 +288,7 @@ class PythonRunConfigsSettingsPage(QWidget):
                 self.config_list.addItem(QListWidgetItem(str(cfg.get("name") or "Run Config")))
             self.active_combo.clear()
             self.active_combo.addItem(self.CURRENT_FILE_LABEL, "")
+            self.default_just_my_code_checkbox.setChecked(bool(self._working_just_my_code_default))
             for cfg in self._working_configs:
                 name = str(cfg.get("name") or "").strip()
                 if name:
@@ -285,10 +330,13 @@ class PythonRunConfigsSettingsPage(QWidget):
         env = [line.strip() for line in str(self.env_edit.toPlainText() or "").splitlines() if line.strip()]
         return {
             "name": name,
+            "launch_kind": str(self.launch_kind_combo.currentData(Qt.UserRole) or "script"),
             "script_path": str(self.script_path_edit.text() or "").strip(),
+            "module_name": str(self.module_name_edit.text() or "").strip(),
             "args": str(self.args_edit.text() or "").strip(),
             "working_dir": str(self.working_dir_edit.text() or "").strip(),
             "interpreter": str(self.interpreter_edit.text() or "").strip(),
+            "just_my_code": bool(self.just_my_code_checkbox.isChecked()),
             "env": env,
         }
 
@@ -305,10 +353,13 @@ class PythonRunConfigsSettingsPage(QWidget):
             has_item = row >= 0
             for widget in (
                 self.name_edit,
+                self.launch_kind_combo,
                 self.script_path_edit,
+                self.module_name_edit,
                 self.args_edit,
                 self.working_dir_edit,
                 self.interpreter_edit,
+                self.just_my_code_checkbox,
                 self.env_edit,
             ):
                 widget.setEnabled(has_item)
@@ -319,24 +370,34 @@ class PythonRunConfigsSettingsPage(QWidget):
             if not has_item:
                 self._editor_row = -1
                 self.name_edit.setText("")
+                self.launch_kind_combo.setCurrentIndex(0)
                 self.script_path_edit.setText("")
+                self.module_name_edit.setText("")
                 self.args_edit.setText("")
                 self.working_dir_edit.setText("")
                 self.interpreter_edit.setText("")
+                self.just_my_code_checkbox.setChecked(True)
                 self.env_edit.setPlainText("")
+                self._update_launch_fields_enabled()
                 return
             cfg = self._working_configs[row]
             self._editor_row = row
             self._last_selected_name = str(cfg.get("name") or "").strip()
             self.name_edit.setText(str(cfg.get("name") or ""))
+            launch_kind = "module" if str(cfg.get("launch_kind") or "").strip().lower() == "module" else "script"
+            combo_index = self.launch_kind_combo.findData(launch_kind, Qt.UserRole, Qt.MatchExactly)
+            self.launch_kind_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
             self.script_path_edit.setText(str(cfg.get("script_path") or ""))
+            self.module_name_edit.setText(str(cfg.get("module_name") or ""))
             self.args_edit.setText(str(cfg.get("args") or ""))
             self.working_dir_edit.setText(str(cfg.get("working_dir") or ""))
             self.interpreter_edit.setText(str(cfg.get("interpreter") or ""))
+            self.just_my_code_checkbox.setChecked(bool(cfg.get("just_my_code", True)))
             env_items = cfg.get("env", [])
             if not isinstance(env_items, list):
                 env_items = []
             self.env_edit.setPlainText("\n".join(str(item).strip() for item in env_items if str(item).strip()))
+            self._update_launch_fields_enabled()
         finally:
             self._loading = False
 
@@ -363,6 +424,12 @@ class PythonRunConfigsSettingsPage(QWidget):
         self._working_active_name = str(self.active_combo.currentData(Qt.UserRole) or "").strip()
         self._mark_dirty()
 
+    def _on_default_just_my_code_changed(self, checked: bool) -> None:
+        if self._loading:
+            return
+        self._working_just_my_code_default = bool(checked)
+        self._mark_dirty()
+
     def _add_config(self) -> None:
         self._sync_current_config()
         existing = {str(cfg.get("name") or "").strip().lower() for cfg in self._working_configs}
@@ -376,10 +443,13 @@ class PythonRunConfigsSettingsPage(QWidget):
             self._normalize_config(
                 {
                     "name": name,
+                    "launch_kind": "script",
                     "script_path": "",
+                    "module_name": "",
                     "args": "",
                     "working_dir": "",
                     "interpreter": "",
+                    "just_my_code": bool(self._working_just_my_code_default),
                     "env": [],
                 },
                 len(self._working_configs),
@@ -433,6 +503,13 @@ class PythonRunConfigsSettingsPage(QWidget):
         self._refresh_status()
         self._notify_pending_changed()
 
+    def _update_launch_fields_enabled(self, *_args) -> None:
+        launch_kind = str(self.launch_kind_combo.currentData(Qt.UserRole) or "script")
+        use_script = launch_kind != "module"
+        self.script_path_edit.setEnabled(use_script and self._editor_row >= 0)
+        self.script_browse_btn.setEnabled(use_script and self._editor_row >= 0)
+        self.module_name_edit.setEnabled((not use_script) and self._editor_row >= 0)
+
     def _refresh_status(self) -> None:
         self.status_label.setText("Unsaved Python run configuration changes." if self.has_pending_settings_changes() else "No Python run configuration changes.")
 
@@ -441,6 +518,7 @@ class PythonRunConfigsSettingsPage(QWidget):
             [self._normalize_config(item, idx) for idx, item in enumerate(self._working_configs)]
             != [self._normalize_config(item, idx) for idx, item in enumerate(self._base_configs)]
             or str(self._working_active_name or "").strip() != str(self._base_active_name or "").strip()
+            or bool(self._working_just_my_code_default) != bool(self._base_just_my_code_default)
         )
 
     def apply_settings_changes(self) -> list[str]:
@@ -465,9 +543,11 @@ class PythonRunConfigsSettingsPage(QWidget):
 
         self._manager.set("build.python.run_configs", normalized, "project")
         self._manager.set("build.python.active_config", active_name, "project")
+        self._manager.set("debugger.just_my_code", bool(self._working_just_my_code_default), "project")
 
         self._base_configs = deepcopy(normalized)
         self._base_active_name = active_name
+        self._base_just_my_code_default = bool(self._working_just_my_code_default)
         self._working_configs = deepcopy(normalized)
         self._working_active_name = active_name
         self._refresh_ui()

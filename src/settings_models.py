@@ -63,9 +63,12 @@ class BuildCMakeSettings(TypedDict, total=False):
 class PythonRunConfig(TypedDict, total=False):
     name: str
     script_path: str
+    module_name: str
+    launch_kind: str
     args: str
     working_dir: str
     interpreter: str
+    just_my_code: bool
     env: list[str] | dict[str, str]
 
 

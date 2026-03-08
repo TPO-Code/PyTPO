@@ -65,6 +65,7 @@ _SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F-]{36})", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 _STATUS_PATH_RE = re.compile(r"^[A-Z?]{1,2}\s+(.+)$")
+_TOOL_EXIT_LINE_RE = re.compile(r"^[a-zA-Z0-9_.-]+(?:\([^)]*\))?\s+exited\s+\d+\s+in\s+\d+ms:$")
 _REASONING_CHOICES: list[tuple[str, str]] = [
     ("Low", "low"),
     ("Medium", "medium"),
@@ -2676,11 +2677,6 @@ class CodexAgentDockWidget(QWidget):
             if self._transcript_bubbles:
                 self._transcript_bubbles[-1].append_line(line)
                 self._prune_repeated_suffix_in_last_entry()
-            self._append_bubble_debug_log(
-                role=str(last_entry.role),
-                text=line,
-                event="append",
-            )
             self._prune_replayed_transcript_tail()
         else:
             entry = _TranscriptEntry(
@@ -2695,12 +2691,8 @@ class CodexAgentDockWidget(QWidget):
             self._transcript_bubbles.append(bubble)
             if role == "assistant":
                 self._latest_assistant_bubble_text = str(entry.text or "")
-            self._append_bubble_debug_log(
-                role=str(entry.role),
-                text=str(entry.text or line),
-                event="bubble",
-            )
             self._prune_replayed_transcript_tail()
+        self._rewrite_bubble_debug_log()
         self._schedule_transcript_render(
             scroll_to_bottom=follow_output,
             animated=follow_output,
@@ -2806,8 +2798,17 @@ class CodexAgentDockWidget(QWidget):
     @staticmethod
     def _is_diff_content_line(line: str) -> bool:
         raw = str(line or "")
+        stripped = raw.strip()
+        if CodexAgentDockWidget._is_status_diff_line(stripped):
+            return True
         return raw.startswith(
             (
+                "*** Begin Patch",
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+                "*** End Patch",
                 "diff --git ",
                 "index ",
                 "--- ",
@@ -2827,6 +2828,42 @@ class CodexAgentDockWidget(QWidget):
                 "+",
                 "-",
                 " ",
+            )
+        )
+
+    @staticmethod
+    def _is_status_diff_line(text: str) -> bool:
+        stripped = str(text or "").strip()
+        match = _STATUS_PATH_RE.match(stripped)
+        if match is None:
+            return False
+        status = stripped.split(None, 1)[0]
+        if status not in {"M", "A", "D", "R", "C", "T", "U", "??", "AM", "MM", "UU"}:
+            return False
+        target = str(match.group(1) or "").strip()
+        if not target:
+            return False
+        if target.startswith(("/", "./", "../", "~")):
+            return True
+        if "/" in target or "\\" in target:
+            return True
+        return bool(Path(target).suffix)
+
+    @staticmethod
+    def _is_diff_start_line(line: str) -> bool:
+        stripped = str(line or "").strip()
+        if stripped.startswith("file update"):
+            return True
+        if CodexAgentDockWidget._is_status_diff_line(stripped):
+            return True
+        return stripped.startswith(
+            (
+                "*** Begin Patch",
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "diff --git ",
+                "@@",
             )
         )
 
@@ -2875,15 +2912,29 @@ class CodexAgentDockWidget(QWidget):
         except Exception:
             pass
 
-    def _append_bubble_debug_log(self, *, role: str, text: str, event: str = "bubble") -> None:
+    def _rewrite_bubble_debug_log(self) -> None:
         log_path = self._bubble_debug_log_path()
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"[{event}] {role}:\n")
-                handle.write('"""\n')
-                handle.write(f"{text}\n")
-                handle.write('"""\n\n')
+            with log_path.open("w", encoding="utf-8") as handle:
+                visible_entries = [
+                    entry
+                    for entry in self._transcript_entries
+                    if str(entry.role or "").strip() not in {"meta", "system"}
+                ]
+                if not visible_entries:
+                    handle.write("(no visible bubbles)\n")
+                    return
+                for index, entry in enumerate(visible_entries, start=1):
+                    role = str(entry.role or "").strip()
+                    label = _ROLE_LABELS.get(role, role.title())
+                    header = f"[bubble {index}] {label}"
+                    if entry.timestamp:
+                        header = f"{header} @ {entry.timestamp}"
+                    handle.write(f"{header}:\n")
+                    handle.write('"""\n')
+                    handle.write(f"{entry.text}\n")
+                    handle.write('"""\n\n')
         except Exception:
             pass
 
@@ -3056,6 +3107,8 @@ class CodexAgentDockWidget(QWidget):
             return "tools"
         if stripped.startswith("/bin/") or stripped.startswith("exec "):
             return "tools"
+        if _TOOL_EXIT_LINE_RE.match(stripped):
+            return "tools"
         if stripped.startswith("succeeded in ") or stripped.startswith("failed in "):
             return "tools"
         if stripped.startswith("tokens used"):
@@ -3092,6 +3145,14 @@ class CodexAgentDockWidget(QWidget):
                 self._flush_pending_diff_bubble()
                 self._add_bubble("meta", raw_line, merge=True)
                 return
+            if (
+                _TOOL_EXIT_LINE_RE.match(stripped)
+                or stripped.startswith("succeeded in ")
+                or stripped.startswith("failed in ")
+                or stripped.startswith("Success. Updated the following files:")
+            ):
+                self._stream_mode = "tools"
+                self._flush_pending_diff_bubble()
             if self._is_diff_content_line(raw_line) or not stripped:
                 self._buffer_diff_line(raw_line)
                 return
@@ -3100,10 +3161,7 @@ class CodexAgentDockWidget(QWidget):
 
         if self._is_noise_line(stripped):
             return
-        if stripped.startswith("file update"):
-            self._stream_mode = "diff"
-            return
-        if stripped.startswith("diff --git "):
+        if self._is_diff_start_line(raw_line):
             self._stream_mode = "diff"
             self._buffer_diff_line(raw_line)
             return

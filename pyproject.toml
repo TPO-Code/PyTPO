@@ -8,6 +8,7 @@ dependencies = [
     "pyte",
     "ruff",
     "pyflakes",
+    "debugpy",
     "jedi",
     "markdown",
     "pygments",

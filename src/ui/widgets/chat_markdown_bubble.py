@@ -240,25 +240,60 @@ class ChatMarkdownBubble(QFrame):
         return "(no output)"
 
     def _collapsed_diff_preview_html(self) -> str:
+        file_label, added, removed = self._diff_summary()
+        escaped_file = html.escape(file_label)
+        return (
+            f'Diff: {escaped_file} '
+            f'<span style="color: #f2a7a7;">-{removed}</span> '
+            f'<span style="color: #b5cea8;">+{added}</span>'
+        )
+
+    def _diff_summary(self) -> tuple[str, int, int]:
         file_label = "(unknown file)"
         added = 0
         removed = 0
         for raw in str(self._text or "").splitlines():
             line = str(raw)
+            status_match = re.match(r"^[A-Z?]{1,2}\s+(.+)$", line.strip())
+            if status_match is not None:
+                candidate = str(status_match.group(1) or "").strip()
+                if candidate:
+                    file_label = candidate
+                    break
+            if line.startswith("*** Update File: "):
+                candidate = line[len("*** Update File: ") :].strip()
+                if candidate:
+                    file_label = candidate
+                    break
+            if line.startswith("*** Add File: "):
+                candidate = line[len("*** Add File: ") :].strip()
+                if candidate:
+                    file_label = candidate
+                    break
+            if line.startswith("*** Delete File: "):
+                candidate = line[len("*** Delete File: ") :].strip()
+                if candidate:
+                    file_label = candidate
+                    break
+            if line.startswith("*** Move to: "):
+                candidate = line[len("*** Move to: ") :].strip()
+                if candidate:
+                    file_label = candidate
             if line.startswith("diff --git "):
                 parts = line.split()
                 if len(parts) >= 4:
                     candidate = parts[3].strip()
                     if candidate.startswith("b/"):
                         candidate = candidate[2:]
-                    file_label = candidate or file_label
-                    break
+                    if candidate:
+                        file_label = candidate
+                        break
             if line.startswith("+++ "):
                 candidate = line[4:].strip()
                 if candidate.startswith("b/"):
                     candidate = candidate[2:]
-                if candidate != "/dev/null":
-                    file_label = candidate or file_label
+                if candidate != "/dev/null" and candidate:
+                    file_label = candidate
         for raw in str(self._text or "").splitlines():
             if raw.startswith("+++") or raw.startswith("---"):
                 continue
@@ -266,12 +301,7 @@ class ChatMarkdownBubble(QFrame):
                 added += 1
             elif raw.startswith("-"):
                 removed += 1
-        escaped_file = html.escape(file_label)
-        return (
-            f'Diff: {escaped_file} '
-            f'<span style="color: #f2a7a7;">-{removed}</span> '
-            f'<span style="color: #b5cea8;">+{added}</span>'
-        )
+        return file_label, added, removed
 
     def _render_html(self) -> str:
         if self.role == "diff":
