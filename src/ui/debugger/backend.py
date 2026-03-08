@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,14 +22,15 @@ class DebugLaunchKind(Enum):
 
 @dataclass(slots=True)
 class DebugLaunchRequest:
+    file_path: str
+    source_text: str
     launch_kind: DebugLaunchKind = DebugLaunchKind.SCRIPT
-    file_path: str = ""
     module_name: str = ""
-    source_text: str = ""
+    interpreter: str = ""
     working_directory: str = ""
     arguments: tuple[str, ...] = field(default_factory=tuple)
     environment: dict[str, str] = field(default_factory=dict)
-    use_source_snapshot: bool = True
+    use_source_snapshot: bool = False
 
 
 class DebuggerBackend(QObject):
@@ -38,8 +41,11 @@ class DebuggerBackend(QObject):
     started = Signal(dict)
     breakpointsSet = Signal(dict)
     paused = Signal(dict)
+    watchValuesUpdated = Signal(dict)
+    evaluationResult = Signal(dict)
     exceptionRaised = Signal(dict)
     fatalError = Signal(dict)
+    processEnded = Signal(dict)
     finished = Signal()
 
     def __init__(self, parent=None):
@@ -47,21 +53,25 @@ class DebuggerBackend(QObject):
 
     @property
     @abstractmethod
-    def state(self):
+    def state(self) -> ExecutionState:
         raise NotImplementedError
 
     @abstractmethod
-    def start_debugging(self, launch_request: DebugLaunchRequest, breakpoints):
+    def start_debugging(self, launch_request: DebugLaunchRequest, breakpoints: dict[str, list[dict]]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def stop_debugging(self, clean_only=False):
+    def stop_debugging(self, clean_only: bool = False) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def set_breakpoints(self, lines):
+    def request_stop(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
-    def send_command(self, action, extra=None):
+    def set_breakpoints(self, breakpoints: dict[str, list[dict]]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def send_command(self, action: str, extra: dict | None = None) -> bool:
         raise NotImplementedError

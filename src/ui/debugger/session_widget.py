@@ -1,0 +1,462 @@
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .backend import ExecutionState
+from .controller import DebuggerController
+from .python_backend import PythonDebuggerBackend
+
+
+class DebuggerSessionWidget(QWidget):
+    stateChanged = Signal(str)
+    finished = Signal()
+    watchExpressionsChanged = Signal(list)
+
+    def __init__(self, ide, *, session_key: str, session_label: str, parent=None):
+        super().__init__(parent)
+        self.ide = ide
+        self._session_key = str(session_key or "")
+        self._session_label = str(session_label or self._session_key or "Python debug session")
+        self.controller = DebuggerController(ide, PythonDebuggerBackend(self), self)
+        self._state = ExecutionState.IDLE
+        self._last_visual_state = "idle"
+        self._stack_frames: list[dict] = []
+        self._watch_expressions: list[str] = []
+
+        self._build_ui()
+        self._restore_layout()
+        self._connect_controller()
+
+    def session_key(self) -> str:
+        return self._session_key
+
+    def set_session_key(self, session_key: str) -> None:
+        self._session_key = str(session_key or "")
+
+    def session_label(self) -> str:
+        return self._session_label
+
+    def set_session_label(self, session_label: str) -> None:
+        text = str(session_label or "").strip()
+        if text:
+            self._session_label = text
+
+    def state(self) -> ExecutionState:
+        return self._state
+
+    def is_active(self) -> bool:
+        return self.controller.is_active()
+
+    def request_stop(self) -> int:
+        return self.controller.request_stop()
+
+    def stop_debugging(self) -> None:
+        self.controller.stop_debugging()
+
+    def watch_expressions(self) -> list[str]:
+        return list(self._watch_expressions)
+
+    def set_watch_expressions(self, expressions: list[str], *, persist: bool = True) -> None:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for value in expressions:
+            expr = str(value or "").strip()
+            if not expr or expr in seen:
+                continue
+            seen.add(expr)
+            ordered.append(expr)
+        self._watch_expressions = ordered
+        self.watch_list.clear()
+        for expression in ordered:
+            self.watch_list.addItem(expression)
+        self.controller.set_watch_expressions(ordered)
+        if persist:
+            self.watchExpressionsChanged.emit(list(ordered))
+
+    def visual_state(self) -> str:
+        if self._state in {ExecutionState.STARTING, ExecutionState.RUNNING}:
+            return "running"
+        if self._state == ExecutionState.PAUSED:
+            return "paused"
+        if self._state == ExecutionState.STOPPING:
+            return "stopping"
+        return self._last_visual_state
+
+    def status_text(self) -> str:
+        state = self.visual_state()
+        if state == "running":
+            return "Running"
+        if state == "paused":
+            return "Paused"
+        if state == "stopping":
+            return "Stopping"
+        if state == "failed":
+            return "Failed"
+        if state == "finished":
+            return "Finished"
+        return "Idle"
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self.summary_label = QLabel("Idle", self)
+        self.summary_label.setWordWrap(True)
+
+        self.main_splitter = QSplitter(Qt.Horizontal, self)
+
+        self.output_view = QPlainTextEdit(self)
+        self.output_view.setReadOnly(True)
+        self.output_view.setPlaceholderText("Debugger output...")
+
+        self.inspector_splitter = QSplitter(Qt.Vertical, self)
+
+        self.stack_view = QListWidget(self)
+        self.stack_view.setAlternatingRowColors(True)
+        self.stack_view.currentRowChanged.connect(self._on_stack_selection_changed)
+
+        self.inspector_tabs = QTabWidget(self)
+        self.inspector_tabs.setDocumentMode(True)
+
+        self.variables_view = QTreeWidget(self)
+        self.variables_view.setColumnCount(2)
+        self.variables_view.setHeaderLabels(["Name", "Value"])
+        self.variables_view.setAlternatingRowColors(True)
+
+        self.watches_host = QWidget(self)
+        watch_layout = QVBoxLayout(self.watches_host)
+        watch_layout.setContentsMargins(0, 0, 0, 0)
+        watch_bar = QHBoxLayout()
+        watch_bar.setContentsMargins(0, 0, 0, 0)
+        self.watch_input = QLineEdit(self)
+        self.watch_input.setPlaceholderText("Expression to watch")
+        self.watch_input.returnPressed.connect(self._add_watch_expression)
+        self.add_watch_button = QPushButton("Add", self)
+        self.add_watch_button.clicked.connect(self._add_watch_expression)
+        self.remove_watch_button = QPushButton("Remove", self)
+        self.remove_watch_button.clicked.connect(self._remove_selected_watch)
+        self.evaluate_button = QPushButton("Evaluate", self)
+        self.evaluate_button.clicked.connect(self._evaluate_current_expression)
+        watch_bar.addWidget(self.watch_input, 1)
+        watch_bar.addWidget(self.add_watch_button)
+        watch_bar.addWidget(self.remove_watch_button)
+        watch_bar.addWidget(self.evaluate_button)
+        self.watch_list = QListWidget(self)
+        self.watch_list.currentTextChanged.connect(self._on_watch_selection_changed)
+        self.watch_values = QTreeWidget(self)
+        self.watch_values.setColumnCount(3)
+        self.watch_values.setHeaderLabels(["Expression", "Value", "Status"])
+        self.watch_values.setAlternatingRowColors(True)
+        watch_layout.addLayout(watch_bar)
+        watch_layout.addWidget(self.watch_list, 1)
+        watch_layout.addWidget(self.watch_values, 2)
+
+        self.issues_view = QTreeWidget(self)
+        self.issues_view.setColumnCount(2)
+        self.issues_view.setHeaderLabels(["Field", "Value"])
+        self.issues_view.setAlternatingRowColors(True)
+
+        self.inspector_tabs.addTab(self.variables_view, "Variables")
+        self.inspector_tabs.addTab(self.watches_host, "Watches")
+        self.inspector_tabs.addTab(self.issues_view, "Issues")
+
+        self.inspector_splitter.addWidget(self.stack_view)
+        self.inspector_splitter.addWidget(self.inspector_tabs)
+        self.inspector_splitter.setStretchFactor(0, 2)
+        self.inspector_splitter.setStretchFactor(1, 3)
+
+        self.main_splitter.addWidget(self.output_view)
+        self.main_splitter.addWidget(self.inspector_splitter)
+        self.main_splitter.setStretchFactor(0, 3)
+        self.main_splitter.setStretchFactor(1, 2)
+
+        root.addWidget(self.summary_label)
+        root.addWidget(self.main_splitter, 1)
+
+    def _connect_controller(self) -> None:
+        self.controller.stateChanged.connect(self._on_state_changed)
+        self.controller.stdoutReceived.connect(lambda text: self._append_output(text))
+        self.controller.stderrReceived.connect(lambda text: self._append_output(text, prefix="[stderr] "))
+        self.controller.protocolError.connect(lambda text: self._append_output(text, prefix="[protocol] "))
+        self.controller.started.connect(self._on_started)
+        self.controller.breakpointsSet.connect(self._on_breakpoints_set)
+        self.controller.paused.connect(self._on_paused)
+        self.controller.watchValuesUpdated.connect(self._on_watch_values_updated)
+        self.controller.evaluationResult.connect(self._on_evaluation_result)
+        self.controller.exceptionRaised.connect(self._on_exception)
+        self.controller.fatalError.connect(self._on_fatal_error)
+        self.controller.processEnded.connect(self._on_process_ended)
+        self.controller.finished.connect(self._on_finished)
+        self.main_splitter.splitterMoved.connect(self._persist_layout)
+        self.inspector_splitter.splitterMoved.connect(self._persist_layout)
+
+    def _layout_settings(self) -> dict:
+        raw = self.ide.settings_manager.get("debugger.layout", scope_preference="ide", default={})
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _restore_layout(self) -> None:
+        cfg = self._layout_settings()
+        main_sizes = cfg.get("main_splitter")
+        if isinstance(main_sizes, list) and len(main_sizes) >= 2:
+            try:
+                self.main_splitter.setSizes([max(50, int(size)) for size in main_sizes])
+            except Exception:
+                pass
+        inspector_sizes = cfg.get("inspector_splitter")
+        if isinstance(inspector_sizes, list) and len(inspector_sizes) >= 2:
+            try:
+                self.inspector_splitter.setSizes([max(40, int(size)) for size in inspector_sizes])
+            except Exception:
+                pass
+
+    def _persist_layout(self, *_args) -> None:
+        cfg = self._layout_settings()
+        cfg["main_splitter"] = [int(size) for size in self.main_splitter.sizes()]
+        cfg["inspector_splitter"] = [int(size) for size in self.inspector_splitter.sizes()]
+        self.ide.settings_manager.set("debugger.layout", cfg, "ide")
+        try:
+            self.ide.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+        except Exception:
+            pass
+
+    def _set_summary(self, text: str) -> None:
+        self.summary_label.setText(str(text or "").strip() or "Idle")
+
+    def _append_output(self, text: str, *, prefix: str = "") -> None:
+        line = f"{prefix}{text}" if prefix else str(text or "")
+        if line:
+            self.output_view.appendPlainText(line)
+
+    def _clear_issue_view(self) -> None:
+        self.issues_view.clear()
+
+    def _set_issue_data(self, title: str, rows: list[tuple[str, str]]) -> None:
+        self.issues_view.clear()
+        root = QTreeWidgetItem([title, ""])
+        self.issues_view.addTopLevelItem(root)
+        for key, value in rows:
+            root.addChild(QTreeWidgetItem([str(key), str(value)]))
+        root.setExpanded(True)
+        self.inspector_tabs.setCurrentWidget(self.issues_view)
+        self.issues_view.resizeColumnToContents(0)
+
+    def _on_state_changed(self, state_value: str) -> None:
+        try:
+            self._state = ExecutionState(state_value)
+        except Exception:
+            self._state = ExecutionState.IDLE
+        if self._state in {ExecutionState.STARTING, ExecutionState.RUNNING}:
+            self._last_visual_state = "running"
+        elif self._state == ExecutionState.PAUSED:
+            self._last_visual_state = "paused"
+        self._set_summary(self.status_text())
+        self.stateChanged.emit(state_value)
+
+    def _on_started(self, data: dict) -> None:
+        self._last_visual_state = "running"
+        self._stack_frames = []
+        self.stack_view.clear()
+        self.variables_view.clear()
+        self.watch_values.clear()
+        self._clear_issue_view()
+        file_path = str(data.get("file") or "")
+        module_name = str(data.get("module") or "").strip()
+        summary = f"Running {module_name}" if module_name else "Running"
+        if file_path:
+            self._append_output(f"[debug] started {file_path}")
+            summary = f"Running {file_path}"
+        if module_name:
+            self._append_output(f"[debug] module {module_name}")
+        self._set_summary(summary)
+        self.stateChanged.emit(self._state.value)
+
+    def _on_breakpoints_set(self, data: dict) -> None:
+        files = data.get("files") or []
+        self._append_output(f"[debug] breakpoints set: {files}")
+
+    def _on_paused(self, data: dict) -> None:
+        file_path = str(data.get("file") or "")
+        line_number = int(data.get("line") or -1)
+        function_name = str(data.get("function") or "").strip()
+        label = f"{file_path}:{line_number}" if file_path else f"line {line_number}"
+        if function_name:
+            label = f"{label} in {function_name}"
+        self._append_output(f"[debug] paused at {label}")
+        self._last_visual_state = "paused"
+        self._set_summary(f"Paused at {label}")
+        self._render_pause_data(data)
+        self._render_watch_values(data.get("watches") or [])
+        self.stateChanged.emit(self._state.value)
+
+    def _on_watch_values_updated(self, data: dict) -> None:
+        self._render_watch_values(data.get("watches") or [])
+
+    def _on_evaluation_result(self, data: dict) -> None:
+        expression = str(data.get("expression") or "")
+        status = str(data.get("status") or "ok")
+        value = str(data.get("value") or data.get("error") or "")
+        self._append_output(f"[eval] {expression} => {value}")
+        self._set_issue_data(
+            "Evaluation",
+            [("Expression", expression), ("Status", status), ("Value", value)],
+        )
+
+    def _on_exception(self, data: dict) -> None:
+        exc_type = str(data.get("type") or "Exception")
+        message = str(data.get("message") or "")
+        file_path = str(data.get("file") or "")
+        line_number = str(data.get("line") or "")
+        self._append_output(f"[exception] {exc_type}: {message}")
+        traceback_text = str(data.get("traceback") or "").strip()
+        if traceback_text:
+            for line in traceback_text.splitlines():
+                self._append_output(line)
+        self._set_summary(f"Exception: {exc_type}")
+        self._set_issue_data(
+            "Exception",
+            [("Type", exc_type), ("Message", message), ("File", file_path), ("Line", line_number), ("Traceback", traceback_text)],
+        )
+
+    def _on_fatal_error(self, data: dict) -> None:
+        self._last_visual_state = "failed"
+        message = str(data.get("message") or "Debugger failed.")
+        traceback_text = str(data.get("traceback") or "").strip()
+        self._append_output(f"[fatal] {message}")
+        if traceback_text:
+            for line in traceback_text.splitlines():
+                self._append_output(line)
+        self._set_summary(f"Failed: {message}")
+        self._set_issue_data("Fatal Error", [("Message", message), ("Traceback", traceback_text)])
+        self.stateChanged.emit(self._state.value)
+
+    def _on_process_ended(self, data: dict) -> None:
+        exit_code = int(data.get("exit_code") or 0)
+        exit_status = str(data.get("exit_status") or "finished")
+        status = f"Process {exit_status} ({exit_code})"
+        self._append_output(f"[debug] {status}")
+        if exit_code != 0 or exit_status != "finished":
+            self._set_issue_data(
+                "Process",
+                [("Exit code", str(exit_code)), ("Exit status", exit_status)],
+            )
+            self._set_summary(status)
+
+    def _on_finished(self) -> None:
+        self._append_output("[debug] finished")
+        if self._last_visual_state not in {"failed", "paused"}:
+            self._last_visual_state = "finished"
+            self._set_summary("Finished")
+        self.finished.emit()
+        self.stateChanged.emit(self._state.value)
+
+    def _render_pause_data(self, data: dict) -> None:
+        raw_stack = data.get("stack")
+        if isinstance(raw_stack, list) and raw_stack:
+            self._stack_frames = [item for item in raw_stack if isinstance(item, dict)]
+        else:
+            self._stack_frames = [
+                {
+                    "file": str(data.get("file") or ""),
+                    "line": int(data.get("line") or -1),
+                    "function": str(data.get("function") or ""),
+                    "locals": data.get("locals") or {},
+                    "globals": data.get("globals") or {},
+                }
+            ]
+
+        self.stack_view.clear()
+        for index, frame in enumerate(self._stack_frames):
+            file_path = str(frame.get("file") or "")
+            line_number = int(frame.get("line") or -1)
+            function_name = str(frame.get("function") or "<module>")
+            short_name = file_path.rsplit("/", 1)[-1] if file_path else "<unknown>"
+            item = QListWidgetItem(f"{index + 1}. {function_name}  {short_name}:{line_number}")
+            item.setData(Qt.UserRole, frame)
+            self.stack_view.addItem(item)
+
+        if self.stack_view.count():
+            self.stack_view.setCurrentRow(self.stack_view.count() - 1)
+        else:
+            self.variables_view.clear()
+
+    def _render_watch_values(self, watches: list[dict]) -> None:
+        self.watch_values.clear()
+        for raw in watches:
+            if not isinstance(raw, dict):
+                continue
+            expression = str(raw.get("expression") or "")
+            status = str(raw.get("status") or "ok")
+            value = str(raw.get("value") if raw.get("value") is not None else raw.get("error") or "")
+            self.watch_values.addTopLevelItem(QTreeWidgetItem([expression, value, status]))
+        self.watch_values.resizeColumnToContents(0)
+
+    def _on_stack_selection_changed(self, row: int) -> None:
+        if row < 0 or row >= len(self._stack_frames):
+            self.variables_view.clear()
+            return
+        self._render_frame_variables(self._stack_frames[row])
+
+    def _render_frame_variables(self, frame: dict) -> None:
+        self.variables_view.clear()
+        self.variables_view.setHeaderLabels(["Name", "Value"])
+
+        locals_item = QTreeWidgetItem(["Locals", ""])
+        globals_item = QTreeWidgetItem(["Globals", ""])
+        self.variables_view.addTopLevelItem(locals_item)
+        self.variables_view.addTopLevelItem(globals_item)
+
+        self._populate_variable_group(locals_item, frame.get("locals") or {})
+        self._populate_variable_group(globals_item, frame.get("globals") or {})
+        locals_item.setExpanded(True)
+        globals_item.setExpanded(True)
+        self.variables_view.resizeColumnToContents(0)
+
+    def _add_watch_expression(self) -> None:
+        expression = str(self.watch_input.text() or "").strip()
+        if not expression:
+            return
+        self.watch_input.clear()
+        self.set_watch_expressions([*self._watch_expressions, expression])
+
+    def _remove_selected_watch(self) -> None:
+        item = self.watch_list.currentItem()
+        if item is None:
+            return
+        target = str(item.text() or "").strip()
+        self.set_watch_expressions([expr for expr in self._watch_expressions if expr != target])
+
+    def _on_watch_selection_changed(self, text: str) -> None:
+        if text and not self.watch_input.text().strip():
+            self.watch_input.setText(str(text))
+
+    def _evaluate_current_expression(self) -> None:
+        expression = str(self.watch_input.text() or "").strip()
+        if not expression:
+            item = self.watch_list.currentItem()
+            expression = str(item.text() or "").strip() if item is not None else ""
+        if not expression:
+            return
+        self.controller.evaluate_expression(expression)
+
+    @staticmethod
+    def _populate_variable_group(parent: QTreeWidgetItem, values: dict) -> None:
+        if not isinstance(values, dict) or not values:
+            parent.addChild(QTreeWidgetItem(["<empty>", ""]))
+            return
+        for key in sorted(values):
+            parent.addChild(QTreeWidgetItem([str(key), str(values.get(key) or "")]))
