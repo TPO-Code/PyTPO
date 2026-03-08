@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import builtins
 import concurrent.futures
 import importlib
@@ -31,6 +32,7 @@ class _CompletionPayload:
     reason: str
     completion_cfg: dict
     interpreter: str
+    analysis_sys_path: list[str]
     project_root: str
     recency: dict[str, int]
 
@@ -43,6 +45,7 @@ class _SignaturePayload:
     column: int
     token: int
     interpreter: str
+    analysis_sys_path: list[str]
     project_root: str
 
 
@@ -54,6 +57,7 @@ class _DefinitionPayload:
     column: int
     token: int
     interpreter: str
+    analysis_sys_path: list[str]
     project_root: str
 
 
@@ -65,6 +69,7 @@ class _ReferencesPayload:
     column: int
     token: int
     interpreter: str
+    analysis_sys_path: list[str]
     project_root: str
 
 
@@ -79,6 +84,7 @@ import sys
 
 try:
     import jedi
+    from jedi.api.environment import create_environment
 except Exception as exc:
     print(json.dumps({"state": "missing", "error": str(exc)}), flush=True)
     raise SystemExit(0)
@@ -110,17 +116,53 @@ def _clamp_line_col(source, line, col):
     col = max(0, min(int(col), len(line_text)))
     return line, col
 
-def _project_for_root(project_root):
-    if not project_root:
+def _normalize_sys_path(paths, project_root):
+    out = []
+    seen = set()
+    if project_root:
+        root = os.path.abspath(project_root)
+        if os.path.isdir(root):
+            seen.add(root)
+            out.append(root)
+    for raw in paths or []:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value == "":
+            continue
+        abs_value = os.path.abspath(value)
+        if abs_value in seen:
+            continue
+        seen.add(abs_value)
+        out.append(abs_value)
+    return out
+
+def _environment_for_interpreter(path):
+    value = str(path or "").strip()
+    if not value:
         return None
-    root = os.path.abspath(project_root)
-    if not os.path.isdir(root):
+    if not os.path.exists(value):
         return None
     try:
-        # added_sys_path is key for local imports
-        return jedi.Project(path=root, added_sys_path=[root])
+        return create_environment(path=value, safe=True)
     except Exception:
         return None
+
+def _project_for_root(project_root, analysis_interpreter, analysis_sys_path):
+    root = os.path.abspath(project_root) if project_root else ""
+    sys_path = _normalize_sys_path(analysis_sys_path, root)
+    kwargs = {}
+    if analysis_interpreter and os.path.exists(analysis_interpreter):
+        kwargs["environment_path"] = analysis_interpreter
+    if sys_path:
+        kwargs["sys_path"] = sys_path
+        kwargs["smart_sys_path"] = False
+    if not root or not os.path.isdir(root):
+        return None, sys_path
+    try:
+        return jedi.Project(path=root, **kwargs), sys_path
+    except Exception:
+        return None, sys_path
 
 while True:
     raw = sys.stdin.readline()
@@ -141,6 +183,10 @@ while True:
     source = str(req.get("source") or "")
     path = str(req.get("path") or "") or None
     project_root = str(req.get("project_root") or "").strip() or None
+    analysis_interpreter = str(req.get("analysis_interpreter") or "").strip()
+    analysis_sys_path = req.get("analysis_sys_path")
+    if not isinstance(analysis_sys_path, list):
+        analysis_sys_path = []
     line = req.get("line", 1)
     col = req.get("column", 0)
     max_items = max(5, min(2000, int(req.get("max_items") or 200)))
@@ -155,6 +201,8 @@ while True:
         col,
         max_items,
         project_root or "",
+        analysis_interpreter,
+        tuple(str(p or "") for p in analysis_sys_path),
         hash(source),
         include_signatures,
     )
@@ -166,21 +214,18 @@ while True:
             print(json.dumps({"state": "ok", "items": cached}), flush=True)
         continue
 
-    # Ensure project root is import-visible inside worker process only
-    if project_root:
-        root = os.path.abspath(project_root)
-        if root in sys.path:
-            try:
-                sys.path.remove(root)
-            except Exception:
-                pass
-        sys.path.insert(0, root)
-
-    project = _project_for_root(project_root)
+    project, normalized_sys_path = _project_for_root(
+        project_root,
+        analysis_interpreter,
+        analysis_sys_path,
+    )
+    environment = _environment_for_interpreter(analysis_interpreter)
 
     try:
         if project is not None:
             script = jedi.Script(code=source, path=path, project=project)
+        elif environment is not None:
+            script = jedi.Script(code=source, path=path, environment=environment)
         else:
             script = jedi.Script(code=source, path=path)
 
@@ -367,10 +412,123 @@ while True:
         print(json.dumps({"state": "failed", "error": str(exc)}), flush=True)
 """
 
+ANALYSIS_PROBE_SCRIPT = r"""
+import importlib
+import inspect
+import json
+import pkgutil
+import sys
+
+
+def _normalize_sys_path(values):
+    out = []
+    seen = set()
+    for raw in values or []:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _module_candidates(prefix):
+    out = []
+    seen = set()
+    head = str(prefix or "").split(".", 1)[0]
+    try:
+        for item in pkgutil.iter_modules():
+            name = str(item.name or "")
+            if head and not name.startswith(head):
+                continue
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+    except Exception:
+        pass
+
+    if "." in str(prefix or ""):
+        pkg_name = str(prefix).rsplit(".", 1)[0]
+        try:
+            pkg = importlib.import_module(pkg_name)
+            pkg_path = getattr(pkg, "__path__", None)
+            if pkg_path:
+                for item in pkgutil.iter_modules(pkg_path):
+                    full = f"{pkg_name}.{item.name}"
+                    if prefix and not full.startswith(prefix):
+                        continue
+                    if full not in seen:
+                        seen.add(full)
+                        out.append(full)
+        except Exception:
+            pass
+    return out
+
+
+def _module_members(module_name, prefix):
+    try:
+        mod = importlib.import_module(str(module_name or ""))
+    except Exception:
+        return []
+
+    out = []
+    for name in dir(mod):
+        if prefix and not str(name).startswith(prefix):
+            continue
+        kind = "name"
+        try:
+            value = getattr(mod, name)
+            if inspect.isclass(value):
+                kind = "class"
+            elif callable(value):
+                kind = "function"
+        except Exception:
+            pass
+        out.append({"label": str(name), "kind": kind})
+    return out
+
+
+def _builtins_list():
+    try:
+        names = dir(__builtins__)
+    except Exception:
+        names = []
+    return [str(name) for name in names if str(name or "").strip()]
+
+
+try:
+    req = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    print(json.dumps({"ok": False, "error": "bad_json"}))
+    raise SystemExit(0)
+
+sys_path = _normalize_sys_path(req.get("sys_path"))
+if sys_path:
+    sys.path[:] = sys_path
+
+mode = str(req.get("mode") or "").strip().lower()
+target = str(req.get("target") or "")
+prefix = str(req.get("prefix") or "")
+
+result = {"ok": True}
+if mode == "module_candidates":
+    result["items"] = _module_candidates(prefix)
+elif mode == "module_members":
+    result["items"] = _module_members(target, prefix)
+elif mode == "builtins":
+    result["items"] = _builtins_list()
+else:
+    result = {"ok": False, "error": "bad_mode"}
+
+print(json.dumps(result))
+"""
+
 
 class JediServer:
-    def __init__(self, interpreter: str, project_root: str):
-        self.interpreter = str(interpreter).strip() or "python"
+    def __init__(self, worker_interpreter: str, project_root: str):
+        self.worker_interpreter = str(worker_interpreter).strip() or sys.executable or "python"
         self.project_root = os.path.abspath(project_root) if project_root else ""
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
@@ -400,7 +558,7 @@ class JediServer:
 
         try:
             self._proc = subprocess.Popen(
-                [self.interpreter, "-u", "-c", JEDI_SERVER_SCRIPT],
+                [self.worker_interpreter, "-u", "-c", JEDI_SERVER_SCRIPT],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -500,6 +658,7 @@ class CompletionManager(QObject):
         self._canonicalize = canonicalize
         self._resolve_interpreter = resolve_interpreter
         self._is_path_excluded = is_path_excluded
+        self._worker_interpreter = str(sys.executable or "python")
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pytpo-complete")
         self._active_futures: set[concurrent.futures.Future] = set()
@@ -519,6 +678,8 @@ class CompletionManager(QObject):
         self._jedi_missing_warned: set[str] = set()
         self._accepted_recency: dict[str, int] = {}
         self._cancelled_reference_tokens: set[int] = set()
+        self._analysis_sys_path_cache: dict[str, list[str]] = {}
+        self._analysis_probe_cache: dict[tuple[str, tuple[str, ...], str, str, str], object] = {}
 
         self._servers: dict[str, JediServer] = {}
         self.update_settings({})
@@ -564,6 +725,7 @@ class CompletionManager(QObject):
             self.completionReady.emit({"file_path": cpath, "token": token, "items": [], "reason": reason})
             return
 
+        resolved_interpreter = self._resolve_interpreter(cpath)
         payload = _CompletionPayload(
             file_path=cpath,
             source_text=source_text or "",
@@ -573,7 +735,8 @@ class CompletionManager(QObject):
             token=max(1, int(token)),
             reason=str(reason or "auto"),
             completion_cfg=dict(self._completion_cfg),
-            interpreter=self._resolve_interpreter(cpath),
+            interpreter=resolved_interpreter,
+            analysis_sys_path=self._resolve_analysis_sys_path(resolved_interpreter),
             project_root=self._project_root,
             recency=dict(self._accepted_recency),
         )
@@ -618,13 +781,15 @@ class CompletionManager(QObject):
             )
             return
 
+        resolved_interpreter = self._resolve_interpreter(cpath)
         payload = _SignaturePayload(
             file_path=cpath,
             source_text=source_text or "",
             line=max(1, int(line)),
             column=max(0, int(column)),
             token=max(1, int(token)),
-            interpreter=self._resolve_interpreter(cpath),
+            interpreter=resolved_interpreter,
+            analysis_sys_path=self._resolve_analysis_sys_path(resolved_interpreter),
             project_root=self._project_root,
         )
         self._latest_signature_token_by_file[cpath] = max(
@@ -670,13 +835,15 @@ class CompletionManager(QObject):
             )
             return
 
+        resolved_interpreter = str(interpreter or self._resolve_interpreter(cpath))
         payload = _DefinitionPayload(
             file_path=cpath,
             source_text=source_text or "",
             line=max(1, int(line)),
             column=max(0, int(column)),
             token=tok,
-            interpreter=str(interpreter or self._resolve_interpreter(cpath)),
+            interpreter=resolved_interpreter,
+            analysis_sys_path=self._resolve_analysis_sys_path(resolved_interpreter),
             project_root=str(project_root or self._project_root),
         )
         self._latest_definition_token_by_file[cpath] = max(
@@ -728,13 +895,15 @@ class CompletionManager(QObject):
             )
             return
 
+        resolved_interpreter = str(interpreter or self._resolve_interpreter(cpath))
         payload = _ReferencesPayload(
             file_path=cpath,
             source_text=source_text or "",
             line=max(1, int(line)),
             column=max(0, int(column)),
             token=tok,
-            interpreter=str(interpreter or self._resolve_interpreter(cpath)),
+            interpreter=resolved_interpreter,
+            analysis_sys_path=self._resolve_analysis_sys_path(resolved_interpreter),
             project_root=str(project_root or self._project_root),
         )
         self._start_references_worker(payload)
@@ -767,14 +936,14 @@ class CompletionManager(QObject):
 
     # ---------- Internals ----------
 
-    def _server_key(self, interpreter: str, project_root: str) -> str:
-        return f"{interpreter}::{project_root}"
+    def _server_key(self, worker_interpreter: str, project_root: str) -> str:
+        return f"{worker_interpreter}::{project_root}"
 
-    def _get_server(self, interpreter: str, project_root: str) -> JediServer:
-        key = self._server_key(interpreter, project_root)
+    def _get_server(self, worker_interpreter: str, project_root: str) -> JediServer:
+        key = self._server_key(worker_interpreter, project_root)
         srv = self._servers.get(key)
         if srv is None:
-            srv = JediServer(interpreter=interpreter, project_root=project_root)
+            srv = JediServer(worker_interpreter=worker_interpreter, project_root=project_root)
             self._servers[key] = srv
         return srv
 
@@ -782,6 +951,170 @@ class CompletionManager(QObject):
         for s in self._servers.values():
             s.shutdown()
         self._servers.clear()
+
+    def _resolve_analysis_sys_path(self, interpreter: str) -> list[str]:
+        key = str(interpreter or "").strip()
+        if not key:
+            return []
+        cached = self._analysis_sys_path_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        try:
+            proc = subprocess.run(
+                [
+                    key,
+                    "-c",
+                    (
+                        "import json, sys; "
+                        "print(json.dumps([str(p) for p in sys.path if isinstance(p, str) and p]))"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                cwd=self._project_root if os.path.isdir(self._project_root) else None,
+            )
+        except Exception:
+            self._analysis_sys_path_cache[key] = []
+            return []
+        if proc.returncode != 0:
+            self._analysis_sys_path_cache[key] = []
+            return []
+        try:
+            raw_paths = json.loads(str(proc.stdout or "").strip() or "[]")
+        except Exception:
+            raw_paths = []
+        if not isinstance(raw_paths, list):
+            raw_paths = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_paths:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            norm = os.path.abspath(value)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            normalized.append(norm)
+        self._analysis_sys_path_cache[key] = list(normalized)
+        return list(normalized)
+
+    def _run_analysis_probe(
+        self,
+        *,
+        interpreter: str,
+        analysis_sys_path: list[str],
+        project_root: str,
+        mode: str,
+        target: str = "",
+        prefix: str = "",
+    ) -> object:
+        interp = str(interpreter or "").strip()
+        mode_key = str(mode or "").strip().lower()
+        path_key = tuple(str(p or "").strip() for p in analysis_sys_path or [] if str(p or "").strip())
+        cache_key = (interp, path_key, str(project_root or ""), mode_key, f"{target}\0{prefix}")
+        if cache_key in self._analysis_probe_cache:
+            return self._analysis_probe_cache[cache_key]
+        if not interp or mode_key not in {"module_candidates", "module_members", "builtins"}:
+            return []
+
+        payload = {
+            "mode": mode_key,
+            "target": str(target or ""),
+            "prefix": str(prefix or ""),
+            "sys_path": list(path_key),
+        }
+        try:
+            proc = subprocess.run(
+                [interp, "-c", ANALYSIS_PROBE_SCRIPT],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                cwd=project_root if os.path.isdir(project_root) else None,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        try:
+            result_obj = json.loads(str(proc.stdout or "").strip() or "{}")
+        except Exception:
+            return []
+        if not isinstance(result_obj, dict) or not bool(result_obj.get("ok", False)):
+            return []
+        items = result_obj.get("items", [])
+        self._analysis_probe_cache[cache_key] = items
+        return items
+
+    def _analysis_module_candidates(
+        self,
+        *,
+        interpreter: str,
+        analysis_sys_path: list[str],
+        project_root: str,
+        prefix: str,
+    ) -> list[str]:
+        result = self._run_analysis_probe(
+            interpreter=interpreter,
+            analysis_sys_path=analysis_sys_path,
+            project_root=project_root,
+            mode="module_candidates",
+            prefix=prefix,
+        )
+        if not isinstance(result, list):
+            return []
+        return [str(item or "") for item in result if str(item or "").strip()]
+
+    def _analysis_module_members(
+        self,
+        *,
+        interpreter: str,
+        analysis_sys_path: list[str],
+        project_root: str,
+        module_name: str,
+        prefix: str,
+    ) -> list[dict]:
+        result = self._run_analysis_probe(
+            interpreter=interpreter,
+            analysis_sys_path=analysis_sys_path,
+            project_root=project_root,
+            mode="module_members",
+            target=module_name,
+            prefix=prefix,
+        )
+        if not isinstance(result, list):
+            return []
+        out: list[dict] = []
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            out.append(
+                {
+                    "label": label,
+                    "insert_text": label,
+                    "kind": str(item.get("kind") or "name").strip().lower() or "name",
+                    "detail": "",
+                    "source": "fallback",
+                    "source_scope": "project",
+                }
+            )
+        return out
+
+    def _analysis_builtins(self, *, interpreter: str, analysis_sys_path: list[str], project_root: str) -> list[str]:
+        result = self._run_analysis_probe(
+            interpreter=interpreter,
+            analysis_sys_path=analysis_sys_path,
+            project_root=project_root,
+            mode="builtins",
+        )
+        if not isinstance(result, list):
+            return []
+        return [str(item or "") for item in result if str(item or "").strip()]
 
     def _start_worker(self, payload: _CompletionPayload):
         try:
@@ -872,11 +1205,11 @@ class CompletionManager(QObject):
             if token != self._latest_definition_token_by_file.get(cpath, 0):
                 return
             missing_backend = str(result_obj.get("missing_backend") or "")
-            interpreter = str(result_obj.get("interpreter") or "python")
-            if missing_backend == "jedi" and interpreter not in self._jedi_missing_warned:
-                self._jedi_missing_warned.add(interpreter)
+            worker_interpreter = str(result_obj.get("worker_interpreter") or result_obj.get("interpreter") or "python")
+            if missing_backend == "jedi" and worker_interpreter not in self._jedi_missing_warned:
+                self._jedi_missing_warned.add(worker_interpreter)
                 self.statusMessage.emit(
-                    f"jedi not available in interpreter {interpreter}, using keywords/builtins fallback."
+                    f"jedi not available in interpreter {worker_interpreter}, using keywords/builtins fallback."
                 )
             self.definitionReady.emit(result_obj)
             return
@@ -884,11 +1217,11 @@ class CompletionManager(QObject):
             if token != self._latest_signature_token_by_file.get(cpath, 0):
                 return
             missing_backend = str(result_obj.get("missing_backend") or "")
-            interpreter = str(result_obj.get("interpreter") or "python")
-            if missing_backend == "jedi" and interpreter not in self._jedi_missing_warned:
-                self._jedi_missing_warned.add(interpreter)
+            worker_interpreter = str(result_obj.get("worker_interpreter") or result_obj.get("interpreter") or "python")
+            if missing_backend == "jedi" and worker_interpreter not in self._jedi_missing_warned:
+                self._jedi_missing_warned.add(worker_interpreter)
                 self.statusMessage.emit(
-                    f"jedi not available in interpreter {interpreter}, using keywords/builtins fallback."
+                    f"jedi not available in interpreter {worker_interpreter}, using keywords/builtins fallback."
                 )
             self.signatureReady.emit(result_obj)
             return
@@ -896,11 +1229,11 @@ class CompletionManager(QObject):
             return
 
         missing_backend = str(result_obj.get("missing_backend") or "")
-        interpreter = str(result_obj.get("interpreter") or "python")
-        if missing_backend == "jedi" and interpreter not in self._jedi_missing_warned:
-            self._jedi_missing_warned.add(interpreter)
+        worker_interpreter = str(result_obj.get("worker_interpreter") or result_obj.get("interpreter") or "python")
+        if missing_backend == "jedi" and worker_interpreter not in self._jedi_missing_warned:
+            self._jedi_missing_warned.add(worker_interpreter)
             self.statusMessage.emit(
-                f"jedi not available in interpreter {interpreter}, using keywords/builtins fallback."
+                f"jedi not available in interpreter {worker_interpreter}, using keywords/builtins fallback."
             )
 
         self.completionReady.emit(result_obj)
@@ -972,6 +1305,7 @@ class CompletionManager(QObject):
                 "backend": "tdocproject",
                 "missing_backend": "",
                 "interpreter": payload.interpreter,
+                "worker_interpreter": self._worker_interpreter,
                 "reason": payload.reason,
             }
 
@@ -987,7 +1321,7 @@ class CompletionManager(QObject):
         missing_backend = ""
 
         if str(cfg.get("backend", "jedi")).strip().lower() == "jedi":
-            server = self._get_server(payload.interpreter, payload.project_root)
+            server = self._get_server(self._worker_interpreter, payload.project_root)
             req = {
                 "path": payload.file_path,
                 "source": payload.source_text,
@@ -995,6 +1329,8 @@ class CompletionManager(QObject):
                 "column": payload.column,
                 "max_items": max(max_items * 6, 300),
                 "project_root": payload.project_root,
+                "analysis_interpreter": payload.interpreter,
+                "analysis_sys_path": list(payload.analysis_sys_path),
                 "include_signatures": True,
             }
             jedi_res = server.request(req, timeout_s=1.2)
@@ -1008,7 +1344,29 @@ class CompletionManager(QObject):
                 missing_backend = "jedi"
 
         if not items:
-            items = _fallback_candidates(payload=payload, context=context, max_items=max(max_items * 4, 120))
+            items = _fallback_candidates(
+                payload=payload,
+                context=context,
+                max_items=max(max_items * 4, 120),
+                module_candidates_provider=lambda prefix: self._analysis_module_candidates(
+                    interpreter=payload.interpreter,
+                    analysis_sys_path=payload.analysis_sys_path,
+                    project_root=payload.project_root,
+                    prefix=prefix,
+                ),
+                module_members_provider=lambda module_name, prefix: self._analysis_module_members(
+                    interpreter=payload.interpreter,
+                    analysis_sys_path=payload.analysis_sys_path,
+                    project_root=payload.project_root,
+                    module_name=module_name,
+                    prefix=prefix,
+                ),
+                builtins_provider=lambda: self._analysis_builtins(
+                    interpreter=payload.interpreter,
+                    analysis_sys_path=payload.analysis_sys_path,
+                    project_root=payload.project_root,
+                ),
+            )
 
         ranked = _rank_items(
             items=items,
@@ -1026,6 +1384,7 @@ class CompletionManager(QObject):
             "backend": used_backend,
             "missing_backend": missing_backend,
             "interpreter": payload.interpreter,
+            "worker_interpreter": self._worker_interpreter,
             "reason": payload.reason,
         }
 
@@ -1038,7 +1397,7 @@ class CompletionManager(QObject):
         missing_backend = ""
 
         if str(self._completion_cfg.get("backend", "jedi")).strip().lower() == "jedi":
-            server = self._get_server(payload.interpreter, payload.project_root)
+            server = self._get_server(self._worker_interpreter, payload.project_root)
             req = {
                 "request": "signature",
                 "path": payload.file_path,
@@ -1046,6 +1405,8 @@ class CompletionManager(QObject):
                 "line": payload.line,
                 "column": payload.column,
                 "project_root": payload.project_root,
+                "analysis_interpreter": payload.interpreter,
+                "analysis_sys_path": list(payload.analysis_sys_path),
             }
             jedi_res = server.request(req, timeout_s=1.2)
             state = str(jedi_res.get("state") or "failed")
@@ -1069,6 +1430,7 @@ class CompletionManager(QObject):
             "source": source,
             "missing_backend": missing_backend,
             "interpreter": payload.interpreter,
+            "worker_interpreter": self._worker_interpreter,
         }
 
     def _run_definition_payload_fast(self, payload: _DefinitionPayload) -> dict:
@@ -1078,7 +1440,7 @@ class CompletionManager(QObject):
         backend = str(self._completion_cfg.get("backend", "jedi")).strip().lower()
 
         if backend == "jedi":
-            server = self._get_server(payload.interpreter, payload.project_root)
+            server = self._get_server(self._worker_interpreter, payload.project_root)
             req = {
                 "request": "definition",
                 "path": payload.file_path,
@@ -1086,6 +1448,8 @@ class CompletionManager(QObject):
                 "line": payload.line,
                 "column": payload.column,
                 "project_root": payload.project_root,
+                "analysis_interpreter": payload.interpreter,
+                "analysis_sys_path": list(payload.analysis_sys_path),
             }
             jedi_res = server.request(req, timeout_s=4.0)
             state = str(jedi_res.get("state") or "failed")
@@ -1110,6 +1474,7 @@ class CompletionManager(QObject):
             "source": source,
             "missing_backend": missing_backend,
             "interpreter": payload.interpreter,
+            "worker_interpreter": self._worker_interpreter,
         }
 
     def _run_references_payload_fast(
@@ -1152,7 +1517,7 @@ class CompletionManager(QObject):
         chunk: list[dict] = []
 
         if backend == "jedi":
-            server = self._get_server(payload.interpreter, payload.project_root)
+            server = self._get_server(self._worker_interpreter, payload.project_root)
             req = {
                 "request": "references",
                 "path": payload.file_path,
@@ -1160,6 +1525,8 @@ class CompletionManager(QObject):
                 "line": payload.line,
                 "column": payload.column,
                 "project_root": payload.project_root,
+                "analysis_interpreter": payload.interpreter,
+                "analysis_sys_path": list(payload.analysis_sys_path),
             }
             jedi_res = server.request(req, timeout_s=20.0)
             state = str(jedi_res.get("state") or "failed")
@@ -1183,6 +1550,8 @@ class CompletionManager(QObject):
                                 "canceled": True,
                                 "source": source,
                                 "missing_backend": missing_backend,
+                                "interpreter": payload.interpreter,
+                                "worker_interpreter": self._worker_interpreter,
                             }
                         loc = self._normalize_symbol_location(item, payload.file_path)
                         target_path = str(loc.get("file_path") or "")
@@ -1230,6 +1599,8 @@ class CompletionManager(QObject):
                     "canceled": True,
                     "source": source,
                     "missing_backend": missing_backend,
+                    "interpreter": payload.interpreter,
+                    "worker_interpreter": self._worker_interpreter,
                 }
             chunk.append(hit)
             processed += 1
@@ -1248,6 +1619,7 @@ class CompletionManager(QObject):
             "source": source,
             "missing_backend": missing_backend,
             "interpreter": payload.interpreter,
+            "worker_interpreter": self._worker_interpreter,
         }
 
     def _normalize_symbol_location(self, item: object, fallback_file_path: str) -> dict:
@@ -1738,24 +2110,113 @@ def _context_filter_items(items: list[dict], context: dict) -> list[dict]:
     return list(items)
 
 
-def _fallback_candidates(payload: _CompletionPayload, context: dict, max_items: int) -> list[dict]:
+def _fallback_candidates(
+    payload: _CompletionPayload,
+    context: dict,
+    max_items: int,
+    *,
+    module_candidates_provider: Callable[[str], list[str]] | None = None,
+    module_members_provider: Callable[[str, str], list[dict]] | None = None,
+    builtins_provider: Callable[[], list[str]] | None = None,
+) -> list[dict]:
     mode = str(context.get("mode") or "normal")
     prefix = str(context.get("prefix") or payload.prefix or "")
 
     if mode in {"import_stmt", "from_module"}:
-        return _fallback_module_candidates(prefix=prefix, project_root=payload.project_root, max_items=max_items)
+        return _fallback_module_candidates(
+            prefix=prefix,
+            project_root=payload.project_root,
+            max_items=max_items,
+            module_candidates_provider=module_candidates_provider,
+        )
 
     if mode == "from_import":
         module_name = str(context.get("import_module") or "").strip()
-        return _fallback_module_members(module_name=module_name, prefix=prefix, max_items=max_items, project_root=payload.project_root)
+        return _fallback_module_members(
+            module_name=module_name,
+            prefix=prefix,
+            max_items=max_items,
+            project_root=payload.project_root,
+            module_members_provider=module_members_provider,
+        )
 
     if mode == "attribute":
-        return _fallback_attribute_candidates(payload.source_text, payload.line, payload.column, prefix, max_items)
+        return _fallback_attribute_candidates(
+            payload.source_text,
+            payload.line,
+            payload.column,
+            prefix,
+            max_items,
+            project_root=payload.project_root,
+            module_members_provider=module_members_provider,
+        )
 
-    return _fallback_normal_candidates(source_text=payload.source_text, prefix=prefix, max_items=max_items)
+    return _fallback_normal_candidates(
+        source_text=payload.source_text,
+        prefix=prefix,
+        max_items=max_items,
+        builtins_provider=builtins_provider,
+    )
 
 
-def _fallback_attribute_candidates(source_text: str, line: int, column: int, prefix: str, max_items: int) -> list[dict]:
+def _module_name_candidates_for_symbol(source_text: str, symbol_name: str) -> list[str]:
+    target = str(symbol_name or "").strip()
+    if not target:
+        return []
+
+    try:
+        tree = ast.parse(source_text or "")
+    except Exception:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        value = str(name or "").strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        candidates.append(value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module_name = str(getattr(alias, "name", "") or "").strip()
+                if not module_name:
+                    continue
+                alias_name = str(getattr(alias, "asname", "") or "").strip()
+                bound_name = alias_name or module_name.split(".", 1)[0]
+                if bound_name == target:
+                    _add(module_name if alias_name else bound_name)
+        elif isinstance(node, ast.ImportFrom):
+            module_name = str(getattr(node, "module", "") or "").strip()
+            if not module_name:
+                continue
+            for alias in node.names:
+                imported_name = str(getattr(alias, "name", "") or "").strip()
+                if not imported_name or imported_name == "*":
+                    continue
+                alias_name = str(getattr(alias, "asname", "") or "").strip()
+                bound_name = alias_name or imported_name
+                if bound_name == target:
+                    _add(f"{module_name}.{imported_name}")
+
+    if not candidates and "." not in target:
+        _add(target)
+    return candidates
+
+
+def _fallback_attribute_candidates(
+    source_text: str,
+    line: int,
+    column: int,
+    prefix: str,
+    max_items: int,
+    *,
+    project_root: str = "",
+    module_members_provider: Callable[[str, str], list[dict]] | None = None,
+) -> list[dict]:
     """
     Lightweight local fallback for `obj.`:
     - infer obj name left of dot
@@ -1784,6 +2245,7 @@ def _fallback_attribute_candidates(source_text: str, line: int, column: int, pre
             break
 
     names: set[str] = set()
+    module_names = _module_name_candidates_for_symbol(source_text, obj_name)
     if cls_name:
         # parse class body roughly in same file
         class_line = None
@@ -1807,6 +2269,31 @@ def _fallback_attribute_candidates(source_text: str, line: int, column: int, pre
                 attrm = re.match(r"^\s*self\.([A-Za-z_]\w*)\s*=", ln)
                 if attrm:
                     names.add(attrm.group(1))
+
+    inserted = False
+    if project_root and project_root not in sys.path:
+        sys.path.insert(0, project_root)
+        inserted = True
+    try:
+        for module_name in module_names:
+            if callable(module_members_provider):
+                for item in module_members_provider(module_name, prefix):
+                    label = str(item.get("label") or "")
+                    if label:
+                        names.add(label)
+                continue
+            try:
+                mod = importlib.import_module(module_name)
+            except Exception:
+                continue
+            for name in dir(mod):
+                names.add(str(name))
+    finally:
+        if inserted:
+            try:
+                sys.path.pop(0)
+            except Exception:
+                pass
 
     # Always include safe object attrs so menu not empty
     for n in ("__class__", "__doc__", "__repr__", "__str__"):
@@ -1832,13 +2319,20 @@ def _fallback_attribute_candidates(source_text: str, line: int, column: int, pre
     return out
 
 
-def _fallback_normal_candidates(source_text: str, prefix: str, max_items: int) -> list[dict]:
+def _fallback_normal_candidates(
+    source_text: str,
+    prefix: str,
+    max_items: int,
+    *,
+    builtins_provider: Callable[[], list[str]] | None = None,
+) -> list[dict]:
     names: dict[str, str] = {}
     for token in re.findall(r"[A-Za-z_]\w*", source_text or ""):
         names[token] = "current_file"
     for k in keyword.kwlist:
         names.setdefault(k, "builtins")
-    for b in dir(builtins):
+    builtin_names = builtins_provider() if callable(builtins_provider) else dir(builtins)
+    for b in builtin_names:
         names.setdefault(str(b), "builtins")
 
     out: list[dict] = []
@@ -1856,10 +2350,21 @@ def _fallback_normal_candidates(source_text: str, prefix: str, max_items: int) -
     return out[: max_items * 2]
 
 
-def _fallback_module_candidates(prefix: str, project_root: str, max_items: int) -> list[dict]:
+def _fallback_module_candidates(
+    prefix: str,
+    project_root: str,
+    max_items: int,
+    *,
+    module_candidates_provider: Callable[[str], list[str]] | None = None,
+) -> list[dict]:
     candidates: dict[str, str] = {}
-    for mod in _iter_available_modules(prefix):
-        candidates[mod] = "interpreter_modules"
+    module_candidates = (
+        module_candidates_provider(prefix)
+        if callable(module_candidates_provider)
+        else list(_iter_available_modules(prefix))
+    )
+    for mod in module_candidates:
+        candidates[str(mod)] = "interpreter_modules"
     for mod in _iter_project_modules(project_root):
         if prefix and not mod.startswith(prefix):
             continue
@@ -1897,9 +2402,21 @@ def _fallback_module_candidates(prefix: str, project_root: str, max_items: int) 
     return out[: max_items * 2]
 
 
-def _fallback_module_members(module_name: str, prefix: str, max_items: int, project_root: str = "") -> list[dict]:
+def _fallback_module_members(
+    module_name: str,
+    prefix: str,
+    max_items: int,
+    project_root: str = "",
+    *,
+    module_members_provider: Callable[[str, str], list[dict]] | None = None,
+) -> list[dict]:
     if not module_name:
         return []
+
+    if callable(module_members_provider):
+        provided = module_members_provider(module_name, prefix)
+        if provided:
+            return provided[: max_items * 2]
 
     inserted = False
     if project_root and project_root not in sys.path:

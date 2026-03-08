@@ -64,6 +64,16 @@ class ProjectPolicyService:
             return self._resolve_path_from_project_no_symlink_resolve(text)
         return text
 
+    def _default_project_interpreter(self) -> str:
+        candidates = [
+            os.path.join(self.project_root, ".venv", "bin", "python"),
+            os.path.join(self.project_root, ".venv", "Scripts", "python.exe"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return "python"
+
     def resolve_folder_policy(self, config: dict, path: str) -> dict:
         target = self._canonicalize(path)
         if not os.path.isdir(target):
@@ -124,7 +134,7 @@ class ProjectPolicyService:
         if legacy_interp:
             return legacy_interp
 
-        return "python"
+        return self._default_project_interpreter()
 
     def resolve_run_in(self, config: dict, file_path: str) -> str:
         run_cfg = config.get("run", {}) if isinstance(config, dict) else {}
