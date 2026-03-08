@@ -180,11 +180,6 @@ class ExecutionController:
             return
 
         current_path = getattr(ed, "file_path", "") or ""
-        if self._is_python_runnable_file(current_path):
-            if self._start_debugger_for_current_file():
-                return
-            return
-
         if not self._save_all_dirty_editors_for_run():
             return
 
@@ -204,10 +199,20 @@ class ExecutionController:
             self._run_default_rust_context(file_path=file_path, status_prefix="Running")
             return
 
+        if self._is_python_runnable_file(file_path):
+            self._run_python_script_in_terminal(
+                script_path=file_path,
+                interpreter=str(self.resolve_interpreter(file_path) or "").strip(),
+                working_directory=str(self.resolve_run_in(file_path) or os.path.dirname(file_path) or self.project_root),
+                arguments=(),
+                environment={},
+                session_label=os.path.basename(file_path) or file_path,
+                session_key=file_path,
+            )
+            return
+
         self.console_run_manager.run_file(file_path)
-        self.dock_terminal.show()
-        if self._run_config().get("focus_output_on_run", True):
-            self.dock_terminal.raise_()
+        self._show_terminal_dock()
         self.ide.statusBar().showMessage(f"Running {os.path.basename(file_path)}", 1500)
 
     def has_python_run_configs(self) -> bool:
@@ -285,6 +290,16 @@ class ExecutionController:
             return names[0]
         return ""
 
+    def active_python_debug_config_name(self, *, fallback_to_first: bool = False) -> str:
+        raw = self.settings_manager.get("debugger.active_python_config", scope_preference="project", default="")
+        active = str(raw or "").strip()
+        names = self.python_run_config_names()
+        if active and active.lower() in {name.lower() for name in names}:
+            return active
+        if fallback_to_first and names:
+            return names[0]
+        return ""
+
     def set_active_python_run_config(self, config_name: str) -> bool:
         name = str(config_name or "").strip()
         if name:
@@ -301,6 +316,24 @@ class ExecutionController:
             self.ide.statusBar().showMessage(f"Active Python run config: {name}", 2200)
         else:
             self.ide.statusBar().showMessage("Python run target: current file", 2200)
+        return True
+
+    def set_active_python_debug_config(self, config_name: str) -> bool:
+        name = str(config_name or "").strip()
+        if name:
+            names = {item.lower() for item in self.python_run_config_names()}
+            if name.lower() not in names:
+                return False
+        self.settings_manager.set("debugger.active_python_config", name, "project")
+        try:
+            self.settings_manager.save_all(scopes={"project"}, only_dirty=True)
+        except Exception:
+            return False
+        self.ide._refresh_runtime_settings_from_manager()
+        if name:
+            self.ide.statusBar().showMessage(f"Active Python debug config: {name}", 2200)
+        else:
+            self.ide.statusBar().showMessage("Python debug target: current file", 2200)
         return True
 
     @staticmethod
@@ -349,7 +382,123 @@ class ExecutionController:
         )
         return "\n".join(lines)
 
+    def _build_python_module_run_command(
+        self,
+        *,
+        run_in: str,
+        interpreter: str,
+        module_name: str,
+        args_text: str,
+        env_assignments: list[tuple[str, str]],
+    ) -> str:
+        q = shlex.quote
+        lines = [f"cd {q(run_in)}", "clear"]
+        for key, value in env_assignments:
+            lines.append(f"export {key}={q(str(value or ''))}")
+        activate_script = self._resolve_activate_script_for_interpreter(interpreter)
+        args_suffix = self._quoted_args(args_text)
+        if activate_script:
+            lines.append(f"source {q(activate_script)}")
+            cmd = f"python -m {q(module_name)}"
+        else:
+            runner = str(interpreter or "python").strip() or "python"
+            cmd = f"{q(runner)} -m {q(module_name)}"
+        if args_suffix:
+            cmd += f" {args_suffix}"
+        lines.extend(
+            [
+                cmd,
+                "status=$?",
+                "printf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"",
+            ]
+        )
+        return "\n".join(lines)
+
     def run_named_python_config(self, config_name: str, *, set_active: bool = False) -> bool:
+        name = str(config_name or "").strip()
+        if not name:
+            return False
+        chosen = None
+        for cfg in self._normalized_python_run_configs():
+            if str(cfg.get("name") or "").strip().lower() == name.lower():
+                chosen = cfg
+                break
+        if not isinstance(chosen, dict):
+            self.ide.statusBar().showMessage(f"Run config not found: {name}", 2200)
+            return False
+
+        run_in_spec = str(chosen.get("working_dir") or "").strip()
+        if run_in_spec:
+            run_in = (
+                self._canonical_path(run_in_spec)
+                if os.path.isabs(run_in_spec)
+                else self._canonical_path(os.path.join(self.project_root, run_in_spec))
+            )
+        else:
+            run_in = self.project_root
+        if not os.path.isdir(run_in):
+            run_in = self.project_root
+
+        launch_kind = str(chosen.get("launch_kind") or "script").strip().lower()
+        env_assignments = self._normalize_env_assignments(chosen.get("env"))
+        arguments = self._split_args(str(chosen.get("args") or ""))
+        if arguments is None:
+            self.ide.statusBar().showMessage(f"Run config '{name}' has invalid shell-style arguments.", 2800)
+            return False
+
+        if not self._save_all_dirty_editors_for_run():
+            return False
+
+        ok = False
+        if launch_kind == "module":
+            module_name = str(chosen.get("module_name") or "").strip()
+            if not module_name:
+                self.ide.statusBar().showMessage(f"Run config '{name}' has no module name.", 2600)
+                return False
+            interpreter = str(chosen.get("interpreter") or "").strip() or self.resolve_interpreter(run_in or self.project_root)
+            ok = self._run_python_module_in_terminal(
+                module_name=module_name,
+                interpreter=interpreter,
+                working_directory=run_in,
+                arguments=arguments,
+                environment=dict(env_assignments),
+                session_label=name,
+                session_key=f"module::{module_name}::pyrun::{name}" if name else f"module::{module_name}",
+            )
+        else:
+            script_spec = str(chosen.get("script_path") or "").strip()
+            if not script_spec:
+                self.ide.statusBar().showMessage(f"Run config '{name}' has no script path.", 2600)
+                return False
+            if os.path.isabs(script_spec):
+                script_path = self._canonical_path(script_spec)
+            else:
+                script_path = self._canonical_path(os.path.join(self.project_root, script_spec))
+            if not os.path.isfile(script_path):
+                self.ide.statusBar().showMessage(f"Run config '{name}' script not found: {script_path}", 3200)
+                return False
+            if not run_in_spec:
+                run_in = self.resolve_run_in(script_path)
+                if not os.path.isdir(run_in):
+                    run_in = os.path.dirname(script_path) or self.project_root
+            interpreter = str(chosen.get("interpreter") or "").strip() or self.resolve_interpreter(script_path)
+            ok = self._run_python_script_in_terminal(
+                script_path=script_path,
+                interpreter=interpreter,
+                working_directory=run_in,
+                arguments=arguments,
+                environment=dict(env_assignments),
+                session_label=name,
+                session_key=f"{script_path}::pyrun::script::{name}" if name else script_path,
+            )
+        if not ok:
+            return False
+        if set_active:
+            self.set_active_python_run_config(name)
+        self.ide.statusBar().showMessage(f"Running config '{name}'", 2200)
+        return True
+
+    def debug_named_python_config(self, config_name: str, *, set_active: bool = False) -> bool:
         name = str(config_name or "").strip()
         if not name:
             return False
@@ -430,7 +579,7 @@ class ExecutionController:
         if not ok:
             return False
         if set_active:
-            self.set_active_python_run_config(name)
+            self.set_active_python_debug_config(name)
         self.ide.statusBar().showMessage(f"Debugging config '{name}'", 2200)
         return True
 
@@ -1070,6 +1219,9 @@ class ExecutionController:
             return f"Forceful stop requested for {label}. Click Stop again to kill it."
         return f"Kill signal sent to {label}."
 
+    def debug_current_file(self) -> bool:
+        return bool(self._start_debugger_for_current_file())
+
     def _start_debugger_for_current_file(self) -> bool:
         debugger = self._debugger_widget()
         if debugger is None:
@@ -1085,6 +1237,83 @@ class ExecutionController:
             )
             self._update_toolbar_run_controls()
         return ok
+
+    def _show_terminal_dock(self) -> None:
+        if self.dock_terminal is None:
+            return
+        self.dock_terminal.show()
+        if self._run_config().get("focus_output_on_run", True):
+            self.dock_terminal.raise_()
+
+    def _run_python_script_in_terminal(
+        self,
+        *,
+        script_path: str,
+        interpreter: str,
+        working_directory: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        session_label: str,
+        session_key: str,
+    ) -> bool:
+        if not self.console_run_manager:
+            return False
+        run_in = str(working_directory or os.path.dirname(script_path) or self.project_root).strip()
+        if not os.path.isdir(run_in):
+            run_in = os.path.dirname(script_path) or self.project_root
+        command_block = self._build_python_run_command(
+            run_in=run_in,
+            interpreter=str(interpreter or self.resolve_interpreter(script_path) or "").strip(),
+            script_path=script_path,
+            args_text=" ".join(shlex.quote(str(arg)) for arg in arguments),
+            env_assignments=self._normalize_env_assignments(environment),
+        )
+        key = str(session_key or script_path).strip() or script_path
+        label = str(session_label or os.path.basename(script_path) or script_path).strip()
+        self.console_run_manager.run_custom_command(
+            file_key=key,
+            label=label,
+            run_in=run_in,
+            command_block=command_block,
+        )
+        self._show_terminal_dock()
+        self._update_toolbar_run_controls()
+        return True
+
+    def _run_python_module_in_terminal(
+        self,
+        *,
+        module_name: str,
+        interpreter: str,
+        working_directory: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        session_label: str,
+        session_key: str,
+    ) -> bool:
+        if not self.console_run_manager:
+            return False
+        run_in = str(working_directory or self.project_root).strip() or self.project_root
+        if not os.path.isdir(run_in):
+            run_in = self.project_root
+        command_block = self._build_python_module_run_command(
+            run_in=run_in,
+            interpreter=str(interpreter or self.resolve_interpreter(run_in) or "").strip(),
+            module_name=module_name,
+            args_text=" ".join(shlex.quote(str(arg)) for arg in arguments),
+            env_assignments=self._normalize_env_assignments(environment),
+        )
+        key = str(session_key or f"module::{module_name}").strip() or f"module::{module_name}"
+        label = str(session_label or module_name or "Python module").strip()
+        self.console_run_manager.run_custom_command(
+            file_key=key,
+            label=label,
+            run_in=run_in,
+            command_block=command_block,
+        )
+        self._show_terminal_dock()
+        self._update_toolbar_run_controls()
+        return True
 
     def _start_debugger_for_script(
         self,
