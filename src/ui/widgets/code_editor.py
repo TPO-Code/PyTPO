@@ -16,6 +16,7 @@ from TPOPyside.widgets.code_editor import (
     _extract_compact_signature,
     _normalize_signature_text,
 )
+from src.ui.debugger_support import debugger_breakpoints_supported_for_editor
 from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit
 
 
@@ -39,6 +40,8 @@ class CodeEditor(BaseCodeEditor):
 
     def lineNumberAreaPaintEvent(self, event):
         super().lineNumberAreaPaintEvent(event)
+        if not self.debugger_breakpoints_supported():
+            return
         if not self._debugger_breakpoints and self._debugger_execution_line <= 0:
             return
 
@@ -107,7 +110,7 @@ class CodeEditor(BaseCodeEditor):
     def lineNumberAreaMousePressEvent(self, event):
         point = event.position().toPoint() if hasattr(event, "position") else event.pos()
         fold_gutter = int(self._fold_gutter_width) if self._fold_provider is not None else 0
-        if point.x() > fold_gutter:
+        if self.debugger_breakpoints_supported() and point.x() > fold_gutter:
             block_number = self._block_number_at_y(int(point.y()))
             if block_number >= 0:
                 line_number = block_number + 1
@@ -141,6 +144,9 @@ class CodeEditor(BaseCodeEditor):
     def debugger_breakpoints(self) -> set[int]:
         return set(self._debugger_breakpoints)
 
+    def debugger_breakpoints_supported(self) -> bool:
+        return debugger_breakpoints_supported_for_editor(self)
+
     def debugger_breakpoint_specs(self) -> list[dict]:
         return [
             {
@@ -156,6 +162,8 @@ class CodeEditor(BaseCodeEditor):
         self.set_debugger_breakpoint_specs([{"line": int(line)} for line in lines if int(line) > 0])
 
     def set_debugger_breakpoint_specs(self, specs: list[dict]) -> None:
+        if not self.debugger_breakpoints_supported():
+            specs = []
         normalized: dict[int, dict] = {}
         for raw in specs:
             if not isinstance(raw, dict):
@@ -178,6 +186,8 @@ class CodeEditor(BaseCodeEditor):
         self.debuggerBreakpointsChanged.emit()
 
     def toggle_debugger_breakpoint(self, line_number: int) -> bool:
+        if not self.debugger_breakpoints_supported():
+            return False
         line = int(line_number)
         if line <= 0:
             return False
@@ -203,6 +213,8 @@ class CodeEditor(BaseCodeEditor):
         hit_count: int | None = None,
         log_message: str | None = None,
     ) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
         line = int(line_number)
         if line <= 0:
             return
@@ -215,6 +227,8 @@ class CodeEditor(BaseCodeEditor):
         self.debuggerBreakpointsChanged.emit()
 
     def clear_debugger_breakpoint_options(self, line_number: int) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
         line = int(line_number)
         if line <= 0 or line not in self._debugger_breakpoints:
             return
@@ -227,6 +241,8 @@ class CodeEditor(BaseCodeEditor):
         self.debuggerBreakpointsChanged.emit()
 
     def _show_debugger_breakpoint_menu(self, line_number: int, global_pos) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
         menu = QMenu(self)
         has_breakpoint = line_number in self._debugger_breakpoints
         if has_breakpoint:
@@ -253,6 +269,8 @@ class CodeEditor(BaseCodeEditor):
             self.debuggerBreakpointsChanged.emit()
 
     def _edit_debugger_breakpoint(self, line_number: int) -> None:
+        if not self.debugger_breakpoints_supported():
+            return
         line = int(line_number)
         if line <= 0:
             return

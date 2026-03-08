@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from src.ui.widgets.code_editor import CodeEditor
+from src.ui.debugger_support import debugger_breakpoints_supported_for_editor, debugger_breakpoints_supported_for_path
 
 
 class DebuggerBreakpointStore(QObject):
@@ -18,8 +19,10 @@ class DebuggerBreakpointStore(QObject):
             return
 
         file_path = self._editor_path(editor)
-        if file_path:
+        if file_path and debugger_breakpoints_supported_for_editor(editor):
             editor.set_debugger_breakpoint_specs(self.breakpoint_specs_for_path(file_path))
+        else:
+            editor.set_debugger_breakpoint_specs([])
 
         key = id(editor)
         if key in self._bound_handlers:
@@ -27,7 +30,7 @@ class DebuggerBreakpointStore(QObject):
 
         def _handle_change(*_args, target=editor) -> None:
             target_path = self._editor_path(target)
-            if not target_path:
+            if not target_path or not debugger_breakpoints_supported_for_editor(target):
                 return
             self.set_breakpoint_specs_for_path(target_path, target.debugger_breakpoint_specs())
 
@@ -39,6 +42,8 @@ class DebuggerBreakpointStore(QObject):
         return self._breakpoints_map()
 
     def breakpoint_specs_for_path(self, file_path: str) -> list[dict]:
+        if not debugger_breakpoints_supported_for_path(file_path):
+            return []
         data = self._breakpoints_map()
         entry = data.get(self._canonical_path(file_path), [])
         return [dict(spec) for spec in entry if isinstance(spec, dict)]
@@ -59,7 +64,7 @@ class DebuggerBreakpointStore(QObject):
 
     def set_breakpoint_specs_for_path(self, file_path: str, specs: list[dict]) -> None:
         path = self._canonical_path(file_path)
-        if not path:
+        if not path or not debugger_breakpoints_supported_for_path(path):
             return
 
         normalized = self._normalize_breakpoint_specs(specs)
@@ -114,7 +119,7 @@ class DebuggerBreakpointStore(QObject):
         out: dict[str, list[dict]] = {}
         for path_obj, values in raw.items():
             path = self._canonical_path(str(path_obj or ""))
-            if not path or not isinstance(values, list):
+            if not path or not isinstance(values, list) or not debugger_breakpoints_supported_for_path(path):
                 continue
             normalized = self._normalize_breakpoint_specs(values)
             if normalized:

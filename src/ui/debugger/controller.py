@@ -12,6 +12,7 @@ from src.ui.widgets.code_editor import CodeEditor
 from .backend import DebugLaunchKind, DebugLaunchRequest, DebuggerBackend, ExecutionState
 from .editor_adapter import IdeDebugEditorAdapter
 from .session_context import DebugSessionContext
+from src.ui.debugger_support import debugger_breakpoints_supported_for_editor, debugger_breakpoints_supported_for_path
 
 
 class DebuggerController(QObject):
@@ -263,10 +264,14 @@ class DebuggerController(QObject):
             if not isinstance(editor, CodeEditor):
                 continue
             file_path = str(getattr(editor, "file_path", "") or "").strip()
-            if not file_path:
+            if not file_path or not debugger_breakpoints_supported_for_editor(editor):
                 continue
             out[self.ide._canonical_path(file_path)] = editor.debugger_breakpoint_specs()
-        return out
+        return {
+            self.ide._canonical_path(file_path): list(specs)
+            for file_path, specs in out.items()
+            if debugger_breakpoints_supported_for_path(file_path)
+        }
 
     def _open_or_find_editor_for_path(self, file_path: str) -> EditorWidget | None:
         target_path = str(file_path or "").strip()
@@ -347,8 +352,7 @@ class DebuggerController(QObject):
 
     @staticmethod
     def _is_python_file(editor: EditorWidget) -> bool:
-        file_path = str(editor.file_path or "")
-        return bool(file_path) and os.path.splitext(file_path)[1].lower() == ".py"
+        return debugger_breakpoints_supported_for_editor(editor)
 
     def _resolved_just_my_code(self, override: bool | None = None) -> bool:
         if isinstance(override, bool):
