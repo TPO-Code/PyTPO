@@ -7,6 +7,31 @@ import keyword
 import re
 from pathlib import Path
 
+COMMON_PYTHON_SYMBOL_IMPORTS: dict[str, list[tuple[str, str]]] = {
+    "Counter": [("collections", "Counter")],
+    "Path": [("pathlib", "Path")],
+    "Optional": [("typing", "Optional")],
+    "Any": [("typing", "Any")],
+    "Callable": [("typing", "Callable")],
+    "Iterable": [("typing", "Iterable")],
+    "Iterator": [("typing", "Iterator")],
+    "Sequence": [("typing", "Sequence")],
+    "datetime": [("datetime", "datetime")],
+    "date": [("datetime", "date")],
+    "time": [("datetime", "time")],
+    "timedelta": [("datetime", "timedelta")],
+    "timezone": [("datetime", "timezone")],
+    "dataclass": [("dataclasses", "dataclass")],
+    "field": [("dataclasses", "field")],
+    "Enum": [("enum", "Enum")],
+    "auto": [("enum", "auto")],
+    "cached_property": [("functools", "cached_property")],
+    "partial": [("functools", "partial")],
+    "wraps": [("functools", "wraps")],
+    "defaultdict": [("collections", "defaultdict")],
+    "deque": [("collections", "deque")],
+}
+
 
 def modules_mentioned_in_imports(source_text: str) -> set[str]:
     modules: set[str] = set()
@@ -168,3 +193,10 @@ def symbol_used_as_module(source_text: str, diag: dict | None, symbol: str) -> b
             if re.search(rf"\b{re.escape(name)}\s*\.", line_text):
                 return True
     return bool(re.search(rf"\b{re.escape(name)}\s*\.", text))
+
+
+def common_symbol_imports(symbol: str) -> list[tuple[str, str]]:
+    name = str(symbol or "").strip()
+    if not name:
+        return []
+    return list(COMMON_PYTHON_SYMBOL_IMPORTS.get(name, ()))

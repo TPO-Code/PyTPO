@@ -13,7 +13,9 @@ from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QTextC
 from PySide6.QtWidgets import QMenu
 
 from src.services.ast_query import (
+    common_symbol_imports,
     is_unused_import_diagnostic,
+    is_valid_python_identifier,
     missing_symbol_from_diagnostic,
     modules_mentioned_in_imports,
     project_file_exported_names,
@@ -51,6 +53,7 @@ class DiagnosticsController:
         self._import_symbol_probe_cache: dict[tuple[str, str], bool] = {}
         self._import_module_probe_cache: dict[str, bool] = {}
         self._qt_symbol_namespace_cache: dict[str, list[tuple[str, str]]] = {}
+        self._common_symbol_import_cache: dict[str, list[tuple[str, str]]] = {}
 
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
@@ -1271,6 +1274,17 @@ class DiagnosticsController:
         self._qt_symbol_namespace_cache[name] = list(dict.fromkeys(candidates))
         return list(self._qt_symbol_namespace_cache[name])
 
+    def _common_symbol_candidates(self, symbol: str) -> list[tuple[str, str]]:
+        name = str(symbol or "").strip()
+        if not name:
+            return []
+        cached = self._common_symbol_import_cache.get(name)
+        if isinstance(cached, list):
+            return list(cached)
+        candidates = list(dict.fromkeys(common_symbol_imports(name)))
+        self._common_symbol_import_cache[name] = candidates
+        return list(candidates)
+
     def _resolve_import_candidates(
         self,
         *,
@@ -1326,8 +1340,13 @@ class DiagnosticsController:
         for module_name in self._project_local_symbol_modules(target, current_file_path=current_file_path):
             _push_candidate("from_import", module_name, target, target, source_kind="project_local")
 
+        for module_name, export_name in self._common_symbol_candidates(target):
+            _push_candidate("from_import", module_name, export_name, target, source_kind="common_symbol")
+
         if self._can_import_module(target):
             _push_candidate("import_module", target, "", target, source_kind="module_self")
+        elif prefer_module_import and is_valid_python_identifier(target):
+            _push_candidate("import_module", target, "", target, source_kind="heuristic_module")
 
         for module_name, export_name in self._qt_symbol_candidates(target):
             bind_name = target
@@ -1355,10 +1374,14 @@ class DiagnosticsController:
                 source_rank = 0
             elif source_kind == "project_local":
                 source_rank = 1
-            elif source_kind == "module_self":
+            elif source_kind == "common_symbol":
                 source_rank = 2
-            else:
+            elif source_kind == "module_self":
                 source_rank = 3
+            elif source_kind == "heuristic_module":
+                source_rank = 4
+            else:
+                source_rank = 5
 
             same_root = 1
             if preferred_root:
