@@ -67,6 +67,7 @@ Top row:
 Middle:
 
 - transcript bubbles (`You`, `Assistant`, `Thinking`, `Tools`, `Diff`, `Meta`, `System`)
+- hidden-under-default plan panel below the transcript that appears when Codex emits a structured `update_plan`
 
 Composer:
 
@@ -165,6 +166,9 @@ Rendering details:
 - tool bubbles start collapsed by default for easier scanning
 - long diff bubbles scroll internally after they become tall
 - system/meta chatter is filtered so normal transcript flow stays focused on the actual conversation
+- the latest structured Codex plan replaces any earlier one for the active turn and clears on the next user send
+- plan panel border, background, typography, radius, internal spacing, and per-status step colors come from `components.codex_agent.panel` theme tokens
+- transcript/composer surfaces, mention popup, hint/rate labels, composer shimmer, link color, and bubble chrome also expose `components.codex_agent.*` theme tokens
 
 ## File mentions with `@`
 

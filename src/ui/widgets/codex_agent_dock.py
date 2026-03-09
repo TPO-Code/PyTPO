@@ -30,6 +30,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -55,7 +56,12 @@ from src.ui.codex_session_store import (
     session_preview_text,
 )
 from src.ui.dialogs.codex_sessions_dialog import CodexSessionsDialog
-from src.ui.theme_runtime import current_codex_agent_bubble_theme
+from src.ui.theme_runtime import (
+    current_codex_agent_bubble_theme,
+    current_codex_agent_composer_theme,
+    current_codex_agent_link_color,
+    current_codex_agent_panel_theme,
+)
 from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 from src.ui.widgets.spellcheck_inputs import SpellcheckTextEdit
 from src.ui.dialogs.file_dialog_bridge import get_open_file_names
@@ -106,6 +112,16 @@ _STREAM_RATE_LIMITS_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
+_HEX_COLOR_RE = re.compile(r"^#(?P<rgb>[0-9a-fA-F]{6})(?P<alpha>[0-9a-fA-F]{2})?$")
+_RGBA_COLOR_RE = re.compile(
+    r"^rgba?\(\s*"
+    r"(?P<red>\d{1,3})\s*,\s*"
+    r"(?P<green>\d{1,3})\s*,\s*"
+    r"(?P<blue>\d{1,3})"
+    r"(?:\s*,\s*(?P<alpha>\d{1,3}(?:\.\d+)?|\.\d+))?"
+    r"\s*\)$",
+    re.IGNORECASE,
+)
 _ROLE_LABELS = {
     "user": "You",
     "assistant": "Assistant",
@@ -115,6 +131,58 @@ _ROLE_LABELS = {
     "system": "System",
     "meta": "Meta",
 }
+
+
+def _clamp_color_channel(value: object, *, fallback: int = 0) -> int:
+    try:
+        return max(0, min(255, int(value)))
+    except Exception:
+        return max(0, min(255, int(fallback)))
+
+
+def _parse_theme_color(value: object, fallback: str | QColor) -> QColor:
+    fallback_color = QColor(fallback) if not isinstance(fallback, QColor) else QColor(fallback)
+    if not fallback_color.isValid():
+        fallback_color = QColor("#000000")
+
+    if isinstance(value, QColor):
+        color = QColor(value)
+        return color if color.isValid() else fallback_color
+
+    text = str(value or "").strip()
+    if not text:
+        return fallback_color
+
+    hex_match = _HEX_COLOR_RE.fullmatch(text)
+    if hex_match:
+        rgb = str(hex_match.group("rgb") or "")
+        alpha_hex = str(hex_match.group("alpha") or "")
+        try:
+            red = int(rgb[0:2], 16)
+            green = int(rgb[2:4], 16)
+            blue = int(rgb[4:6], 16)
+            alpha = int(alpha_hex, 16) if alpha_hex else 255
+        except Exception:
+            return fallback_color
+        return QColor(red, green, blue, alpha)
+
+    rgba_match = _RGBA_COLOR_RE.fullmatch(text)
+    if rgba_match:
+        red = _clamp_color_channel(rgba_match.group("red"))
+        green = _clamp_color_channel(rgba_match.group("green"))
+        blue = _clamp_color_channel(rgba_match.group("blue"))
+        alpha_text = str(rgba_match.group("alpha") or "").strip()
+        alpha = 255
+        if alpha_text:
+            try:
+                alpha_value = float(alpha_text)
+                alpha = round(alpha_value * 255.0) if alpha_value <= 1.0 else round(alpha_value)
+            except Exception:
+                alpha = 255
+        return QColor(red, green, blue, _clamp_color_channel(alpha, fallback=255))
+
+    color = QColor(text)
+    return color if color.isValid() else fallback_color
 
 
 def _normalize_rate_limits_display(text: object) -> str:
@@ -162,6 +230,144 @@ class _TranscriptEntry:
     role: str
     text: str
     timestamp: str | None = None
+
+
+@dataclass(slots=True)
+class _PlanStep:
+    status: str
+    step: str
+
+
+@dataclass(slots=True)
+class _PlanState:
+    explanation: str
+    steps: list[_PlanStep]
+
+
+class _CodexPlanPanel(QFrame):
+    _STATUS_MARKERS = {
+        "completed": "✓",
+        "in_progress": "→",
+        "pending": "•",
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("codexPlanPanel")
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 8, 10, 8)
+        self._layout.setSpacing(4)
+
+        self._title = QLabel("Current plan")
+        self._title.setObjectName("codexPlanTitle")
+        self._layout.addWidget(self._title)
+
+        self._summary = QLabel("")
+        self._summary.setObjectName("codexPlanSummary")
+        self._summary.setWordWrap(True)
+        self._summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._layout.addWidget(self._summary)
+
+        self._steps_host = QWidget()
+        self._steps_layout = QVBoxLayout(self._steps_host)
+        self._steps_layout.setContentsMargins(0, 0, 0, 0)
+        self._steps_layout.setSpacing(3)
+        self._layout.addWidget(self._steps_host)
+
+        self.apply_theme()
+        self.setVisible(False)
+
+    def clear_plan(self) -> None:
+        while self._steps_layout.count():
+            item = self._steps_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._summary.clear()
+        self._summary.setVisible(False)
+        self.setVisible(False)
+
+    def set_plan(self, plan: _PlanState | None) -> None:
+        self.clear_plan()
+        if plan is None:
+            return
+        summary = str(plan.explanation or "").strip()
+        self._summary.setText(summary)
+        self._summary.setVisible(bool(summary))
+        for step in plan.steps:
+            status_key = str(step.status or "").strip().casefold()
+            marker = self._STATUS_MARKERS.get(status_key, "•")
+            text = str(step.step or "").strip()
+            if not text:
+                continue
+            label = QLabel(f"{marker} {text}")
+            if status_key == "completed":
+                label.setObjectName("codexPlanStepCompleted")
+            elif status_key == "in_progress":
+                label.setObjectName("codexPlanStepInProgress")
+            else:
+                label.setObjectName("codexPlanStepPending")
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._steps_layout.addWidget(label)
+        self.setVisible(bool(summary) or bool(plan.steps))
+
+    def apply_theme(self) -> None:
+        theme = current_codex_agent_panel_theme()
+        border_color = str(theme.get("border_color") or "#3f4b5f")
+        background_color = str(theme.get("background_color") or "#232b38")
+        border_width = str(theme.get("border_width") or "1px")
+        radius = str(theme.get("radius") or "0px")
+        title_color = str(theme.get("title_color") or "#b7c6dc")
+        text_color = str(theme.get("text_color") or "#d7e0ec")
+        title_font_size = str(theme.get("title_font_size") or "11px")
+        text_font_size = str(theme.get("text_font_size") or "12px")
+        padding_x = max(0, int(str(theme.get("padding_x") or "10")))
+        padding_y = max(0, int(str(theme.get("padding_y") or "8")))
+        section_spacing = max(0, int(str(theme.get("section_spacing") or "4")))
+        step_spacing = max(0, int(str(theme.get("step_spacing") or "3")))
+        completed_color = str(theme.get("completed_color") or text_color)
+        in_progress_color = str(theme.get("in_progress_color") or text_color)
+        pending_color = str(theme.get("pending_color") or text_color)
+        self._layout.setContentsMargins(padding_x, padding_y, padding_x, padding_y)
+        self._layout.setSpacing(section_spacing)
+        self._steps_layout.setSpacing(step_spacing)
+        self.setStyleSheet(
+            f"""
+            QFrame#codexPlanPanel {{
+                border: {border_width} solid {border_color};
+                background-color: {background_color};
+                border-radius: {radius};
+            }}
+            QLabel#codexPlanTitle {{
+                color: {title_color};
+                font-size: {title_font_size};
+                font-weight: 600;
+                background-color: transparent;
+            }}
+            QLabel#codexPlanSummary {{
+                color: {text_color};
+                font-size: {text_font_size};
+                background-color: transparent;
+            }}
+            QLabel#codexPlanStepCompleted {{
+                color: {completed_color};
+                font-size: {text_font_size};
+                background-color: transparent;
+            }}
+            QLabel#codexPlanStepInProgress {{
+                color: {in_progress_color};
+                font-size: {text_font_size};
+                background-color: transparent;
+            }}
+            QLabel#codexPlanStepPending {{
+                color: {pending_color};
+                font-size: {text_font_size};
+                background-color: transparent;
+            }}
+            """
+        )
 
 
 class _CodexWorker(QObject):
@@ -333,12 +539,14 @@ class _ChatInputEdit(SpellcheckTextEdit):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("codexInputEdit")
         self.setAcceptRichText(False)
         self._link_target_provider = link_target_provider
         self._mention_provider = mention_provider
         self._is_internal_change = False
         self._last_cursor_pos = int(self.textCursor().position())
         self._mention_popup = QListWidget(self)
+        self._mention_popup.setObjectName("codexMentionPopup")
         self._mention_popup.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
         self._mention_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._mention_popup.setFocusPolicy(Qt.NoFocus)
@@ -394,11 +602,17 @@ class _ChatInputEdit(SpellcheckTextEdit):
         if parsed is None:
             return fmt
         _label, target = parsed
-        fmt.setForeground(QColor("#8ab4f8"))
+        fmt.setForeground(QColor(current_codex_agent_link_color()))
         fmt.setFontWeight(700)
         fmt.setProperty(self.LINK_RAW_PROPERTY, raw_link)
         fmt.setProperty(self.LINK_TARGET_PROPERTY, target)
         return fmt
+
+    def _apply_codex_agent_theme(self) -> None:
+        # Mention popup follows dock-specific QSS rules after theme reload.
+        self._mention_popup.style().unpolish(self._mention_popup)
+        self._mention_popup.style().polish(self._mention_popup)
+        self._mention_popup.update()
 
     def _replace_range_with_link_label(
         self,
@@ -818,6 +1032,7 @@ class _ChatInputEdit(SpellcheckTextEdit):
 class _ShimmerBorderFrame(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("codexComposerFrame")
         self._shimmer_enabled = False
         self._shimmer_progress = 0.0
         self._travel_angle_degrees = -25.0
@@ -839,6 +1054,9 @@ class _ShimmerBorderFrame(QWidget):
         self._animation.setLoopCount(-1)
         self._animation.setEasingCurve(QEasingCurve.Linear)
         self._animation.valueChanged.connect(self._on_animation_value_changed)
+        self._base_border_color = QColor("#4a4a4a")
+        self._shimmer_color = QColor(120, 180, 255, 60)
+        self._shimmer_highlight_color = QColor(180, 220, 255, 180)
 
     def set_content_widget(self, widget: QWidget) -> None:
         while self._content_layout.count():
@@ -866,6 +1084,22 @@ class _ShimmerBorderFrame(QWidget):
             self._shimmer_progress = 0.0
         self.update()
 
+    def apply_theme(self) -> None:
+        theme = current_codex_agent_composer_theme()
+        self._base_border_color = _parse_theme_color(
+            theme.get("border_color"),
+            "#4a4a4a",
+        )
+        self._shimmer_color = _parse_theme_color(
+            theme.get("shimmer_color"),
+            QColor(120, 180, 255, 60),
+        )
+        self._shimmer_highlight_color = _parse_theme_color(
+            theme.get("shimmer_highlight_color"),
+            QColor(180, 220, 255, 180),
+        )
+        self.update()
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
         painter = QPainter(self)
@@ -883,7 +1117,7 @@ class _ShimmerBorderFrame(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, self._border_radius, self._border_radius)
 
-        base_pen = QPen(QColor("#4a4a4a"))
+        base_pen = QPen(self._base_border_color)
         base_pen.setWidthF(self._border_width)
         painter.setPen(base_pen)
         painter.setBrush(Qt.NoBrush)
@@ -908,13 +1142,15 @@ class _ShimmerBorderFrame(QWidget):
         y2 = cy + dy * half_len
 
         gradient = QLinearGradient(x1, y1, x2, y2)
-        gradient.setColorAt(0.00, QColor(255, 255, 255, 0))
-        gradient.setColorAt(0.42, QColor(120, 180, 255, 0))
-        gradient.setColorAt(0.48, QColor(120, 180, 255, 60))
-        gradient.setColorAt(0.50, QColor(180, 220, 255, 180))
-        gradient.setColorAt(0.52, QColor(120, 180, 255, 60))
-        gradient.setColorAt(0.58, QColor(120, 180, 255, 0))
-        gradient.setColorAt(1.00, QColor(255, 255, 255, 0))
+        shimmer_clear = QColor(self._shimmer_color)
+        shimmer_clear.setAlpha(0)
+        gradient.setColorAt(0.00, shimmer_clear)
+        gradient.setColorAt(0.42, shimmer_clear)
+        gradient.setColorAt(0.48, self._shimmer_color)
+        gradient.setColorAt(0.50, self._shimmer_highlight_color)
+        gradient.setColorAt(0.52, self._shimmer_color)
+        gradient.setColorAt(0.58, shimmer_clear)
+        gradient.setColorAt(1.00, shimmer_clear)
 
         shimmer_pen = QPen()
         shimmer_pen.setBrush(gradient)
@@ -983,6 +1219,11 @@ class CodexAgentDockWidget(QWidget):
         self._transcript_follow_after_layout = False
         self._transcript_scroll_animated = False
         self._transcript_internal_scroll = False
+        self._current_plan: _PlanState | None = None
+        self._plan_watch_active = False
+        self._plan_log_path: Path | None = None
+        self._plan_log_position = 0
+        self._plan_start_from_beginning = False
         self._last_rate_limits_text = _RATE_LIMITS_UNAVAILABLE
         self._last_rate_limits_tooltip = "Rate limit data unavailable"
 
@@ -998,6 +1239,10 @@ class CodexAgentDockWidget(QWidget):
             self._on_transcript_scroll_animation_value_changed
         )
 
+        self._plan_poll_timer = QTimer(self)
+        self._plan_poll_timer.setInterval(700)
+        self._plan_poll_timer.timeout.connect(self._poll_plan_updates)
+
         self._build_ui()
         self._wire_signals()
         self._load_settings()
@@ -1006,6 +1251,7 @@ class CodexAgentDockWidget(QWidget):
 
     def shutdown(self) -> None:
         self._save_timer.stop()
+        self._plan_poll_timer.stop()
         self._runner.stop()
         self._reset_attachments_for_new_chat()
 
@@ -1040,22 +1286,34 @@ class CodexAgentDockWidget(QWidget):
         self.chat_splitter = QSplitter(Qt.Vertical)
         self.chat_splitter.setChildrenCollapsible(False)
         self.chat_splitter.setHandleWidth(7)
-        
+
+        transcript_panel = QWidget()
+        transcript_panel.setObjectName("codexTranscriptPanel")
+        transcript_panel_layout = QVBoxLayout(transcript_panel)
+        transcript_panel_layout.setContentsMargins(0, 0, 0, 0)
+        transcript_panel_layout.setSpacing(6)
+
         self.transcript_scroll = QScrollArea()
         self.transcript_scroll.setObjectName("codexTranscript")
         self.transcript_scroll.setWidgetResizable(True)
         self.transcript_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.transcript_scroll.verticalScrollBar().setSingleStep(18)
-        
+
         self._transcript_container = QWidget()
+        self._transcript_container.setObjectName("codexTranscriptContent")
         self._transcript_layout = QVBoxLayout(self._transcript_container)
         self._transcript_layout.setContentsMargins(8, 8, 8, 8)
         self._transcript_layout.setSpacing(2)
         self._transcript_layout.addStretch(1)
         self.transcript_scroll.setWidget(self._transcript_container)
-        self.chat_splitter.addWidget(self.transcript_scroll)
+        transcript_panel_layout.addWidget(self.transcript_scroll, 1)
+
+        self.plan_panel = _CodexPlanPanel(transcript_panel)
+        transcript_panel_layout.addWidget(self.plan_panel)
+        self.chat_splitter.addWidget(transcript_panel)
 
         composer_container = QWidget()
+        composer_container.setObjectName("codexComposerPanel")
         composer_layout = QVBoxLayout(composer_container)
         composer_layout.setContentsMargins(0, 0, 0, 0)
         composer_layout.setSpacing(6)
@@ -1070,9 +1328,11 @@ class CodexAgentDockWidget(QWidget):
         self.input_edit.setMinimumHeight(92)
         self.input_edit.setMaximumBlockCount(1200)
         self.input_frame.set_content_widget(self.input_edit)
+        self.input_frame.apply_theme()
         composer_layout.addWidget(self.input_frame)
 
         self.attachments_container = QWidget()
+        self.attachments_container.setObjectName("codexAttachmentsRow")
         attachments_layout = QHBoxLayout(self.attachments_container)
         attachments_layout.setContentsMargins(0, 0, 0, 0)
         attachments_layout.setSpacing(8)
@@ -1088,6 +1348,7 @@ class CodexAgentDockWidget(QWidget):
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
         self.input_hint_label = QLabel("Enter: new line  |  Ctrl+Enter: send")
+        self.input_hint_label.setObjectName("codexInputHint")
         self.input_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.rate_limits_label = QLabel(_RATE_LIMITS_UNAVAILABLE)
         self.rate_limits_label.setObjectName("CodexRateLimits")
@@ -1114,11 +1375,13 @@ class CodexAgentDockWidget(QWidget):
         composer_layout.addLayout(input_row)
 
         self.agent_options_container = QWidget()
+        self.agent_options_container.setObjectName("codexAgentOptionsPanel")
         agent_options_layout = QVBoxLayout(self.agent_options_container)
         agent_options_layout.setContentsMargins(0, 0, 0, 0)
         agent_options_layout.setSpacing(6)
 
         self.preamble_container = QWidget()
+        self.preamble_container.setObjectName("codexPreamblePanel")
         preamble_layout = QVBoxLayout(self.preamble_container)
         preamble_layout.setContentsMargins(0, 0, 0, 0)
         preamble_layout.setSpacing(4)
@@ -1132,6 +1395,7 @@ class CodexAgentDockWidget(QWidget):
         agent_options_layout.addWidget(self.preamble_container)
 
         self.options_container = QWidget()
+        self.options_container.setObjectName("codexOptionsPanel")
         options_grid = QGridLayout(self.options_container)
         options_grid.setContentsMargins(0, 0, 0, 0)
         options_grid.setHorizontalSpacing(8)
@@ -1227,6 +1491,148 @@ class CodexAgentDockWidget(QWidget):
                 widget.deleteLater()
         self._transcript_bubbles.clear()
 
+    def _set_current_plan(self, plan: _PlanState | None) -> None:
+        self._current_plan = plan
+        self.plan_panel.set_plan(plan)
+
+    def _clear_current_plan(self) -> None:
+        self._set_current_plan(None)
+
+    def _session_log_path(self, session_id: str) -> Path | None:
+        normalized_id = str(session_id or "").strip()
+        if not normalized_id:
+            return None
+        sessions_dir = Path.home() / ".codex" / "sessions"
+        if not sessions_dir.is_dir():
+            return None
+        candidates = list(sessions_dir.rglob(f"*{normalized_id}.jsonl"))
+        if not candidates:
+            return None
+        try:
+            return max(candidates, key=lambda path: path.stat().st_mtime)
+        except Exception:
+            return candidates[-1]
+
+    @staticmethod
+    def _extract_plan_state_from_event(data: dict[str, Any]) -> _PlanState | None:
+        if str(data.get("type") or "").strip() != "response_item":
+            return None
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        if str(payload.get("type") or "").strip() != "function_call":
+            return None
+        if str(payload.get("name") or "").strip() != "update_plan":
+            return None
+        raw_arguments = str(payload.get("arguments") or "").strip()
+        if not raw_arguments:
+            return None
+        try:
+            parsed = json.loads(raw_arguments)
+        except Exception:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        explanation = str(parsed.get("explanation") or "").strip()
+        raw_steps = parsed.get("plan")
+        steps: list[_PlanStep] = []
+        if isinstance(raw_steps, list):
+            for item in raw_steps:
+                if not isinstance(item, dict):
+                    continue
+                step_text = str(item.get("step") or "").strip()
+                if not step_text:
+                    continue
+                steps.append(
+                    _PlanStep(
+                        status=str(item.get("status") or "").strip().casefold(),
+                        step=step_text,
+                    )
+                )
+        if not explanation and not steps:
+            return None
+        return _PlanState(explanation=explanation, steps=steps)
+
+    def _reset_plan_tracking(self, *, clear_panel: bool) -> None:
+        self._plan_poll_timer.stop()
+        self._plan_watch_active = False
+        self._plan_log_path = None
+        self._plan_log_position = 0
+        self._plan_start_from_beginning = False
+        if clear_panel:
+            self._clear_current_plan()
+
+    def _begin_plan_tracking_for_turn(self) -> None:
+        self._clear_current_plan()
+        self._plan_watch_active = True
+        self._plan_log_path = None
+        self._plan_log_position = 0
+        self._plan_start_from_beginning = not bool(str(self._session_id or "").strip())
+        session_id = str(self._session_id or "").strip()
+        if session_id:
+            log_path = self._session_log_path(session_id)
+            self._plan_log_path = log_path
+            if log_path is not None:
+                try:
+                    self._plan_log_position = log_path.stat().st_size
+                except Exception:
+                    self._plan_log_position = 0
+        self._plan_poll_timer.start()
+
+    def _ensure_plan_log_ready(self) -> bool:
+        if not self._plan_watch_active:
+            return False
+        session_id = str(self._session_id or "").strip()
+        if not session_id:
+            return False
+        if self._plan_log_path is None:
+            self._plan_log_path = self._session_log_path(session_id)
+            if self._plan_log_path is None:
+                return False
+            if self._plan_start_from_beginning:
+                self._plan_log_position = 0
+            else:
+                try:
+                    self._plan_log_position = self._plan_log_path.stat().st_size
+                except Exception:
+                    self._plan_log_position = 0
+            self._plan_start_from_beginning = False
+        return True
+
+    def _poll_plan_updates(self) -> None:
+        if not self._ensure_plan_log_ready():
+            return
+        log_path = self._plan_log_path
+        if log_path is None:
+            return
+        try:
+            file_size = log_path.stat().st_size
+        except Exception:
+            return
+        if self._plan_log_position > file_size:
+            self._plan_log_position = 0
+        latest_plan: _PlanState | None = None
+        try:
+            with log_path.open("r", encoding="utf-8") as handle:
+                if self._plan_log_position > 0:
+                    handle.seek(self._plan_log_position)
+                for raw_line in handle:
+                    line = str(raw_line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    candidate = self._extract_plan_state_from_event(data)
+                    if candidate is not None:
+                        latest_plan = candidate
+                self._plan_log_position = handle.tell()
+        except Exception:
+            return
+        if latest_plan is not None:
+            self._set_current_plan(latest_plan)
+
     def _schedule_transcript_render(
         self,
         *,
@@ -1318,6 +1724,9 @@ class CodexAgentDockWidget(QWidget):
         border_color = str(theme["border_color"] or "#2f3746")
         background_color = str(theme["background_color"] or "#1a1f2a")
         text_color = str(theme["text_color"] or "#e6edf3")
+        header_color = str(theme.get("header_color") or "#8d9cb4")
+        toggle_color = str(theme.get("toggle_color") or "#9db1cb")
+        preview_color = str(theme.get("preview_color") or "#c8d2e2")
         return f"""
             QFrame#codexBubble {{
                 border: {border_width} solid {border_color};
@@ -1325,12 +1734,12 @@ class CodexAgentDockWidget(QWidget):
                 border-radius: 0px;
             }}
             QLabel#codexBubbleHeader {{
-                color: #8d9cb4;
+                color: {header_color};
                 font-size: 10px;
                 font-weight: 500;
             }}
             QPushButton#codexBubbleToggle {{
-                color: #9db1cb;
+                color: {toggle_color};
                 border: none;
                 background: transparent;
                 font-size: 10px;
@@ -1338,7 +1747,7 @@ class CodexAgentDockWidget(QWidget):
                 padding: 0px 4px;
             }}
             QLabel#codexBubblePreview {{
-                color: #c8d2e2;
+                color: {preview_color};
                 font-size: 12px;
             }}
             QTextEdit#codexBubbleBody {{
@@ -1360,6 +1769,9 @@ class CodexAgentDockWidget(QWidget):
     def _apply_codex_agent_theme(self) -> None:
         for bubble in self._transcript_bubbles:
             self._apply_bubble_theme(bubble)
+        self.plan_panel.apply_theme()
+        self.input_frame.apply_theme()
+        self.input_edit._apply_codex_agent_theme()
 
     def _new_transcript_bubble(self, entry: _TranscriptEntry) -> ChatMarkdownBubble:
         role = str(entry.role or "").strip()
@@ -2088,6 +2500,7 @@ class CodexAgentDockWidget(QWidget):
         self._latest_assistant_bubble_text = ""
         self._forced_bubble_role_boundary = None
         self._reset_bubble_debug_log()
+        self._reset_plan_tracking(clear_panel=True)
         self._clear_transcript()
         for role, text, stamp in bubbles:
             self._add_bubble(role, text, timestamp=stamp or _timestamp())
@@ -2959,6 +3372,7 @@ class CodexAgentDockWidget(QWidget):
         self._turn_changed_files.clear()
         self._turn_changed_file_set.clear()
         self._reset_bubble_debug_log()
+        self._reset_plan_tracking(clear_panel=True)
         self._clear_transcript()
         self._refresh_recent_sessions_picker(select_session_id=None)
         self._refresh_session_ui()
@@ -2996,6 +3410,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_options_signature = None
             self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
+            self._reset_plan_tracking(clear_panel=True)
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
@@ -3019,6 +3434,7 @@ class CodexAgentDockWidget(QWidget):
             self._session_options_signature = None
             self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
+            self._reset_plan_tracking(clear_panel=True)
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
@@ -3084,6 +3500,7 @@ class CodexAgentDockWidget(QWidget):
         )
         self._begin_prompt_echo_suppression(prompt)
         self.input_edit.clear()
+        self._begin_plan_tracking_for_turn()
         self._runner.start(invocation)
         self._clear_selected_attachments_after_send()
         self._schedule_persist_settings()
@@ -3234,6 +3651,11 @@ class CodexAgentDockWidget(QWidget):
                     f"Attached session {session_id[:8]}...",
                     timestamp=_timestamp(),
                 )
+                if self._plan_watch_active:
+                    self._plan_log_path = None
+                    self._plan_log_position = 0
+                    self._plan_start_from_beginning = True
+                    self._poll_plan_updates()
                 self._schedule_persist_settings()
 
         self._stream_partial += str(text or "")
@@ -3390,6 +3812,8 @@ class CodexAgentDockWidget(QWidget):
             self._handle_stream_line(self._stream_partial.rstrip("\r"))
         self._stream_partial = ""
         self._flush_pending_diff_bubble()
+        self._poll_plan_updates()
+        self._plan_poll_timer.stop()
         self._stream_mode = "assistant"
         self._suppress_post_tokens_echo = False
         self._post_tokens_replay_expected_lines = []

@@ -15,7 +15,29 @@ from src.services.theme_compiler import (
 )
 from src.ui.theme_runtime import (
     DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH,
+    DEFAULT_CODEX_AGENT_BUBBLE_HEADER_COLOR,
+    DEFAULT_CODEX_AGENT_BUBBLE_PREVIEW_COLOR,
     DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR,
+    DEFAULT_CODEX_AGENT_BUBBLE_TOGGLE_COLOR,
+    DEFAULT_CODEX_AGENT_COMPOSER_BORDER_COLOR,
+    DEFAULT_CODEX_AGENT_COMPOSER_SHIMMER_COLOR,
+    DEFAULT_CODEX_AGENT_COMPOSER_SHIMMER_HIGHLIGHT_COLOR,
+    DEFAULT_CODEX_AGENT_LINK_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_BACKGROUND_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_BORDER_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_BORDER_WIDTH,
+    DEFAULT_CODEX_AGENT_PANEL_PADDING_X,
+    DEFAULT_CODEX_AGENT_PANEL_PADDING_Y,
+    DEFAULT_CODEX_AGENT_PANEL_RADIUS,
+    DEFAULT_CODEX_AGENT_PANEL_SECTION_SPACING,
+    DEFAULT_CODEX_AGENT_PANEL_STEP_SPACING,
+    DEFAULT_CODEX_AGENT_PANEL_COMPLETED_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_IN_PROGRESS_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_PENDING_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_TEXT_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_TEXT_FONT_SIZE,
+    DEFAULT_CODEX_AGENT_PANEL_TITLE_COLOR,
+    DEFAULT_CODEX_AGENT_PANEL_TITLE_FONT_SIZE,
     DEFAULT_EDITOR_OVERVIEW_GAP,
     DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN,
     DEFAULT_SETTINGS_COLOR_SWATCH_HEIGHT,
@@ -26,6 +48,9 @@ from src.ui.theme_runtime import (
     refresh_editor_viewport_widgets,
     refresh_settings_color_swatch_widgets,
     set_codex_agent_bubble_theme,
+    set_codex_agent_composer_theme,
+    set_codex_agent_link_color,
+    set_codex_agent_panel_theme,
     set_editor_viewport_spacing,
     set_settings_color_swatch_size,
 )
@@ -162,9 +187,12 @@ class ThemeController:
         return search_top_margin, overview_gap
 
     @staticmethod
-    def _codex_agent_bubble_theme(tokens: dict[str, Any] | None) -> tuple[str, str, dict[str, dict[str, str]]]:
+    def _codex_agent_bubble_theme(tokens: dict[str, Any] | None) -> tuple[str, str, str, str, str, dict[str, dict[str, str]]]:
         text_color = DEFAULT_CODEX_AGENT_BUBBLE_TEXT_COLOR
         border_width = DEFAULT_CODEX_AGENT_BUBBLE_BORDER_WIDTH
+        header_color = DEFAULT_CODEX_AGENT_BUBBLE_HEADER_COLOR
+        toggle_color = DEFAULT_CODEX_AGENT_BUBBLE_TOGGLE_COLOR
+        preview_color = DEFAULT_CODEX_AGENT_BUBBLE_PREVIEW_COLOR
         role_colors: dict[str, dict[str, str]] = {}
         if isinstance(tokens, dict):
             text_color = str(
@@ -173,6 +201,15 @@ class ThemeController:
             border_width = str(
                 tokens.get("components.codex_agent.bubble.border_width") or border_width
             ).strip() or border_width
+            header_color = str(
+                tokens.get("components.codex_agent.bubble.header_color") or header_color
+            ).strip() or header_color
+            toggle_color = str(
+                tokens.get("components.codex_agent.bubble.toggle_color") or toggle_color
+            ).strip() or toggle_color
+            preview_color = str(
+                tokens.get("components.codex_agent.bubble.preview_color") or preview_color
+            ).strip() or preview_color
             for role_name in ("default", "user", "assistant", "thinking", "tools", "diff", "system", "meta"):
                 role_colors[role_name] = {
                     "border_color": str(
@@ -182,7 +219,121 @@ class ThemeController:
                         tokens.get(f"components.codex_agent.roles.{role_name}.background_color") or ""
                     ).strip(),
                 }
-        return text_color, border_width, role_colors
+        return text_color, border_width, header_color, toggle_color, preview_color, role_colors
+
+    @staticmethod
+    def _codex_agent_composer_theme(tokens: dict[str, Any] | None) -> tuple[str, str, str]:
+        border_color = DEFAULT_CODEX_AGENT_COMPOSER_BORDER_COLOR
+        shimmer_color = DEFAULT_CODEX_AGENT_COMPOSER_SHIMMER_COLOR
+        shimmer_highlight_color = DEFAULT_CODEX_AGENT_COMPOSER_SHIMMER_HIGHLIGHT_COLOR
+        if isinstance(tokens, dict):
+            border_color = str(
+                tokens.get("components.codex_agent.composer.border_color") or border_color
+            ).strip() or border_color
+            shimmer_color = str(
+                tokens.get("components.codex_agent.composer.shimmer_color") or shimmer_color
+            ).strip() or shimmer_color
+            shimmer_highlight_color = str(
+                tokens.get("components.codex_agent.composer.shimmer_highlight_color")
+                or shimmer_highlight_color
+            ).strip() or shimmer_highlight_color
+        return border_color, shimmer_color, shimmer_highlight_color
+
+    @staticmethod
+    def _codex_agent_link_color(tokens: dict[str, Any] | None) -> str:
+        color = DEFAULT_CODEX_AGENT_LINK_COLOR
+        if isinstance(tokens, dict):
+            color = str(tokens.get("components.codex_agent.link.color") or color).strip() or color
+        return color
+
+    @staticmethod
+    def _codex_agent_panel_theme(tokens: dict[str, Any] | None) -> dict[str, Any]:
+        border_color = DEFAULT_CODEX_AGENT_PANEL_BORDER_COLOR
+        background_color = DEFAULT_CODEX_AGENT_PANEL_BACKGROUND_COLOR
+        border_width = DEFAULT_CODEX_AGENT_PANEL_BORDER_WIDTH
+        radius = DEFAULT_CODEX_AGENT_PANEL_RADIUS
+        title_color = DEFAULT_CODEX_AGENT_PANEL_TITLE_COLOR
+        text_color = DEFAULT_CODEX_AGENT_PANEL_TEXT_COLOR
+        title_font_size = DEFAULT_CODEX_AGENT_PANEL_TITLE_FONT_SIZE
+        text_font_size = DEFAULT_CODEX_AGENT_PANEL_TEXT_FONT_SIZE
+        padding_x = DEFAULT_CODEX_AGENT_PANEL_PADDING_X
+        padding_y = DEFAULT_CODEX_AGENT_PANEL_PADDING_Y
+        section_spacing = DEFAULT_CODEX_AGENT_PANEL_SECTION_SPACING
+        step_spacing = DEFAULT_CODEX_AGENT_PANEL_STEP_SPACING
+        completed_color = DEFAULT_CODEX_AGENT_PANEL_COMPLETED_COLOR
+        in_progress_color = DEFAULT_CODEX_AGENT_PANEL_IN_PROGRESS_COLOR
+        pending_color = DEFAULT_CODEX_AGENT_PANEL_PENDING_COLOR
+        if isinstance(tokens, dict):
+            border_color = str(
+                tokens.get("components.codex_agent.panel.border_color") or border_color
+            ).strip() or border_color
+            background_color = str(
+                tokens.get("components.codex_agent.panel.background_color") or background_color
+            ).strip() or background_color
+            border_width = str(
+                tokens.get("components.codex_agent.panel.border_width") or border_width
+            ).strip() or border_width
+            radius = str(
+                tokens.get("components.codex_agent.panel.radius") or radius
+            ).strip() or radius
+            title_color = str(
+                tokens.get("components.codex_agent.panel.title_color") or title_color
+            ).strip() or title_color
+            text_color = str(
+                tokens.get("components.codex_agent.panel.text_color") or text_color
+            ).strip() or text_color
+            title_font_size = str(
+                tokens.get("components.codex_agent.panel.title_font_size") or title_font_size
+            ).strip() or title_font_size
+            text_font_size = str(
+                tokens.get("components.codex_agent.panel.text_font_size") or text_font_size
+            ).strip() or text_font_size
+            padding_x = coerce_metric_px_min(
+                tokens.get("components.codex_agent.panel.padding_x"),
+                default=padding_x,
+                minimum=0,
+            )
+            padding_y = coerce_metric_px_min(
+                tokens.get("components.codex_agent.panel.padding_y"),
+                default=padding_y,
+                minimum=0,
+            )
+            section_spacing = coerce_metric_px_min(
+                tokens.get("components.codex_agent.panel.section_spacing"),
+                default=section_spacing,
+                minimum=0,
+            )
+            step_spacing = coerce_metric_px_min(
+                tokens.get("components.codex_agent.panel.step_spacing"),
+                default=step_spacing,
+                minimum=0,
+            )
+            completed_color = str(
+                tokens.get("components.codex_agent.panel.completed_color") or completed_color
+            ).strip() or completed_color
+            in_progress_color = str(
+                tokens.get("components.codex_agent.panel.in_progress_color") or in_progress_color
+            ).strip() or in_progress_color
+            pending_color = str(
+                tokens.get("components.codex_agent.panel.pending_color") or pending_color
+            ).strip() or pending_color
+        return {
+            "border_color": border_color,
+            "background_color": background_color,
+            "border_width": border_width,
+            "radius": radius,
+            "title_color": title_color,
+            "text_color": text_color,
+            "title_font_size": title_font_size,
+            "text_font_size": text_font_size,
+            "padding_x": padding_x,
+            "padding_y": padding_y,
+            "section_spacing": section_spacing,
+            "step_spacing": step_spacing,
+            "completed_color": completed_color,
+            "in_progress_color": in_progress_color,
+            "pending_color": pending_color,
+        }
 
     def available_themes(self) -> list[str]:
         return [name for name, _ in self._theme_candidates()]
@@ -251,11 +402,53 @@ class ThemeController:
             overview_gap=editor_overview_gap,
             app=app,
         )
-        codex_text_color, codex_border_width, codex_role_colors = self._codex_agent_bubble_theme(tokens)
+        (
+            codex_text_color,
+            codex_border_width,
+            codex_header_color,
+            codex_toggle_color,
+            codex_preview_color,
+            codex_role_colors,
+        ) = self._codex_agent_bubble_theme(tokens)
         set_codex_agent_bubble_theme(
             text_color=codex_text_color,
             border_width=codex_border_width,
+            header_color=codex_header_color,
+            toggle_color=codex_toggle_color,
+            preview_color=codex_preview_color,
             role_colors=codex_role_colors,
+            app=app,
+        )
+        composer_border_color, composer_shimmer_color, composer_shimmer_highlight_color = (
+            self._codex_agent_composer_theme(tokens)
+        )
+        set_codex_agent_composer_theme(
+            border_color=composer_border_color,
+            shimmer_color=composer_shimmer_color,
+            shimmer_highlight_color=composer_shimmer_highlight_color,
+            app=app,
+        )
+        set_codex_agent_link_color(
+            color=self._codex_agent_link_color(tokens),
+            app=app,
+        )
+        codex_panel_theme = self._codex_agent_panel_theme(tokens)
+        set_codex_agent_panel_theme(
+            border_color=codex_panel_theme["border_color"],
+            background_color=codex_panel_theme["background_color"],
+            border_width=codex_panel_theme["border_width"],
+            radius=codex_panel_theme["radius"],
+            title_color=codex_panel_theme["title_color"],
+            text_color=codex_panel_theme["text_color"],
+            title_font_size=codex_panel_theme["title_font_size"],
+            text_font_size=codex_panel_theme["text_font_size"],
+            padding_x=codex_panel_theme["padding_x"],
+            padding_y=codex_panel_theme["padding_y"],
+            section_spacing=codex_panel_theme["section_spacing"],
+            step_spacing=codex_panel_theme["step_spacing"],
+            completed_color=codex_panel_theme["completed_color"],
+            in_progress_color=codex_panel_theme["in_progress_color"],
+            pending_color=codex_panel_theme["pending_color"],
             app=app,
         )
         refresh_editor_viewport_widgets(app=app)

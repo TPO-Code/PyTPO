@@ -204,10 +204,55 @@ font_family = '"Consolas"'
 [components.codex_agent.bubble]
 text_color = "#e6edf3"
 border_width = "0px"
+header_color = "#8d9cb4"
+toggle_color = "#9db1cb"
+preview_color = "#c8d2e2"
+
+[components.codex_agent.composer]
+border_color = "${colors.bg_root}"
+shimmer_color = "rgba(120, 180, 255, 60)"
+shimmer_highlight_color = "rgba(180, 220, 255, 180)"
+
+[components.codex_agent.link]
+color = "#8ab4f8"
+
+[components.codex_agent.dock]
+transcript_background = "${colors.transparent}"
+transcript_border = "${colors.transparent}"
+composer_background = "${colors.transparent}"
+composer_border = "${colors.bg_root}"
+attachments_background = "${colors.transparent}"
+attachments_border = "${colors.transparent}"
+options_background = "${colors.transparent}"
+options_border = "${colors.transparent}"
+mention_background = "${colors.bg_menu}"
+mention_border = "${colors.border_menu}"
+mention_text = "${colors.text_menu}"
+mention_selected_background = "${colors.selection_bg}"
+mention_selected_text = "${colors.selection_text}"
+hint_color = "${colors.text_status}"
+rate_limits_color = "${colors.text_status}"
+
+[components.codex_agent.panel]
+border_color = "#3f4b5f"
+background_color = "${colors.bg_root}"
+border_width = "1px"
+radius = "0px"
+title_color = "#b7c6dc"
+text_color = "#d7e0ec"
+title_font_size = "11px"
+text_font_size = "12px"
+padding_x = "10px"
+padding_y = "8px"
+section_spacing = "4px"
+step_spacing = "3px"
+completed_color = "#8fd19e"
+in_progress_color = "#8fb4ff"
+pending_color = "#d7e0ec"
 
 [components.codex_agent.roles.default]
 border_color = "#2f3746"
-background_color = "#1a1f2a00"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.user]
 border_color = "#2e6ad9"
@@ -215,31 +260,76 @@ background_color = "#313131"
 
 [components.codex_agent.roles.assistant]
 border_color = "#2f3f5e"
-background_color = "#1a1f2a00"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.thinking]
 border_color = "#7d5ba6"
-background_color = "#2a223400"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.tools]
 border_color = "#2e5c47"
-background_color = "#1d2a2400"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.diff]
 border_color = "#2c6a4f"
-background_color = "#111a1400"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.system]
 border_color = "#3f4b5f"
-background_color = "#232b3800"
+background_color = "${colors.bg_root}"
 
 [components.codex_agent.roles.meta]
 border_color = "#3f4b5f"
-background_color = "#232b3800"
+background_color = "${colors.bg_root}"
 
 # -------------------------------------------------------------------
 # Rule output (ordered)
 # -------------------------------------------------------------------
+[[rules]]
+selector = "QScrollArea#codexTranscript"
+properties.background = "${components.codex_agent.dock.transcript_background}"
+properties.border = "${metrics.border_width} solid ${components.codex_agent.dock.transcript_border}"
+
+[[rules]]
+selector = "QWidget#codexTranscriptContent"
+properties.background = "${components.codex_agent.dock.transcript_background}"
+
+[[rules]]
+selector = "QWidget#codexComposerPanel"
+properties.background = "${components.codex_agent.dock.composer_background}"
+properties.border = "${metrics.border_width} solid ${components.codex_agent.dock.composer_border}"
+
+[[rules]]
+selector = "QWidget#codexAttachmentsRow"
+properties.background = "${components.codex_agent.dock.attachments_background}"
+properties.border = "${metrics.border_width} solid ${components.codex_agent.dock.attachments_border}"
+
+[[rules]]
+selector = "QWidget#codexAgentOptionsPanel, QWidget#codexPreamblePanel, QWidget#codexOptionsPanel"
+properties.background = "${components.codex_agent.dock.options_background}"
+properties.border = "${metrics.border_width} solid ${components.codex_agent.dock.options_border}"
+
+[[rules]]
+selector = "QListWidget#codexMentionPopup"
+properties.background = "${components.codex_agent.dock.mention_background}"
+properties.color = "${components.codex_agent.dock.mention_text}"
+properties.border = "${metrics.border_width} solid ${components.codex_agent.dock.mention_border}"
+
+[[rules]]
+selector = "QListWidget#codexMentionPopup::item:selected"
+properties.background = "${components.codex_agent.dock.mention_selected_background}"
+properties.color = "${components.codex_agent.dock.mention_selected_text}"
+
+[[rules]]
+selector = "QLabel#codexInputHint"
+properties.color = "${components.codex_agent.dock.hint_color}"
+properties.background = "transparent"
+
+[[rules]]
+selector = "QLabel#CodexRateLimits"
+properties.color = "${components.codex_agent.dock.rate_limits_color}"
+properties.background = "transparent"
+
 [[rules]]
 comment = "Global palette"
 selector = "QWidget"
