@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QMenu,
     QScrollArea,
@@ -536,6 +535,7 @@ class _ChatInputEdit(SpellcheckTextEdit):
         *,
         link_target_provider: Callable[[str], str] | None = None,
         mention_provider: Callable[[str], list[str]] | None = None,
+        send_shortcut_enabled: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -543,6 +543,7 @@ class _ChatInputEdit(SpellcheckTextEdit):
         self.setAcceptRichText(False)
         self._link_target_provider = link_target_provider
         self._mention_provider = mention_provider
+        self._send_shortcut_enabled = bool(send_shortcut_enabled)
         self._is_internal_change = False
         self._last_cursor_pos = int(self.textCursor().position())
         self._mention_popup = QListWidget(self)
@@ -571,6 +572,9 @@ class _ChatInputEdit(SpellcheckTextEdit):
         self, provider: Callable[[str], str] | None
     ) -> None:
         self._link_target_provider = provider
+
+    def set_send_shortcut_enabled(self, enabled: bool) -> None:
+        self._send_shortcut_enabled = bool(enabled)
 
     def close_mention_popup(self) -> None:
         self._mention_popup.hide()
@@ -937,7 +941,11 @@ class _ChatInputEdit(SpellcheckTextEdit):
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = int(event.key())
         modifiers = event.modifiers()
-        if key in {Qt.Key_Return, Qt.Key_Enter} and modifiers & Qt.ControlModifier:
+        if (
+            self._send_shortcut_enabled
+            and key in {Qt.Key_Return, Qt.Key_Enter}
+            and modifiers & Qt.ControlModifier
+        ):
             self._mention_popup.hide()
             self.sendRequested.emit()
             event.accept()
@@ -1027,6 +1035,43 @@ class _ChatInputEdit(SpellcheckTextEdit):
             lines.append("".join(parts))
             block = block.next()
         return "\n".join(lines)
+
+    def set_codex_text(self, text: str) -> None:
+        raw_text = _normalize_newlines(str(text or ""))
+        was_modified = bool(self.document().isModified())
+        prior_blocked = self.blockSignals(True)
+        was_internal = bool(self._is_internal_change)
+        self._is_internal_change = True
+        try:
+            cursor = QTextCursor(self.document())
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.Document)
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+
+            last_end = 0
+            for match in _MARKDOWN_LINK_RE.finditer(raw_text):
+                start = int(match.start())
+                end = int(match.end())
+                if start > last_end:
+                    cursor.insertText(raw_text[last_end:start], QTextCharFormat())
+                raw_link = str(match.group(0) or "").strip()
+                parsed = self._parse_markdown_link(raw_link)
+                if parsed is None:
+                    cursor.insertText(raw_text[start:end], QTextCharFormat())
+                else:
+                    label, _target = parsed
+                    cursor.insertText(label, self._make_link_char_format(raw_link))
+                last_end = end
+            if last_end < len(raw_text):
+                cursor.insertText(raw_text[last_end:], QTextCharFormat())
+            cursor.endEditBlock()
+            self.setTextCursor(cursor)
+            self._last_cursor_pos = int(self.textCursor().position())
+        finally:
+            self.document().setModified(was_modified)
+            self._is_internal_change = was_internal
+            self.blockSignals(prior_blocked)
 
 
 class _ShimmerBorderFrame(QWidget):
@@ -1386,12 +1431,20 @@ class CodexAgentDockWidget(QWidget):
         preamble_layout.setContentsMargins(0, 0, 0, 0)
         preamble_layout.setSpacing(4)
         preamble_layout.addWidget(QLabel("System preamble (first turn only)"))
-        self.preamble_edit = QPlainTextEdit()
+        self.preamble_frame = _ShimmerBorderFrame()
+        self.preamble_edit = _ChatInputEdit(
+            mention_provider=self._mention_candidates,
+            link_target_provider=self._mention_link_target,
+            send_shortcut_enabled=False,
+            parent=self.preamble_frame,
+        )
         self.preamble_edit.setPlaceholderText("Optional Codex instructions...")
         self.preamble_edit.setMaximumBlockCount(400)
         self.preamble_edit.setMinimumHeight(74)
         self.preamble_edit.setMaximumHeight(120)
-        preamble_layout.addWidget(self.preamble_edit)
+        self.preamble_frame.set_content_widget(self.preamble_edit)
+        self.preamble_frame.apply_theme()
+        preamble_layout.addWidget(self.preamble_frame)
         agent_options_layout.addWidget(self.preamble_container)
 
         self.options_container = QWidget()
@@ -1772,6 +1825,8 @@ class CodexAgentDockWidget(QWidget):
         self.plan_panel.apply_theme()
         self.input_frame.apply_theme()
         self.input_edit._apply_codex_agent_theme()
+        self.preamble_frame.apply_theme()
+        self.preamble_edit._apply_codex_agent_theme()
 
     def _new_transcript_bubble(self, entry: _TranscriptEntry) -> ChatMarkdownBubble:
         role = str(entry.role or "").strip()
@@ -1844,7 +1899,7 @@ class CodexAgentDockWidget(QWidget):
         self._updating_options = True
         try:
             self._command_template = command
-            self.preamble_edit.setPlainText(str(data.get("system_preamble") or ""))
+            self.preamble_edit.set_codex_text(str(data.get("system_preamble") or ""))
             self._auto_skip_git_repo_check = bool(data.get("auto_skip_git_repo_check", True))
             sandbox_mode = str(data.get("sandbox_mode") or "").strip().lower()
             if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
@@ -1902,7 +1957,7 @@ class CodexAgentDockWidget(QWidget):
         permission_mode = str(self.permissions_combo.currentData() or "default").strip()
         payload = {
             "command_template": str(self._command_template or "").strip() or DEFAULT_CODEX_COMMAND,
-            "system_preamble": str(self.preamble_edit.toPlainText() or ""),
+            "system_preamble": str(self.preamble_edit.to_codex_text() or ""),
             "auto_skip_git_repo_check": bool(self._auto_skip_git_repo_check),
             "sandbox_mode": str(self._sandbox_mode or "workspace-write"),
             "show_system_preamble": bool(self.agent_options_toggle_btn.isChecked()),
@@ -2829,7 +2884,7 @@ class CodexAgentDockWidget(QWidget):
         user_text: str,
         attachment_references: list[str] | None = None,
     ) -> str:
-        preamble = str(self.preamble_edit.toPlainText() or "").strip()
+        preamble = str(self.preamble_edit.to_codex_text() or "").strip()
         attachments = list(attachment_references or [])
         attachment_block = ""
         if attachments:
