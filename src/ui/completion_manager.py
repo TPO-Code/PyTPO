@@ -413,10 +413,12 @@ while True:
 """
 
 ANALYSIS_PROBE_SCRIPT = r"""
+import ast
 import importlib
 import inspect
 import json
 import pkgutil
+import re
 import sys
 
 
@@ -498,6 +500,230 @@ def _builtins_list():
     return [str(name) for name in names if str(name or "").strip()]
 
 
+def _resolve_dotted_object(target):
+    parts = [part for part in str(target or "").split(".") if part]
+    if not parts:
+        return None, None
+    for idx in range(len(parts), 0, -1):
+        module_name = ".".join(parts[:idx])
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        value = module
+        ok = True
+        for attr in parts[idx:]:
+            if not hasattr(value, attr):
+                ok = False
+                break
+            try:
+                value = getattr(value, attr)
+            except Exception:
+                ok = False
+                break
+        if ok:
+            return module, value
+    return None, None
+
+
+def _resolve_type_candidates(type_name, module_name):
+    resolved = []
+    seen = set()
+    label = str(type_name or "").strip()
+    if not label:
+        return []
+
+    module, value = _resolve_dotted_object(label)
+    if inspect.isclass(value):
+        ident = (getattr(value, "__module__", ""), getattr(value, "__name__", ""))
+        seen.add(ident)
+        resolved.append(value)
+
+    probe_modules = []
+    if module is not None:
+        probe_modules.append(module)
+    if module_name:
+        mod, _ = _resolve_dotted_object(module_name)
+        if mod is not None:
+            probe_modules.append(mod)
+        root_name = str(module_name).split(".", 1)[0]
+        root_mod, _ = _resolve_dotted_object(root_name)
+        if root_mod is not None:
+            probe_modules.append(root_mod)
+
+    for holder in probe_modules:
+        if not hasattr(holder, label):
+            continue
+        try:
+            value = getattr(holder, label)
+        except Exception:
+            continue
+        if not inspect.isclass(value):
+            continue
+        ident = (getattr(value, "__module__", ""), getattr(value, "__name__", ""))
+        if ident in seen:
+            continue
+        seen.add(ident)
+        resolved.append(value)
+    return resolved
+
+
+def _candidate_return_type_names(callable_obj):
+    names = []
+    seen = set()
+
+    def _add(raw):
+        value = str(raw or "").strip()
+        if not value or value in {"None", "NoneType"}:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        names.append(value)
+
+    try:
+        ann = inspect.signature(callable_obj).return_annotation
+    except Exception:
+        ann = inspect._empty
+    if ann is not inspect._empty:
+        if inspect.isclass(ann):
+            _add(getattr(ann, "__name__", ""))
+            full_name = f"{getattr(ann, '__module__', '')}.{getattr(ann, '__name__', '')}".strip(".")
+            _add(full_name)
+        else:
+            _add(getattr(ann, "__forward_arg__", ""))
+            _add(ann)
+
+    try:
+        annotations = getattr(callable_obj, "__annotations__", {}) or {}
+    except Exception:
+        annotations = {}
+    if isinstance(annotations, dict):
+        ret = annotations.get("return")
+        if inspect.isclass(ret):
+            _add(getattr(ret, "__name__", ""))
+            full_name = f"{getattr(ret, '__module__', '')}.{getattr(ret, '__name__', '')}".strip(".")
+            _add(full_name)
+        else:
+            _add(getattr(ret, "__forward_arg__", ""))
+            _add(ret)
+
+    try:
+        doc = inspect.getdoc(callable_obj) or ""
+    except Exception:
+        doc = ""
+    doc_patterns = [
+        r"Returns:\s*(?:\n\s*)?([A-Za-z_][A-Za-z0-9_\.]*)",
+        r"->\s*([A-Za-z_][A-Za-z0-9_\.]*)",
+    ]
+    for pattern in doc_patterns:
+        for match in re.finditer(pattern, doc):
+            _add(match.group(1))
+
+    return names
+
+
+def _iter_subclasses_in_package(base_class, module_name, *, limit=96):
+    if not inspect.isclass(base_class):
+        return []
+    package_name = str(module_name or "").split(".", 1)[0]
+    if not package_name:
+        return []
+    try:
+        package = importlib.import_module(package_name)
+    except Exception:
+        return []
+    package_path = getattr(package, "__path__", None)
+    if not package_path:
+        return []
+
+    out = []
+    seen = set()
+    for idx, item in enumerate(pkgutil.walk_packages(package_path, package.__name__ + ".")):
+        if idx >= limit:
+            break
+        try:
+            mod = importlib.import_module(item.name)
+        except Exception:
+            continue
+        for value in vars(mod).values():
+            if not inspect.isclass(value) or value is base_class:
+                continue
+            try:
+                if not issubclass(value, base_class):
+                    continue
+            except Exception:
+                continue
+            ident = (getattr(value, "__module__", ""), getattr(value, "__name__", ""))
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append(value)
+    return out
+
+
+def _member_items_for_return_types(target, prefix):
+    module, callable_obj = _resolve_dotted_object(target)
+    if callable_obj is None:
+        return []
+
+    module_name = getattr(module, "__name__", "")
+    type_candidates = []
+    seen_types = set()
+    for type_name in _candidate_return_type_names(callable_obj):
+        for cls in _resolve_type_candidates(type_name, module_name):
+            ident = (getattr(cls, "__module__", ""), getattr(cls, "__name__", ""))
+            if ident in seen_types:
+                continue
+            seen_types.add(ident)
+            type_candidates.append(cls)
+
+    if inspect.isclass(callable_obj):
+        ident = (getattr(callable_obj, "__module__", ""), getattr(callable_obj, "__name__", ""))
+        if ident not in seen_types:
+            seen_types.add(ident)
+            type_candidates.append(callable_obj)
+
+    for cls in list(type_candidates):
+        for subcls in _iter_subclasses_in_package(cls, module_name):
+            ident = (getattr(subcls, "__module__", ""), getattr(subcls, "__name__", ""))
+            if ident in seen_types:
+                continue
+            seen_types.add(ident)
+            type_candidates.append(subcls)
+
+    items = []
+    seen_members = set()
+    for cls in type_candidates:
+        owner = getattr(cls, "__name__", "")
+        for name in dir(cls):
+            label = str(name or "")
+            if not label:
+                continue
+            if prefix and not label.startswith(prefix):
+                continue
+            if label in seen_members:
+                continue
+            seen_members.add(label)
+            kind = "name"
+            try:
+                value = getattr(cls, label)
+                if isinstance(value, property):
+                    kind = "property"
+                elif callable(value):
+                    kind = "function"
+            except Exception:
+                pass
+            items.append(
+                {
+                    "label": label,
+                    "kind": kind,
+                    "owner": owner,
+                }
+            )
+    return items
+
+
 try:
     req = json.loads(sys.stdin.read() or "{}")
 except Exception:
@@ -519,6 +745,8 @@ elif mode == "module_members":
     result["items"] = _module_members(target, prefix)
 elif mode == "builtins":
     result["items"] = _builtins_list()
+elif mode == "callable_return_members":
+    result["items"] = _member_items_for_return_types(target, prefix)
 else:
     result = {"ok": False, "error": "bad_mode"}
 
@@ -1016,7 +1244,7 @@ class CompletionManager(QObject):
         cache_key = (interp, path_key, str(project_root or ""), mode_key, f"{target}\0{prefix}")
         if cache_key in self._analysis_probe_cache:
             return self._analysis_probe_cache[cache_key]
-        if not interp or mode_key not in {"module_candidates", "module_members", "builtins"}:
+        if not interp or mode_key not in {"module_candidates", "module_members", "builtins", "callable_return_members"}:
             return []
 
         payload = {
@@ -1115,6 +1343,50 @@ class CompletionManager(QObject):
         if not isinstance(result, list):
             return []
         return [str(item or "") for item in result if str(item or "").strip()]
+
+    def _analysis_callable_return_members(
+        self,
+        *,
+        interpreter: str,
+        analysis_sys_path: list[str],
+        project_root: str,
+        target: str,
+        prefix: str,
+    ) -> list[dict]:
+        result = self._run_analysis_probe(
+            interpreter=interpreter,
+            analysis_sys_path=analysis_sys_path,
+            project_root=project_root,
+            mode="callable_return_members",
+            target=target,
+            prefix=prefix,
+        )
+        if not isinstance(result, list):
+            return []
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            key = (label, str(item.get("owner") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "label": label,
+                    "insert_text": label,
+                    "kind": str(item.get("kind") or "name").strip().lower() or "name",
+                    "detail": "runtime inferred return member",
+                    "owner": str(item.get("owner") or "").strip(),
+                    "source": "runtime",
+                    "source_scope": "runtime_inference",
+                }
+            )
+        return out
 
     def _start_worker(self, payload: _CompletionPayload):
         try:
@@ -1315,6 +1587,9 @@ class CompletionManager(QObject):
             column=payload.column,
             prefix=payload.prefix,
         )
+        resolved_callable_target = _resolve_attribute_callable_target(payload.source_text, context)
+        if resolved_callable_target:
+            context = {**context, "resolved_callable_target": resolved_callable_target}
 
         items: list[dict] = []
         used_backend = "fallback"
@@ -1340,6 +1615,20 @@ class CompletionManager(QObject):
                 used_backend = "jedi"
                 items = _annotate_jedi_items(jedi_res.get("items", []))
                 items = _context_filter_items(items, context)
+                if _should_augment_dynamic_attribute_items(items, context):
+                    runtime_items = self._analysis_callable_return_members(
+                        interpreter=payload.interpreter,
+                        analysis_sys_path=payload.analysis_sys_path,
+                        project_root=payload.project_root,
+                        target=str(
+                            context.get("resolved_callable_target")
+                            or context.get("callable_target")
+                            or ""
+                        ),
+                        prefix=payload.prefix,
+                    )
+                    if runtime_items:
+                        items = _merge_completion_item_lists(runtime_items, items)
             elif state == "missing":
                 missing_backend = "jedi"
 
@@ -1807,11 +2096,141 @@ def _detect_context(source_text: str, line: int, column: int, prefix: str) -> di
     if pfx and left.endswith(pfx):
         idx = len(left) - len(pfx)
         if idx > 0 and left[idx - 1] == ".":
-            return {"mode": "attribute", "import_module": "", "prefix": pfx}
+            attr_ctx = _attribute_context(left[: idx - 1], pfx)
+            return {"mode": "attribute", "import_module": "", "prefix": pfx, **attr_ctx}
     if left.endswith("."):
-        return {"mode": "attribute", "import_module": "", "prefix": ""}
+        attr_ctx = _attribute_context(left[:-1], "")
+        return {"mode": "attribute", "import_module": "", "prefix": "", **attr_ctx}
 
     return {"mode": "normal", "import_module": "", "prefix": prefix}
+
+
+def _attribute_context(base_text: str, prefix: str) -> dict:
+    expr = _extract_attribute_base_expression(base_text)
+    callable_target = _callable_target_for_expression(expr)
+    return {
+        "attribute_expr": expr,
+        "callable_target": callable_target,
+        "prefix": prefix,
+    }
+
+
+def _extract_attribute_base_expression(base_text: str) -> str:
+    text = str(base_text or "")
+    end = len(text)
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    if end <= 0:
+        return ""
+
+    depth = 0
+    idx = end - 1
+    stop_chars = set("=,+-*/%&|^~<>[]{}:;\n\r\t ")
+    while idx >= 0:
+        ch = text[idx]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth <= 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in stop_chars:
+            break
+        idx -= 1
+    return text[idx + 1:end].strip()
+
+
+def _callable_target_for_expression(expr: str) -> str:
+    text = str(expr or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_\.]*)\s*\(", text)
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip()
+
+
+def _resolve_attribute_callable_target(source_text: str, context: dict) -> str:
+    direct = str(context.get("callable_target") or "").strip()
+    if direct:
+        return direct
+
+    expr = str(context.get("attribute_expr") or "").strip()
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", expr):
+        return ""
+    return _infer_symbol_callable_target(source_text, expr)
+
+
+def _infer_symbol_callable_target(source_text: str, symbol_name: str) -> str:
+    target = str(symbol_name or "").strip()
+    if not target:
+        return ""
+    try:
+        tree = ast.parse(source_text or "")
+    except Exception:
+        tree = None
+
+    resolved = ""
+
+    if tree is not None:
+        class _AssignmentVisitor(ast.NodeVisitor):
+            def visit_Assign(self, node):
+                nonlocal resolved
+                if resolved:
+                    return
+                for assign_target in node.targets:
+                    if isinstance(assign_target, ast.Name) and assign_target.id == target:
+                        resolved = _callable_name_from_ast(node.value)
+                        if resolved:
+                            return
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node):
+                nonlocal resolved
+                if resolved:
+                    return
+                assign_target = node.target
+                if isinstance(assign_target, ast.Name) and assign_target.id == target:
+                    resolved = _callable_name_from_ast(node.value)
+                    if resolved:
+                        return
+                self.generic_visit(node)
+
+        _AssignmentVisitor().visit(tree)
+        if resolved:
+            return resolved
+
+    assign_re = re.compile(
+        rf"^\s*{re.escape(target)}\s*=\s*([A-Za-z_][A-Za-z0-9_\.]*)\s*\(",
+    )
+    for raw_line in reversed((source_text or "").splitlines()):
+        match = assign_re.match(str(raw_line or ""))
+        if not match:
+            continue
+        return str(match.group(1) or "").strip()
+    return ""
+
+
+def _callable_name_from_ast(node: ast.AST | None) -> str:
+    value = node
+    while isinstance(value, ast.IfExp):
+        value = value.body
+    if not isinstance(value, ast.Call):
+        return ""
+
+    func = value.func
+    parts: list[str] = []
+    while isinstance(func, ast.Attribute):
+        parts.append(str(func.attr or ""))
+        func = func.value
+    if isinstance(func, ast.Name):
+        parts.append(str(func.id or ""))
+    else:
+        return ""
+    parts.reverse()
+    if not parts:
+        return ""
+    return ".".join(part for part in parts if part)
 
 
 _TDOCPROJECT_RULE_VALUE_RE = re.compile(r"^\s*(?P<rule>include|ignore)\s*:\s*(?P<value>[^#]*)$")
@@ -2108,6 +2527,53 @@ def _context_filter_items(items: list[dict], context: dict) -> list[dict]:
         # Keep attributes from Jedi, only strip hard-keywords
         return [it for it in items if str(it.get("kind") or "").lower() != "keyword"]
     return list(items)
+
+
+def _merge_completion_item_lists(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for source in (primary, secondary):
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("insert_text") or "").strip()
+            insert_text = str(item.get("insert_text") or label).strip()
+            if not label or not insert_text:
+                continue
+            key = (label, insert_text)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _should_augment_dynamic_attribute_items(items: list[dict], context: dict) -> bool:
+    if str(context.get("mode") or "") != "attribute":
+        return False
+    if not str(
+        context.get("resolved_callable_target")
+        or context.get("callable_target")
+        or ""
+    ).strip():
+        return False
+    if not items:
+        return True
+
+    public_labels: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("insert_text") or "").strip()
+        if not label:
+            continue
+        if label.startswith("_"):
+            continue
+        public_labels.append(label)
+
+    if not public_labels:
+        return True
+    return all(label in {"NoneType", "NoneType()"} for label in public_labels)
 
 
 def _fallback_candidates(
@@ -2531,6 +2997,7 @@ def _rank_items(
         "locals": 600,
         "current_file": 500,
         "project": 420,
+        "runtime_inference": 540,
         "interpreter_modules": 330,
         "builtins": 240,
         "unknown": 100,
