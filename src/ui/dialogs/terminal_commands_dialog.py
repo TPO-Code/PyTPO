@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit, SpellcheckPlainTextEdit
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

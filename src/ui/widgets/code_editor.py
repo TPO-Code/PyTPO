@@ -5,10 +5,11 @@ This module defines the IDE-owned subclass used by ``src`` so IDE-specific
 behavior can be added without coupling ``TPOPyside`` to the IDE.
 """
 
+import os
 import re
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QTextCursor, QTextFormat
+from PySide6.QtGui import QAction, QColor, QKeyEvent, QKeySequence, QPainter, QTextCursor, QTextFormat
 from PySide6.QtWidgets import QInputDialog, QLineEdit, QMenu, QMessageBox, QTextEdit
 
 from TPOPyside.widgets.code_editor import (
@@ -34,6 +35,155 @@ class CodeEditor(BaseCodeEditor):
         self._debugger_breakpoints: dict[int, dict] = {}
         self._debugger_execution_line = -1
         super().__init__(*args, **kwargs)
+
+    def _handle_editor_shortcut_fallback(self, event: QKeyEvent) -> bool:
+        if (
+            bool(event.modifiers() & Qt.AltModifier)
+            and not bool(event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))
+            and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+        ):
+            return bool(self.request_quick_fix("shortcut"))
+        if self._event_matches_action_shortcut(event, "general", "action.go_to_definition"):
+            return bool(self.request_definition("shortcut"))
+        if self._event_matches_action_shortcut(event, "general", "action.find_usages"):
+            return bool(self.request_usages("shortcut"))
+        return super()._handle_editor_shortcut_fallback(event)
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+
+        act_def = QAction("Go to Definition", menu)
+        act_def.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.go_to_definition")))
+        menu.addAction(act_def)
+
+        act_usages = QAction("Find Usages", menu)
+        act_usages.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.find_usages")))
+        menu.addAction(act_usages)
+
+        act_quick_fix = QAction("Quick Fix...", menu)
+        act_quick_fix.setShortcut(QKeySequence("Alt+Return"))
+        menu.addAction(act_quick_fix)
+
+        pos = event.pos() if hasattr(event, "pos") else event.position().toPoint()
+        cursor = self.cursorForPosition(pos)
+        symbol_payload = self._symbol_payload_from_cursor(cursor)
+        selection_payload = self._selection_payload()
+        raw_language = str(self.language_id() or "").strip().lower()
+        file_suffix = os.path.splitext(str(self.file_path or "").strip().lower())[1]
+        effective_language = raw_language
+        if raw_language == "c" and file_suffix in {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx"}:
+            effective_language = "cpp"
+
+        act_rename = None
+        if isinstance(symbol_payload, dict):
+            act_rename = QAction("Rename Symbol...", menu)
+            act_rename.setShortcut(
+                self._sequence_to_qkeysequence(self._action_sequence("general", "action.rename_symbol"))
+            )
+            menu.addAction(act_rename)
+
+        act_extract_var = None
+        act_extract_method = None
+        if isinstance(selection_payload, dict) and effective_language in {"python", "c", "cpp"}:
+            act_extract_var = QAction("Extract Variable...", menu)
+            act_extract_var.setShortcut(
+                self._sequence_to_qkeysequence(self._action_sequence("general", "action.extract_variable"))
+            )
+            menu.addAction(act_extract_var)
+
+            if effective_language in {"python", "cpp"}:
+                act_extract_method = QAction("Extract Method...", menu)
+                act_extract_method.setShortcut(
+                    self._sequence_to_qkeysequence(self._action_sequence("general", "action.extract_method"))
+                )
+                menu.addAction(act_extract_method)
+
+        menu.addSeparator()
+
+        act_ai = QAction("AI Inline Assist", menu)
+        act_ai.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.ai_inline_assist")))
+        act_ai.setToolTip(
+            "Shortcuts: "
+            + ", ".join(
+                filter(
+                    None,
+                    [
+                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist")),
+                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist_ctrl_alt_space")),
+                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist_alt_space")),
+                    ],
+                )
+            )
+        )
+        menu.addAction(act_ai)
+
+        menu.addSeparator()
+
+        act_find = QAction("Find", menu)
+        act_find.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.find")))
+        menu.addAction(act_find)
+
+        act_replace = QAction("Replace", menu)
+        act_replace.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.replace")))
+        menu.addAction(act_replace)
+
+        act_paste_reindent = QAction("Paste and Reindent", menu)
+        act_paste_reindent.setShortcut(
+            self._sequence_to_qkeysequence(self._action_sequence("general", "action.paste_and_reindent"))
+        )
+        menu.addAction(act_paste_reindent)
+
+        menu.addSeparator()
+
+        act_word_wrap = QAction("Word Wrap", menu)
+        act_word_wrap.setCheckable(True)
+        act_word_wrap.setChecked(self.is_word_wrap_enabled())
+        menu.addAction(act_word_wrap)
+
+        payload = {
+            "line": int(cursor.blockNumber() + 1),
+            "column": int(cursor.positionInBlock() + 1),
+            "cursor_pos": int(cursor.position()),
+            "local_pos": pos,
+            "global_pos": self.mapToGlobal(pos),
+        }
+        self.contextMenuAboutToShow.emit(menu, payload)
+
+        chosen = menu.exec(self.mapToGlobal(pos))
+        if chosen is act_def:
+            self.request_definition("context", cursor)
+            return
+        if chosen is act_usages:
+            self.request_usages("context", cursor)
+            return
+        if chosen is act_quick_fix:
+            self.request_quick_fix("context", cursor)
+            return
+        if act_rename is not None and chosen is act_rename:
+            self.request_rename("context", cursor)
+            return
+        if act_extract_var is not None and chosen is act_extract_var:
+            self.request_extract_variable("context")
+            return
+        if act_extract_method is not None and chosen is act_extract_method:
+            self.request_extract_method("context")
+            return
+        if chosen is act_ai:
+            self.aiAssistRequested.emit("manual")
+            return
+        if chosen is act_find:
+            self.show_find_bar()
+            return
+        if chosen is act_replace:
+            self.show_replace_bar()
+            return
+        if chosen is act_paste_reindent:
+            self.paste_and_reindent()
+            return
+        if chosen is act_word_wrap:
+            self.set_word_wrap_enabled(bool(act_word_wrap.isChecked()))
+            return
 
     def lineNumberAreaWidth(self):
         return super().lineNumberAreaWidth() + 14

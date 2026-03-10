@@ -4,25 +4,13 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QResizeEvent
-from PySide6.QtWidgets import (
-    QDialog,
-    QHBoxLayout,
-    QMenuBar,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QMenuBar, QVBoxLayout, QWidget
 
-from src.ui.custom_window import EDGE_WIDTH, CustomTitleBar, EdgeGrip
+from TPOPyside.widgets.custom_window import EDGE_WIDTH, CustomTitleBar, EdgeGrip
 
 
 class DialogWindow(QDialog):
-    """
-    Reusable dialog shell supporting native or frameless custom chrome.
-
-    In frameless mode it provides:
-    - custom titlebar
-    - optional edge grips for native resize behavior
-    """
+    """Reusable dialog shell supporting native or frameless custom chrome."""
 
     def __init__(
         self,
@@ -37,7 +25,6 @@ class DialogWindow(QDialog):
         self._window_left_controls: list[QWidget] = []
         self._window_center_controls: list[QWidget] = []
         self._window_right_controls: list[QWidget] = []
-        # Backwards-compatible alias for existing callers.
         self._window_controls = self._window_left_controls
         self._grips_built = False
         self._show_custom_title_text = True
@@ -127,19 +114,14 @@ class DialogWindow(QDialog):
         root.addWidget(self.content_host, 1)
 
     def _build_grips(self) -> None:
-        W, H = Qt.CursorShape.SizeHorCursor, Qt.CursorShape.SizeVerCursor
-        NW, NE = Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor
-        SW, SE = Qt.CursorShape.SizeBDiagCursor, Qt.CursorShape.SizeFDiagCursor
-
-        self.n_grip = EdgeGrip(self, Qt.TopEdge, H)
-        self.s_grip = EdgeGrip(self, Qt.BottomEdge, H)
-        self.w_grip = EdgeGrip(self, Qt.LeftEdge, W)
-        self.e_grip = EdgeGrip(self, Qt.RightEdge, W)
-        self.nw_grip = EdgeGrip(self, Qt.TopEdge | Qt.LeftEdge, NW)
-        self.ne_grip = EdgeGrip(self, Qt.TopEdge | Qt.RightEdge, NE)
-        self.sw_grip = EdgeGrip(self, Qt.BottomEdge | Qt.LeftEdge, SW)
-        self.se_grip = EdgeGrip(self, Qt.BottomEdge | Qt.RightEdge, SE)
-
+        self.n_grip = EdgeGrip(self, Qt.TopEdge, Qt.CursorShape.SizeVerCursor)
+        self.s_grip = EdgeGrip(self, Qt.BottomEdge, Qt.CursorShape.SizeVerCursor)
+        self.w_grip = EdgeGrip(self, Qt.LeftEdge, Qt.CursorShape.SizeHorCursor)
+        self.e_grip = EdgeGrip(self, Qt.RightEdge, Qt.CursorShape.SizeHorCursor)
+        self.nw_grip = EdgeGrip(self, Qt.TopEdge | Qt.LeftEdge, Qt.CursorShape.SizeFDiagCursor)
+        self.ne_grip = EdgeGrip(self, Qt.TopEdge | Qt.RightEdge, Qt.CursorShape.SizeBDiagCursor)
+        self.sw_grip = EdgeGrip(self, Qt.BottomEdge | Qt.LeftEdge, Qt.CursorShape.SizeBDiagCursor)
+        self.se_grip = EdgeGrip(self, Qt.BottomEdge | Qt.RightEdge, Qt.CursorShape.SizeFDiagCursor)
         self._grips_built = True
 
     def _all_grips(self):
@@ -157,7 +139,6 @@ class DialogWindow(QDialog):
     def _layout_grips(self) -> None:
         if self.use_native_chrome or not self.resizable or not self._grips_built:
             return
-
         if self.isMaximized() or self.isFullScreen():
             for grip in self._all_grips():
                 grip.hide()
@@ -282,7 +263,6 @@ class DialogWindow(QDialog):
 
         geom = self.geometry()
         visible = self.isVisible()
-
         self.use_native_chrome = use_native_chrome
 
         if self.title_bar is not None:
@@ -344,11 +324,9 @@ class DialogWindow(QDialog):
         for widget in self._window_left_controls:
             self._detach_widget_from_parent_layout(widget)
         self._window_left_controls.clear()
-
         for widget in self._window_center_controls:
             self._detach_widget_from_parent_layout(widget)
         self._window_center_controls.clear()
-
         for widget in self._window_right_controls:
             self._detach_widget_from_parent_layout(widget)
         self._window_right_controls.clear()
@@ -382,3 +360,6 @@ class DialogWindow(QDialog):
             if self.title_bar is not None:
                 self.title_bar.set_maximized_state(self.isMaximized())
             self._layout_grips()
+
+
+__all__ = ["DialogWindow"]

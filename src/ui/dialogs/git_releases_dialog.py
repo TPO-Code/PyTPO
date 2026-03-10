@@ -23,7 +23,7 @@ from src.git.github_release_service import (
     GitHubReleaseService,
     GitHubReleaseSummary,
 )
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class GitReleasesDialog(DialogWindow):

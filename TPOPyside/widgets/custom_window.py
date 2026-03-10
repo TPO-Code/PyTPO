@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QPoint, QEvent
-from PySide6.QtGui import QMouseEvent, QIcon, QResizeEvent
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QIcon, QMouseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -15,10 +15,15 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenuBar,
-    
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
-from PySide6.QtWidgets import QTextEdit, QPushButton, QWidget, QPlainTextEdit, QToolButton, QSizePolicy, QVBoxLayout
 EDGE_WIDTH = 8
 
 
@@ -47,9 +52,9 @@ def start_system_move(widget: QWidget, global_pos: Optional[QPoint] = None) -> N
 
 
 def start_system_resize(
-        widget: QWidget,
-        edges: Qt.Edges,
-        global_pos: Optional[QPoint] = None,
+    widget: QWidget,
+    edges: Qt.Edges,
+    global_pos: Optional[QPoint] = None,
 ) -> None:
     resize = getattr(widget, "startSystemResize", None)
     if callable(resize):
@@ -86,15 +91,14 @@ class EdgeGrip(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            gp = event.globalPosition().toPoint()
-            start_system_resize(self.window(), self.edges, gp)
+            start_system_resize(self.window(), self.edges, event.globalPosition().toPoint())
             event.accept()
             return
         event.ignore()
 
 
 class CustomTitleBar(QFrame):
-    """Custom title bar used only in frameless mode."""
+    """Reusable custom title bar for frameless windows."""
 
     def __init__(
         self,
@@ -107,7 +111,6 @@ class CustomTitleBar(QFrame):
         super().__init__(parent)
         self.setObjectName("TitleBar")
         self.setFixedHeight(38)
-        # Allow stylesheet background on the titlebar frame itself.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._allow_minimize = allow_minimize
         self._allow_maximize = allow_maximize
@@ -167,13 +170,13 @@ class CustomTitleBar(QFrame):
         root.addWidget(tools_wrap, 0)
         root.addWidget(right_wrap, 0)
 
-        # Track drag gestures across all interactive widgets in the titlebar.
         self._install_drag_event_filter(left_wrap)
         self._install_drag_event_filter(center_wrap)
         self._install_drag_event_filter(tools_wrap)
         self._install_drag_event_filter(right_wrap)
 
-        self.title_label = QLabel("PyTPO", self)
+        default_title = str(QApplication.applicationDisplayName() or "").strip()
+        self.title_label = QLabel(default_title, self)
         self.title_label.setObjectName("WindowTitleLabel")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         self.center_layout.addWidget(self.title_label)
@@ -182,9 +185,9 @@ class CustomTitleBar(QFrame):
         self.btn_max = QToolButton(self)
         self.btn_close = QToolButton(self)
 
-        self._setup_control_button(self.btn_min, "–", "Minimize", "min")
-        self._setup_control_button(self.btn_max, "□", "Maximize", "max")
-        self._setup_control_button(self.btn_close, "✕", "Close", "close")
+        self._setup_control_button(self.btn_min, "-", "Minimize", "min")
+        self._setup_control_button(self.btn_max, "[]", "Maximize", "max")
+        self._setup_control_button(self.btn_close, "X", "Close", "close")
 
         self.right_layout.addWidget(self.btn_min)
         self.right_layout.addWidget(self.btn_max)
@@ -198,7 +201,6 @@ class CustomTitleBar(QFrame):
         self.btn_max.clicked.connect(self._on_maximize_restore_clicked)
         self.btn_close.clicked.connect(self._on_close_clicked)
 
-    # ---------- Public ----------
     def set_title(self, text: str) -> None:
         self.title_label.setText(text)
 
@@ -225,21 +227,17 @@ class CustomTitleBar(QFrame):
     def set_title_visible(self, visible: bool) -> None:
         self.title_label.setVisible(bool(visible))
 
-    # ---------- Internal ----------
     def _setup_control_button(self, btn: QToolButton, fallback_text: str, tooltip: str, role: str) -> None:
         btn.setObjectName("TitleBarControlButton")
-        btn.setProperty("role", role)  # "min" | "max" | "close"
+        btn.setProperty("role", role)
         btn.setFixedSize(34, 30)
         btn.setToolTip(tooltip)
         btn.setIcon(QIcon())
         btn.setText(fallback_text)
 
     def _on_minimize_clicked(self) -> None:
-        if not self._allow_minimize:
-            return
-        win = self.window()
-        if isinstance(win, QWidget):
-            win.showMinimized()
+        if self._allow_minimize and isinstance(self.window(), QWidget):
+            self.window().showMinimized()
 
     def _on_maximize_restore_clicked(self) -> None:
         if not self._allow_maximize:
@@ -255,11 +253,8 @@ class CustomTitleBar(QFrame):
             self.set_maximized_state(True)
 
     def _on_close_clicked(self) -> None:
-        if not self._allow_close:
-            return
-        win = self.window()
-        if isinstance(win, QWidget):
-            win.close()
+        if self._allow_close and isinstance(self.window(), QWidget):
+            self.window().close()
 
     def _install_drag_event_filter(self, widget: QWidget) -> None:
         widget.installEventFilter(self)
@@ -341,9 +336,7 @@ class CustomTitleBar(QFrame):
 
     def _is_in_drag_zone(self, pos_in_titlebar) -> bool:
         child = self.childAt(pos_in_titlebar)
-        if child is None:
-            return True
-        if child is self or child is self.title_label:
+        if child is None or child is self or child is self.title_label:
             return True
         if isinstance(child, QWidget) and not isinstance(child, (QPushButton, QToolButton)):
             local = child.mapFrom(self, pos_in_titlebar)
@@ -382,11 +375,7 @@ class CustomTitleBar(QFrame):
 
 
 class Window(QMainWindow):
-    """
-    One reusable shell, two modes:
-    - native chrome: OS titlebar + OS resize/snap
-    - frameless: custom titlebar + edge grips
-    """
+    """Reusable main-window shell supporting native or frameless chrome."""
 
     def __init__(self, *, use_native_chrome: bool = True, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -429,14 +418,14 @@ class Window(QMainWindow):
     def _configure_window_flags(self) -> None:
         if self.use_native_chrome:
             self.setWindowFlags(Qt.WindowType.Window)
-        else:
-            self.setWindowFlags(
-                Qt.WindowType.Window
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowSystemMenuHint
-                | Qt.WindowType.WindowMinMaxButtonsHint
-                | Qt.WindowType.WindowCloseButtonHint
-            )
+            return
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
 
     def _build_ui(self) -> None:
         self.chrome_host = QWidget(self)
@@ -468,33 +457,39 @@ class Window(QMainWindow):
         self.setCentralWidget(self.content_host)
 
     def _build_grips(self) -> None:
-        W, H = Qt.CursorShape.SizeHorCursor, Qt.CursorShape.SizeVerCursor
-        NW, NE = Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor
-        SW, SE = Qt.CursorShape.SizeBDiagCursor, Qt.CursorShape.SizeFDiagCursor
-
-        self.n_grip = EdgeGrip(self, Qt.TopEdge, H)
-        self.s_grip = EdgeGrip(self, Qt.BottomEdge, H)
-        self.w_grip = EdgeGrip(self, Qt.LeftEdge, W)
-        self.e_grip = EdgeGrip(self, Qt.RightEdge, W)
-        self.nw_grip = EdgeGrip(self, Qt.TopEdge | Qt.LeftEdge, NW)
-        self.ne_grip = EdgeGrip(self, Qt.TopEdge | Qt.RightEdge, NE)
-        self.sw_grip = EdgeGrip(self, Qt.BottomEdge | Qt.LeftEdge, SW)
-        self.se_grip = EdgeGrip(self, Qt.BottomEdge | Qt.RightEdge, SE)
-
+        self.n_grip = EdgeGrip(self, Qt.TopEdge, Qt.CursorShape.SizeVerCursor)
+        self.s_grip = EdgeGrip(self, Qt.BottomEdge, Qt.CursorShape.SizeVerCursor)
+        self.w_grip = EdgeGrip(self, Qt.LeftEdge, Qt.CursorShape.SizeHorCursor)
+        self.e_grip = EdgeGrip(self, Qt.RightEdge, Qt.CursorShape.SizeHorCursor)
+        self.nw_grip = EdgeGrip(self, Qt.TopEdge | Qt.LeftEdge, Qt.CursorShape.SizeFDiagCursor)
+        self.ne_grip = EdgeGrip(self, Qt.TopEdge | Qt.RightEdge, Qt.CursorShape.SizeBDiagCursor)
+        self.sw_grip = EdgeGrip(self, Qt.BottomEdge | Qt.LeftEdge, Qt.CursorShape.SizeBDiagCursor)
+        self.se_grip = EdgeGrip(self, Qt.BottomEdge | Qt.RightEdge, Qt.CursorShape.SizeFDiagCursor)
         self._grips_built = True
+
+    def _all_grips(self):
+        return (
+            self.n_grip,
+            self.s_grip,
+            self.w_grip,
+            self.e_grip,
+            self.nw_grip,
+            self.ne_grip,
+            self.sw_grip,
+            self.se_grip,
+        )
 
     def _layout_grips(self) -> None:
         if self.use_native_chrome or not self._grips_built:
             return
-
         if self.isMaximized() or self.isFullScreen():
-            for g in self._all_grips():
-                g.hide()
+            for grip in self._all_grips():
+                grip.hide()
             return
 
-        for g in self._all_grips():
-            g.show()
-            g.raise_()
+        for grip in self._all_grips():
+            grip.show()
+            grip.raise_()
 
         w, h = self.width(), self.height()
         ew = EDGE_WIDTH
@@ -506,12 +501,6 @@ class Window(QMainWindow):
         self.ne_grip.setGeometry(w - ew, 0, ew, ew)
         self.sw_grip.setGeometry(0, h - ew, ew, ew)
         self.se_grip.setGeometry(w - ew, h - ew, ew, ew)
-
-    def _all_grips(self):
-        return (
-            self.n_grip, self.s_grip, self.w_grip, self.e_grip,
-            self.nw_grip, self.ne_grip, self.sw_grip, self.se_grip,
-        )
 
     def _left_control_target_layout(self):
         if self.use_native_chrome:
@@ -538,22 +527,22 @@ class Window(QMainWindow):
         parent = widget.parentWidget()
         if parent is None:
             return
-        lay = parent.layout()
-        if lay is None:
+        layout = parent.layout()
+        if layout is None:
             return
-        for i in range(lay.count()):
-            item = lay.itemAt(i)
-            if item and item.widget() is widget:
-                lay.takeAt(i)
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            if item is not None and item.widget() is widget:
+                layout.takeAt(idx)
                 break
         widget.setParent(None)
 
     def _clear_layout_items(self, layout: QHBoxLayout) -> None:
         while layout.count():
             item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+            child = item.widget()
+            if child is not None:
+                child.setParent(None)
 
     def _rebuild_window_controls(self) -> None:
         self._clear_layout_items(self.top_strip_layout)
@@ -562,24 +551,24 @@ class Window(QMainWindow):
             self._clear_layout_items(self.title_bar.tools_layout)
 
         if self.use_native_chrome:
-            for w in self._window_controls:
-                w.setParent(None)
-                self._add_control_to_layout(self.top_strip_layout, w)
+            for widget in self._window_controls:
+                widget.setParent(None)
+                self._add_control_to_layout(self.top_strip_layout, widget)
             self.top_strip_layout.addStretch(1)
-            for w in self._window_right_controls:
-                w.setParent(None)
-                self._add_control_to_layout(self.top_strip_layout, w)
+            for widget in self._window_right_controls:
+                widget.setParent(None)
+                self._add_control_to_layout(self.top_strip_layout, widget)
             return
 
         left_target = self._left_control_target_layout()
-        for w in self._window_controls:
-            w.setParent(None)
-            self._add_control_to_layout(left_target, w)
+        for widget in self._window_controls:
+            widget.setParent(None)
+            self._add_control_to_layout(left_target, widget)
 
         right_target = self._right_control_target_layout()
-        for w in self._window_right_controls:
-            w.setParent(None)
-            self._add_control_to_layout(right_target, w)
+        for widget in self._window_right_controls:
+            widget.setParent(None)
+            self._add_control_to_layout(right_target, widget)
 
     def set_chrome_mode(self, use_native_chrome: bool) -> None:
         if self.use_native_chrome == use_native_chrome:
@@ -598,8 +587,8 @@ class Window(QMainWindow):
             self.title_bar = None
 
         if self._grips_built:
-            for g in self._all_grips():
-                g.deleteLater()
+            for grip in self._all_grips():
+                grip.deleteLater()
             self._grips_built = False
 
         self._configure_window_flags()
@@ -619,7 +608,6 @@ class Window(QMainWindow):
         if was_visible:
             self.hide()
             self.show()
-
             self.setGeometry(geom)
             if was_full:
                 self.showFullScreen()
@@ -648,14 +636,13 @@ class Window(QMainWindow):
         self._rebuild_window_controls()
 
     def clear_window_controls(self) -> None:
-        for w in self._window_controls:
-            self._detach_widget_from_parent_layout(w)
+        for widget in self._window_controls:
+            self._detach_widget_from_parent_layout(widget)
         self._window_controls.clear()
-        for w in self._window_right_controls:
-            self._detach_widget_from_parent_layout(w)
+        for widget in self._window_right_controls:
+            self._detach_widget_from_parent_layout(widget)
         self._window_right_controls.clear()
 
-    # ---------- Public API ----------
     def set_window_title_text(self, text: str) -> None:
         self.setWindowTitle(text)
 
@@ -670,9 +657,9 @@ class Window(QMainWindow):
     def clear_top_strip(self) -> None:
         while self.top_strip_layout.count():
             item = self.top_strip_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+            child = item.widget()
+            if child is not None:
+                child.setParent(None)
 
     def set_content_widget(self, widget: QWidget) -> None:
         self.clear_content()
@@ -681,16 +668,15 @@ class Window(QMainWindow):
     def clear_content(self) -> None:
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+            child = item.widget()
+            if child is not None:
+                child.setParent(None)
 
     def enable_top_strip(self, enabled: bool) -> None:
         self.top_strip.setVisible(enabled)
 
-    # ---------- Events ----------
-    def resizeEvent(self, e: QResizeEvent) -> None:
-        super().resizeEvent(e)
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
         self._layout_grips()
 
     def changeEvent(self, event) -> None:
@@ -701,42 +687,11 @@ class Window(QMainWindow):
             self._layout_grips()
 
 
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-
-    app = QApplication(sys.argv)
-
-    # True  -> native OS titlebar
-    # False -> custom frameless titlebar + grips
-    win = Window(use_native_chrome=False)
-    win.resize(1100, 720)
-    win.setWindowTitle("Dream Editor Window")
-
-    # Controls demo
-    file_btn = QPushButton("File")
-    edit_btn = QPushButton("Edit")
-    run_btn = QPushButton("Run")
-    badge = QPushButton("BG")
-    badge.setFixedHeight(28)
-    toggle = QPushButton("Toggle Chrome")
-    toggle.clicked.connect(lambda: win.set_chrome_mode(not win.use_native_chrome))
-
-    win.add_window_control(file_btn)
-    win.add_window_control(edit_btn)
-    win.add_window_control(run_btn)
-    win.add_window_control(badge)
-    win.add_window_control(toggle)
-
-    editor = QTextEdit()
-    editor.setPlaceholderText("Your editor widget goes here.")
-    win.set_content_widget(editor)
-
-    style_path = Path(__file__).resolve().parent / "styles" / "app.qss"
-    try:
-        app.setStyleSheet(style_path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-
-    win.show()
-    sys.exit(app.exec())
+__all__ = [
+    "EDGE_WIDTH",
+    "start_system_move",
+    "start_system_resize",
+    "EdgeGrip",
+    "CustomTitleBar",
+    "Window",
+]

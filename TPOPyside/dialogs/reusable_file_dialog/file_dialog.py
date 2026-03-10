@@ -5,9 +5,9 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from PySide6.QtCore import QFileInfo, QPoint, QSize, QStandardPaths, Qt, Signal, QEvent, QTimer
+from PySide6.QtCore import QFileInfo, QPoint, QSize, QStandardPaths, Qt, Signal, QEvent, QTimer, QSettings
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -49,10 +50,34 @@ from PySide6.QtWidgets import (
     QFileIconProvider,
 )
 
-from src.ui.custom_dialog import DialogWindow
-from src.ui.widgets.spellcheck_inputs import get_spellcheck_text
-from src.services.file_open_classifier import is_image_extension
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from .config import BackgroundOptions, FileDialogResult, SidebarLocation
+from .persistence import (
+    get_default_starred_paths_settings,
+    load_starred_paths,
+    save_starred_paths,
+)
+
+_IMAGE_SUFFIXES = frozenset({
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".webp",
+})
+
+TextPromptProvider = Callable[[QWidget | None, str, str, str], tuple[str, bool]]
+
+
+def _default_text_prompt(parent: QWidget | None, title: str, label: str, text: str) -> tuple[str, bool]:
+    value, accepted = QInputDialog.getText(parent, str(title or "Input"), str(label or "Value:"), text=str(text or ""))
+    return str(value or ""), bool(accepted)
+
+
+def _is_image_extension(path: str) -> bool:
+    return str(Path(path).suffix or "").strip().lower() in _IMAGE_SUFFIXES
 
 
 class _Columns:
@@ -315,6 +340,8 @@ class FileDialog(DialogWindow):
         *,
         use_native_chrome: bool = False,
         resizable: bool = True,
+        text_prompt_provider: TextPromptProvider | None = None,
+        starred_paths_settings: QSettings | None = None,
     ):
         super().__init__(
             parent=parent,
@@ -368,13 +395,18 @@ class FileDialog(DialogWindow):
         self._background_tint = QColor(0, 0, 0, 0)
         self._stylesheet_path: Path | None = None
         self._extra_qss = ""
+        self._text_prompt_provider = text_prompt_provider or _default_text_prompt
+        self._starred_paths_settings = starred_paths_settings or get_default_starred_paths_settings()
 
         self._build_ui()
         self._connect_signals()
         self._apply_default_stylesheet()
 
         self.setSidebarLocations(sidebar_locations)
-        self.setStarredPaths(starred_paths or [])
+        initial_starred_paths = starred_paths
+        if initial_starred_paths is None:
+            initial_starred_paths = load_starred_paths(self._starred_paths_settings)
+        self.setStarredPaths(initial_starred_paths or [])
 
         if isinstance(name_filters, str):
             self.setNameFilter(name_filters)
@@ -762,8 +794,10 @@ class FileDialog(DialogWindow):
         filter: str = "",
         *,
         starred_paths: Iterable[str | Path] | None = None,
+        starred_paths_settings: QSettings | None = None,
         sidebar_locations: Iterable[SidebarLocation] | None = None,
         background: BackgroundOptions | None = None,
+        text_prompt_provider: TextPromptProvider | None = None,
     ) -> tuple[str, str, list[str]]:
         dialog = FileDialog(
             parent=parent,
@@ -773,6 +807,8 @@ class FileDialog(DialogWindow):
             sidebar_locations=sidebar_locations,
             starred_paths=starred_paths,
             background=background,
+            text_prompt_provider=text_prompt_provider,
+            starred_paths_settings=starred_paths_settings,
         )
         dialog.setFileMode(FileDialog.FileMode.ExistingFile)
         dialog.setAcceptMode(FileDialog.AcceptMode.AcceptOpen)
@@ -789,8 +825,10 @@ class FileDialog(DialogWindow):
         filter: str = "",
         *,
         starred_paths: Iterable[str | Path] | None = None,
+        starred_paths_settings: QSettings | None = None,
         sidebar_locations: Iterable[SidebarLocation] | None = None,
         background: BackgroundOptions | None = None,
+        text_prompt_provider: TextPromptProvider | None = None,
     ) -> tuple[list[str], str, list[str]]:
         dialog = FileDialog(
             parent=parent,
@@ -800,6 +838,8 @@ class FileDialog(DialogWindow):
             sidebar_locations=sidebar_locations,
             starred_paths=starred_paths,
             background=background,
+            text_prompt_provider=text_prompt_provider,
+            starred_paths_settings=starred_paths_settings,
         )
         dialog.setFileMode(FileDialog.FileMode.ExistingFiles)
         dialog.setAcceptMode(FileDialog.AcceptMode.AcceptOpen)
@@ -815,8 +855,10 @@ class FileDialog(DialogWindow):
         filter: str = "",
         *,
         starred_paths: Iterable[str | Path] | None = None,
+        starred_paths_settings: QSettings | None = None,
         sidebar_locations: Iterable[SidebarLocation] | None = None,
         background: BackgroundOptions | None = None,
+        text_prompt_provider: TextPromptProvider | None = None,
     ) -> tuple[str, str, list[str]]:
         dialog = FileDialog(
             parent=parent,
@@ -826,6 +868,8 @@ class FileDialog(DialogWindow):
             sidebar_locations=sidebar_locations,
             starred_paths=starred_paths,
             background=background,
+            text_prompt_provider=text_prompt_provider,
+            starred_paths_settings=starred_paths_settings,
         )
         dialog.setFileMode(FileDialog.FileMode.AnyFile)
         dialog.setAcceptMode(FileDialog.AcceptMode.AcceptSave)
@@ -841,8 +885,10 @@ class FileDialog(DialogWindow):
         directory: str = "",
         *,
         starred_paths: Iterable[str | Path] | None = None,
+        starred_paths_settings: QSettings | None = None,
         sidebar_locations: Iterable[SidebarLocation] | None = None,
         background: BackgroundOptions | None = None,
+        text_prompt_provider: TextPromptProvider | None = None,
     ) -> tuple[str, list[str]]:
         dialog = FileDialog(
             parent=parent,
@@ -851,6 +897,8 @@ class FileDialog(DialogWindow):
             sidebar_locations=sidebar_locations,
             starred_paths=starred_paths,
             background=background,
+            text_prompt_provider=text_prompt_provider,
+            starred_paths_settings=starred_paths_settings,
         )
         dialog.setFileMode(FileDialog.FileMode.Directory)
         dialog.setAcceptMode(FileDialog.AcceptMode.AcceptOpen)
@@ -866,6 +914,10 @@ class FileDialog(DialogWindow):
     def closeEvent(self, event: QCloseEvent):
         self._selected_files = self._selected_files or self._gather_pending_selection()
         super().closeEvent(event)
+
+    def done(self, result: int):
+        save_starred_paths(self._starred_paths_settings, self._starred_paths)
+        super().done(result)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1149,7 +1201,7 @@ class FileDialog(DialogWindow):
 
     def _icon_for_entry(self, entry: Path, normalized_path: str, *, icon_size: int) -> QIcon:
         default_icon = self._icon_provider.icon(QFileInfo(str(entry)))
-        if not entry.is_file() or not is_image_extension(str(entry)):
+        if not entry.is_file() or not _is_image_extension(str(entry)):
             return default_icon
 
         cache_key = self._thumbnail_cache_key(entry, normalized_path, icon_size=icon_size)
@@ -1440,7 +1492,7 @@ class FileDialog(DialogWindow):
     def _new_folder(self):
         if self._in_starred_view:
             return
-        name, ok = get_spellcheck_text(self, "New Folder", "Folder name:", text="New Folder")
+        name, ok = self._text_prompt_provider(self, "New Folder", "Folder name:", "New Folder")
         if not ok:
             return
         clean_name = (name or "").strip() or "New Folder"
@@ -1455,7 +1507,7 @@ class FileDialog(DialogWindow):
     def _new_file(self):
         if self._in_starred_view:
             return
-        name, ok = get_spellcheck_text(self, "New File", "File name:", text="New File.txt")
+        name, ok = self._text_prompt_provider(self, "New File", "File name:", "New File.txt")
         if not ok:
             return
         clean_name = (name or "").strip() or "New File.txt"

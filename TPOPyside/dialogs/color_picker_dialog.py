@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QDialogButtonBox, QVBoxLayout, QWidget
 
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class ColorPickerDialog(DialogWindow):

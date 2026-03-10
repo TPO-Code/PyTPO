@@ -4,7 +4,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from TPOPyside.widgets.markdown_viewer_widget import MDHeadFlags, MarkdownViewerWidget
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class AboutDialog(DialogWindow):

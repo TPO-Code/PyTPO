@@ -1269,6 +1269,10 @@ class CodexAgentDockWidget(QWidget):
         self._plan_log_path: Path | None = None
         self._plan_log_position = 0
         self._plan_start_from_beginning = False
+        self._transcript_watch_active = False
+        self._transcript_log_path: Path | None = None
+        self._transcript_log_position = 0
+        self._transcript_start_from_beginning = False
         self._last_rate_limits_text = _RATE_LIMITS_UNAVAILABLE
         self._last_rate_limits_tooltip = "Rate limit data unavailable"
 
@@ -1288,6 +1292,10 @@ class CodexAgentDockWidget(QWidget):
         self._plan_poll_timer.setInterval(700)
         self._plan_poll_timer.timeout.connect(self._poll_plan_updates)
 
+        self._transcript_poll_timer = QTimer(self)
+        self._transcript_poll_timer.setInterval(250)
+        self._transcript_poll_timer.timeout.connect(self._poll_transcript_updates)
+
         self._build_ui()
         self._wire_signals()
         self._load_settings()
@@ -1297,6 +1305,7 @@ class CodexAgentDockWidget(QWidget):
     def shutdown(self) -> None:
         self._save_timer.stop()
         self._plan_poll_timer.stop()
+        self._transcript_poll_timer.stop()
         self._runner.stop()
         self._reset_attachments_for_new_chat()
 
@@ -1685,6 +1694,102 @@ class CodexAgentDockWidget(QWidget):
             return
         if latest_plan is not None:
             self._set_current_plan(latest_plan)
+
+    def _reset_transcript_tracking(self) -> None:
+        self._transcript_poll_timer.stop()
+        self._transcript_watch_active = False
+        self._transcript_log_path = None
+        self._transcript_log_position = 0
+        self._transcript_start_from_beginning = False
+
+    def _begin_transcript_tracking_for_turn(self) -> None:
+        self._transcript_watch_active = True
+        self._transcript_log_path = None
+        self._transcript_log_position = 0
+        self._transcript_start_from_beginning = not bool(str(self._session_id or "").strip())
+        session_id = str(self._session_id or "").strip()
+        if session_id:
+            log_path = self._session_log_path(session_id)
+            self._transcript_log_path = log_path
+            if log_path is not None:
+                try:
+                    self._transcript_log_position = log_path.stat().st_size
+                except Exception:
+                    self._transcript_log_position = 0
+        self._transcript_poll_timer.start()
+
+    def _ensure_transcript_log_ready(self) -> bool:
+        if not self._transcript_watch_active:
+            return False
+        session_id = str(self._session_id or "").strip()
+        if not session_id:
+            return False
+        if self._transcript_log_path is None:
+            self._transcript_log_path = self._session_log_path(session_id)
+            if self._transcript_log_path is None:
+                return False
+            if self._transcript_start_from_beginning:
+                self._transcript_log_position = 0
+            else:
+                try:
+                    self._transcript_log_position = self._transcript_log_path.stat().st_size
+                except Exception:
+                    self._transcript_log_position = 0
+            self._transcript_start_from_beginning = False
+        return True
+
+    def _apply_live_transcript_item(self, role: str, text: str, stamp: str | None) -> None:
+        normalized_role = str(role or "").strip()
+        if normalized_role == "user":
+            return
+        if normalized_role == "assistant":
+            for raw_line in str(text or "").splitlines():
+                self._capture_changed_files_from_line(raw_line)
+        else:
+            for raw_line in str(text or "").splitlines():
+                self._capture_changed_files_from_line(raw_line)
+        self._add_bubble(normalized_role, text, timestamp=stamp)
+
+    def _poll_transcript_updates(self) -> None:
+        if not self._ensure_transcript_log_ready():
+            return
+        log_path = self._transcript_log_path
+        if log_path is None:
+            return
+        try:
+            file_size = log_path.stat().st_size
+        except Exception:
+            return
+        if self._transcript_log_position > file_size:
+            self._transcript_log_position = 0
+        pending_items: list[tuple[str, str, str | None]] = []
+        try:
+            with log_path.open("r", encoding="utf-8") as handle:
+                if self._transcript_log_position > 0:
+                    handle.seek(self._transcript_log_position)
+                for raw_line in handle:
+                    line = str(raw_line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    if str(data.get("type") or "").strip() != "response_item":
+                        continue
+                    payload = data.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    role, text = self._extract_visible_session_item(payload)
+                    if not role or not text:
+                        continue
+                    stamp = self._format_iso_timestamp(data.get("timestamp"))
+                    pending_items.append((role, text, stamp))
+                self._transcript_log_position = handle.tell()
+        except Exception:
+            return
+        for role, text, stamp in pending_items:
+            self._apply_live_transcript_item(role, text, stamp)
 
     def _schedule_transcript_render(
         self,
@@ -2556,6 +2661,7 @@ class CodexAgentDockWidget(QWidget):
         self._forced_bubble_role_boundary = None
         self._reset_bubble_debug_log()
         self._reset_plan_tracking(clear_panel=True)
+        self._reset_transcript_tracking()
         self._clear_transcript()
         for role, text, stamp in bubbles:
             self._add_bubble(role, text, timestamp=stamp or _timestamp())
@@ -2626,6 +2732,8 @@ class CodexAgentDockWidget(QWidget):
         if find_codex_session(session_id) is not None:
             return
         self._reset_attachments_for_new_chat()
+        self._reset_transcript_tracking()
+        self._reset_plan_tracking(clear_panel=True)
         self._session_id = None
         self._session_project = ""
         self._session_options_signature = None
@@ -3067,6 +3175,13 @@ class CodexAgentDockWidget(QWidget):
         label = f"5h: {five_hour}% remaining | Weekly: {weekly}% remaining"
         self._apply_rate_limits_label(label, "Live rate limits from Codex output", remember=True)
 
+    def _use_stream_transcript_fallback(self) -> bool:
+        if not self._transcript_watch_active:
+            return True
+        if self._ensure_transcript_log_ready():
+            return False
+        return not bool(str(self._session_id or "").strip())
+
     def _consume_prompt_echo_line(self, line: str) -> bool:
         if not self._suppress_prompt_echo:
             return False
@@ -3428,6 +3543,7 @@ class CodexAgentDockWidget(QWidget):
         self._turn_changed_file_set.clear()
         self._reset_bubble_debug_log()
         self._reset_plan_tracking(clear_panel=True)
+        self._reset_transcript_tracking()
         self._clear_transcript()
         self._refresh_recent_sessions_picker(select_session_id=None)
         self._refresh_session_ui()
@@ -3466,6 +3582,7 @@ class CodexAgentDockWidget(QWidget):
             self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
             self._reset_plan_tracking(clear_panel=True)
+            self._reset_transcript_tracking()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
@@ -3490,6 +3607,7 @@ class CodexAgentDockWidget(QWidget):
             self._non_git_warning_shown_for_chat = False
             self._reset_bubble_debug_log()
             self._reset_plan_tracking(clear_panel=True)
+            self._reset_transcript_tracking()
             self._refresh_recent_sessions_picker(select_session_id=None)
             self._refresh_session_ui()
             self._update_rate_limits_label()
@@ -3555,6 +3673,7 @@ class CodexAgentDockWidget(QWidget):
         )
         self._begin_prompt_echo_suppression(prompt)
         self.input_edit.clear()
+        self._begin_transcript_tracking_for_turn()
         self._begin_plan_tracking_for_turn()
         self._runner.start(invocation)
         self._clear_selected_attachments_after_send()
@@ -3711,12 +3830,20 @@ class CodexAgentDockWidget(QWidget):
                     self._plan_log_position = 0
                     self._plan_start_from_beginning = True
                     self._poll_plan_updates()
+                if self._transcript_watch_active:
+                    self._transcript_log_path = None
+                    self._transcript_log_position = 0
+                    self._transcript_start_from_beginning = True
+                    self._poll_transcript_updates()
                 self._schedule_persist_settings()
 
+        self._capture_rate_limits_from_stream_line(clean_text)
+        self._poll_transcript_updates()
         self._stream_partial += str(text or "")
         while "\n" in self._stream_partial:
             line, self._stream_partial = self._stream_partial.split("\n", 1)
-            self._handle_stream_line(line.rstrip("\r"))
+            if self._use_stream_transcript_fallback():
+                self._handle_stream_line(line.rstrip("\r"))
 
     def _on_busy_changed(self, busy: bool) -> None:
         running = bool(busy)
@@ -3863,10 +3990,13 @@ class CodexAgentDockWidget(QWidget):
         )
 
     def _on_exit_code(self, code: int) -> None:
-        if self._stream_partial.strip():
+        if self._stream_partial.strip() and self._use_stream_transcript_fallback():
             self._handle_stream_line(self._stream_partial.rstrip("\r"))
         self._stream_partial = ""
-        self._flush_pending_diff_bubble()
+        if self._use_stream_transcript_fallback():
+            self._flush_pending_diff_bubble()
+        self._poll_transcript_updates()
+        self._reset_transcript_tracking()
         self._poll_plan_updates()
         self._plan_poll_timer.stop()
         self._stream_mode = "assistant"

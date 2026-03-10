@@ -22,7 +22,7 @@ from src.services.project_templates import (
     render_project_template_files,
 )
 from src.settings_manager import SettingsManager
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory
 
 

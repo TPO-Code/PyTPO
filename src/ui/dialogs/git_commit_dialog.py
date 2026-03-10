@@ -32,7 +32,7 @@ from src.git.github_release_service import (
     GitHubReleaseRequest,
     GitHubReleaseService,
 )
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
 from src.ui.widgets.spellcheck_inputs import SpellcheckPlainTextEdit
 

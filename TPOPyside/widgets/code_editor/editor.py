@@ -575,18 +575,14 @@ class CodeEditor(QPlainTextEdit):
                 | Qt.KeyboardModifier.ShiftModifier
                 | Qt.KeyboardModifier.MetaModifier
             )
-            pressed = QKeySequence(int(mods) | int(event.key()))
+            mod_bits = int(getattr(mods, "value", mods))
+            key_bits = int(getattr(event.key(), "value", event.key()))
+            pressed = QKeySequence(mod_bits | key_bits)
         except Exception:
             return False
         return bool(pressed.matches(target) == QKeySequence.SequenceMatch.ExactMatch)
 
     def _handle_editor_shortcut_fallback(self, event: QKeyEvent) -> bool:
-        if (
-            bool(event.modifiers() & Qt.AltModifier)
-            and not bool(event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))
-            and event.key() in (Qt.Key_Return, Qt.Key_Enter)
-        ):
-            return bool(self.request_quick_fix("shortcut"))
         if self._event_matches_action_shortcut(event, "general", "action.find"):
             self.show_find_bar()
             return True
@@ -599,10 +595,6 @@ class CodeEditor(QPlainTextEdit):
         if self._event_matches_action_shortcut(event, "general", "action.trigger_completion"):
             self.request_manual_completion()
             return True
-        if self._event_matches_action_shortcut(event, "general", "action.go_to_definition"):
-            return bool(self.request_definition("shortcut"))
-        if self._event_matches_action_shortcut(event, "general", "action.find_usages"):
-            return bool(self.request_usages("shortcut"))
         return False
 
     def event(self, event):
@@ -4018,19 +4010,6 @@ class CodeEditor(QPlainTextEdit):
 
     def contextMenuEvent(self, event):
         menu = self.createStandardContextMenu()
-        menu.addSeparator()
-
-        act_def = QAction("Go to Definition", menu)
-        act_def.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.go_to_definition")))
-        menu.addAction(act_def)
-
-        act_usages = QAction("Find Usages", menu)
-        act_usages.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.find_usages")))
-        menu.addAction(act_usages)
-        act_quick_fix = QAction("Quick Fix...", menu)
-        act_quick_fix.setShortcut(QKeySequence("Alt+Return"))
-        menu.addAction(act_quick_fix)
-
         pos = event.pos() if hasattr(event, "pos") else event.position().toPoint()
         cursor = self.cursorForPosition(pos)
         symbol_payload = self._symbol_payload_from_cursor(cursor)
@@ -4064,27 +4043,6 @@ class CodeEditor(QPlainTextEdit):
                 )
                 menu.addAction(act_extract_method)
 
-        menu.addSeparator()
-
-        act_ai = QAction("AI Inline Assist", menu)
-        act_ai.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.ai_inline_assist")))
-        act_ai.setToolTip(
-            "Shortcuts: "
-            + ", ".join(
-                filter(
-                    None,
-                    [
-                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist")),
-                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist_ctrl_alt_space")),
-                        self._sequence_to_text(self._action_sequence("general", "action.ai_inline_assist_alt_space")),
-                    ],
-                )
-            )
-        )
-        menu.addAction(act_ai)
-
-        menu.addSeparator()
-
         act_find = QAction("Find", menu)
         act_find.setShortcut(self._sequence_to_qkeysequence(self._action_sequence("general", "action.find")))
         menu.addAction(act_find)
@@ -4116,15 +4074,6 @@ class CodeEditor(QPlainTextEdit):
         self.contextMenuAboutToShow.emit(menu, payload)
 
         chosen = menu.exec(event.globalPos())
-        if chosen is act_def:
-            self.request_definition("context", cursor)
-            return
-        if chosen is act_usages:
-            self.request_usages("context", cursor)
-            return
-        if chosen is act_quick_fix:
-            self.request_quick_fix("context", cursor)
-            return
         if act_rename is not None and chosen is act_rename:
             self.request_rename("context", cursor)
             return
@@ -4133,9 +4082,6 @@ class CodeEditor(QPlainTextEdit):
             return
         if act_extract_method is not None and chosen is act_extract_method:
             self.request_extract_method("context")
-            return
-        if chosen is act_ai:
-            self.aiAssistRequested.emit("manual")
             return
         if chosen is act_find:
             self.show_find_bar()

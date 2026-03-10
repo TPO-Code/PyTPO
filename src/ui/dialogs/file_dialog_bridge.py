@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from PySide6.QtGui import QColor
 
-from src.ui.dialogs.reusable_file_dialog import BackgroundOptions, FileDialog
+from TPOPyside.dialogs.reusable_file_dialog import BackgroundOptions, FileDialog
+from src.ui.widgets.spellcheck_inputs import get_spellcheck_text
 
 
 def _get_setting(manager: Any | None, key: str, default: Any) -> Any:
@@ -50,53 +50,6 @@ def _dialog_background(manager: Any | None) -> BackgroundOptions | None:
     )
 
 
-def _dialog_starred_paths(manager: Any | None) -> list[str]:
-    raw = _get_setting(manager, "file_dialog.starred_paths", [])
-    if not isinstance(raw, list):
-        return []
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in raw:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        try:
-            normalized = str(Path(text).expanduser().resolve())
-        except Exception:
-            normalized = str(Path(text).expanduser())
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(normalized)
-    return result
-
-
-def _save_dialog_starred_paths(manager: Any | None, starred_paths: list[str]) -> None:
-    if manager is None:
-        return
-    clean: list[str] = []
-    seen: set[str] = set()
-    for item in starred_paths:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        try:
-            normalized = str(Path(text).expanduser().resolve())
-        except Exception:
-            normalized = str(Path(text).expanduser())
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        clean.append(normalized)
-    try:
-        manager.set("file_dialog.starred_paths", clean, "ide")
-        manager.save_all(scopes={"ide"}, only_dirty=True)
-    except Exception:
-        return
-
-
 def get_open_file_name(
     *,
     parent: Any | None,
@@ -110,10 +63,9 @@ def get_open_file_name(
         caption=caption,
         directory=directory,
         filter=file_filter,
-        starred_paths=_dialog_starred_paths(manager),
         background=_dialog_background(manager),
+        text_prompt_provider=get_spellcheck_text,
     )
-    _save_dialog_starred_paths(manager, _starred)
     return path, selected_filter
 
 
@@ -130,10 +82,9 @@ def get_open_file_names(
         caption=caption,
         directory=directory,
         filter=file_filter,
-        starred_paths=_dialog_starred_paths(manager),
         background=_dialog_background(manager),
+        text_prompt_provider=get_spellcheck_text,
     )
-    _save_dialog_starred_paths(manager, _starred)
     return selected, selected_filter
 
 
@@ -150,10 +101,9 @@ def get_save_file_name(
         caption=caption,
         directory=directory,
         filter=file_filter,
-        starred_paths=_dialog_starred_paths(manager),
         background=_dialog_background(manager),
+        text_prompt_provider=get_spellcheck_text,
     )
-    _save_dialog_starred_paths(manager, _starred)
     return path, selected_filter
 
 
@@ -168,8 +118,7 @@ def get_existing_directory(
         parent=parent,
         caption=caption,
         directory=directory,
-        starred_paths=_dialog_starred_paths(manager),
         background=_dialog_background(manager),
+        text_prompt_provider=get_spellcheck_text,
     )
-    _save_dialog_starred_paths(manager, _starred)
     return selected

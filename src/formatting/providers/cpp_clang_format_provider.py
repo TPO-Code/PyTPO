@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.formatting.code_formatting import FormatRequest, FormatResult
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 CPP_FORMAT_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx"}

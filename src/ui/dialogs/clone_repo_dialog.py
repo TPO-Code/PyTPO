@@ -32,7 +32,7 @@ from src.git.git_clone_service import (
 from src.git.github_auth import GitHubAuthStore
 from src.git.github_client import GitHubClient, GitHubClientError, GitHubRepo
 from src.settings_manager import SettingsManager
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory
 
 

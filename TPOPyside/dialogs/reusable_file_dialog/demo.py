@@ -16,8 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
-from file_dialog import BackgroundOptions, FileDialog, SidebarLocation
+from . import BackgroundOptions, FileDialog, SidebarLocation
 
 
 STARRED_STATE_FILE = Path(__file__).resolve().with_name(".demo_starred.json")

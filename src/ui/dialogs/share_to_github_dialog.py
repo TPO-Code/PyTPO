@@ -26,7 +26,7 @@ from src.git.github_share_service import (
     GitHubShareResult,
     GitHubShareService,
 )
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.icons.file_icon_provider import FileIconProvider
 from src.ui.widgets.spellcheck_inputs import SpellcheckLineEdit, SpellcheckPlainTextEdit
 

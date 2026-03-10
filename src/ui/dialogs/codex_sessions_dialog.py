@@ -25,7 +25,7 @@ from src.ui.codex_session_store import (
     list_codex_sessions,
     session_preview_text,
 )
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class CodexSessionsDialog(DialogWindow):

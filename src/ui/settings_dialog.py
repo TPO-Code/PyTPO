@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from TPOPyside.dialogs.color_picker_dialog import ColorPickerDialog
 from src.settings_manager import SettingsManager
 from src.settings_models import SettingsScope
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory, get_open_file_name
 from src.ui.dialogs.font_selection_dialog import FontSelectionDialog
 from src.ui.interpreter_utils import (

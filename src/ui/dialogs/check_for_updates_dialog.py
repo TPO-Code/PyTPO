@@ -19,7 +19,7 @@ from src.services.update_service import (
     UpdateService,
     UpdateServiceError,
 )
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class CheckForUpdatesDialog(DialogWindow):

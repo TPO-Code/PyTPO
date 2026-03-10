@@ -65,7 +65,7 @@ from src.ui.controllers import (
     WorkspaceController,
 )
 from src.ui.editor_change_highlight_service import EditorChangeHighlightService
-from src.ui.custom_window import Window
+from TPOPyside.widgets.custom_window import Window
 from src.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from src.ui.dialogs.file_dialog_bridge import get_save_file_name
 from src.ui.dialogs.terminal_commands_dialog import TerminalCommandsDialog

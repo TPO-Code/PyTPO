@@ -24,6 +24,7 @@ if _MONITOR_LAUNCH is not None:
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from src.file_dialog_settings import configure_shared_file_dialog_defaults
 from src.ui.python_ide import PythonIDE, request_project_activation
 from src.settings_manager import SettingsManager
 
@@ -150,6 +151,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app = QApplication([sys.argv[0], *cli_args])
+    configure_shared_file_dialog_defaults()
     #app.setStyle("Fusion")
     app.setStyleSheet("border:0px")
     app.setApplicationName(PythonIDE.APP_NAME)

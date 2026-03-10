@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.git.git_service import GitBranchInfo, GitService, GitServiceError
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 class GitBranchesDialog(DialogWindow):

@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMessageBox, QRadioButton, QVBoxLayout, QWidget
 
 from src.formatting.code_formatting import FormatRequest, FormatResult
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 PYTHON_FORMAT_EXTENSIONS = {".py", ".pyi", ".pyw"}

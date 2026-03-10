@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.keybindings import canonicalize_chord_text, normalize_sequence, sequence_to_text
-from src.ui.custom_dialog import DialogWindow
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 def _manual_key_token_for_event(event: QKeyEvent) -> str:
