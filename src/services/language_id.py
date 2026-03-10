@@ -10,6 +10,7 @@ from pathlib import Path
 
 # Keep ids stable and simple; they can be mapped to provider backends later.
 _EXTENSION_LANGUAGE_IDS: dict[str, str] = {
+    ".txt": "plaintext",
     ".py": "python",
     ".pyw": "python",
     ".pyi": "python",
@@ -56,6 +57,7 @@ _EXTENSION_LANGUAGE_IDS: dict[str, str] = {
     ".tdoc": "tdoc",
     ".todo": "todo",
     ".task": "todo",
+    ".lst": "todo",
 }
 
 _FILENAME_LANGUAGE_IDS: dict[str, str] = {
@@ -81,3 +83,11 @@ def language_id_for_path(file_path: str | None, *, default: str = "plaintext") -
         return _EXTENSION_LANGUAGE_IDS[suffix]
 
     return str(default or "plaintext").strip().lower() or "plaintext"
+
+
+def extension_language_ids() -> dict[str, str]:
+    return dict(_EXTENSION_LANGUAGE_IDS)
+
+
+def filename_language_ids() -> dict[str, str]:
+    return dict(_FILENAME_LANGUAGE_IDS)

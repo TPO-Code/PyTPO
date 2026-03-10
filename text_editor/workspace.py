@@ -327,12 +327,19 @@ class EditorWorkspace(QWidget):
                 return editor
         return None
 
+    def _tabs_for_editor(self, editor: EditorView | None) -> EditorTabs | None:
+        if not isinstance(editor, EditorView):
+            return None
+        for tabs in self.all_tabs():
+            if tabs.indexOf(editor) >= 0:
+                return tabs
+        return None
+
     def _current_tabs(self) -> EditorTabs:
         editor = self.current_editor()
-        if isinstance(editor, EditorView):
-            parent = editor.parentWidget()
-            if isinstance(parent, EditorTabs):
-                return parent
+        tabs = self._tabs_for_editor(editor)
+        if isinstance(tabs, EditorTabs):
+            return tabs
         return self._primary_tabs
 
     def _canonical_path(self, path: Path) -> Path:
@@ -349,9 +356,9 @@ class EditorWorkspace(QWidget):
         return None
 
     def _focus_editor(self, editor: EditorView) -> None:
-        parent = editor.parentWidget()
-        if isinstance(parent, EditorTabs):
-            parent.setCurrentWidget(editor)
+        tabs = self._tabs_for_editor(editor)
+        if isinstance(tabs, EditorTabs):
+            tabs.setCurrentWidget(editor)
         editor.setFocus()
         self.set_active_editor(editor)
 
@@ -427,7 +434,7 @@ class EditorWorkspace(QWidget):
             return True
         if not self._confirm_close_editor(editor, parent):
             return False
-        tabs = editor.parentWidget()
+        tabs = self._tabs_for_editor(editor)
         if not isinstance(tabs, EditorTabs):
             return True
         index = tabs.indexOf(editor)
