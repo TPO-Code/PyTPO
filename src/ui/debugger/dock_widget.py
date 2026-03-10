@@ -37,7 +37,7 @@ class DebuggerDockWidget(QWidget):
         file_path = str(getattr(editor, "file_path", "") or "").strip()
         session_key = file_path or "__current__"
         session_label = file_path.rsplit("/", 1)[-1] if file_path else "Current File"
-        session = self._get_or_create_session(session_key, session_label)
+        session = self._get_or_create_session(session_key, session_label, backend_id="python")
         self.session_tabs.setCurrentWidget(session)
         ok = bool(session.controller.start_current_file_debugging())
         if ok:
@@ -59,7 +59,7 @@ class DebuggerDockWidget(QWidget):
     ) -> bool:
         key = str(session_key or file_path or "").strip()
         label = str(session_label or file_path or "Python debug session").strip()
-        session = self._get_or_create_session(key, label)
+        session = self._get_or_create_session(key, label, backend_id="python")
         self.session_tabs.setCurrentWidget(session)
         ok = bool(
             session.controller.start_script_debugging(
@@ -95,7 +95,7 @@ class DebuggerDockWidget(QWidget):
     ) -> bool:
         key = str(session_key or f"module::{module_name}").strip()
         label = str(session_label or module_name or "Python module debug session").strip()
-        session = self._get_or_create_session(key, label)
+        session = self._get_or_create_session(key, label, backend_id="python")
         self.session_tabs.setCurrentWidget(session)
         ok = bool(
             session.controller.start_module_debugging(
@@ -106,6 +106,48 @@ class DebuggerDockWidget(QWidget):
                 environment=environment,
                 just_my_code=just_my_code,
                 resolved_file_path=resolved_file_path,
+                session_label=label,
+                session_key=key,
+            )
+        )
+        if ok:
+            session.set_session_key(key)
+            session.set_session_label(label)
+            self._sync_session_title(session)
+        self._refresh_active_state()
+        return ok
+
+    def start_executable_debugging(
+        self,
+        *,
+        file_path: str,
+        program_path: str = "",
+        working_directory: str = "",
+        arguments: tuple[str, ...] = (),
+        environment: dict[str, str] | None = None,
+        build_command: tuple[str, ...] = (),
+        target_name: str = "",
+        target_kind: str = "",
+        language: str = "",
+        session_label: str = "",
+        session_key: str = "",
+    ) -> bool:
+        key = str(session_key or program_path or file_path or "").strip()
+        label = str(session_label or file_path or "Native debug session").strip()
+        backend_id = "rust" if str(language or "").strip().lower() == "rust" else "python"
+        session = self._get_or_create_session(key, label, backend_id=backend_id)
+        self.session_tabs.setCurrentWidget(session)
+        ok = bool(
+            session.controller.start_executable_debugging(
+                file_path=file_path,
+                program_path=program_path,
+                working_directory=working_directory,
+                arguments=arguments,
+                environment=environment,
+                build_command=build_command,
+                target_name=target_name,
+                target_kind=target_kind,
+                language=language,
                 session_label=label,
                 session_key=key,
             )
@@ -189,7 +231,7 @@ class DebuggerDockWidget(QWidget):
 
         self.btn_run = QPushButton("Debug Current File")
         self.btn_run.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.btn_run.clicked.connect(self.start_current_file_debugging)
+        self.btn_run.clicked.connect(lambda: self.ide.execution_controller.debug_current_file())
 
         self.btn_step_over = QPushButton("Step Over")
         self.btn_step_over.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -235,7 +277,7 @@ class DebuggerDockWidget(QWidget):
         if controller is not None:
             controller.send_command(action)
 
-    def _get_or_create_session(self, session_key: str, session_label: str) -> DebuggerSessionWidget:
+    def _get_or_create_session(self, session_key: str, session_label: str, *, backend_id: str = "python") -> DebuggerSessionWidget:
         key = str(session_key or "").strip()
         session = self._sessions.get(key)
         if session is not None:
@@ -243,7 +285,13 @@ class DebuggerDockWidget(QWidget):
             self._sync_session_title(session)
             return session
 
-        session = DebuggerSessionWidget(self.ide, session_key=key, session_label=session_label, parent=self.session_tabs)
+        session = DebuggerSessionWidget(
+            self.ide,
+            session_key=key,
+            session_label=session_label,
+            backend_id=backend_id,
+            parent=self.session_tabs,
+        )
         session.set_watch_expressions(self.watch_expressions(), persist=False)
         session.watchExpressionsChanged.connect(self.set_watch_expressions)
         self._sessions[key] = session

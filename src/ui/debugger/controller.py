@@ -132,6 +132,56 @@ class DebuggerController(QObject):
             session_key=str(session_key or target_path),
         )
 
+    def start_executable_debugging(
+        self,
+        *,
+        file_path: str,
+        program_path: str = "",
+        working_directory: str = "",
+        arguments: tuple[str, ...] = (),
+        environment: dict[str, str] | None = None,
+        build_command: tuple[str, ...] = (),
+        target_name: str = "",
+        target_kind: str = "",
+        language: str = "",
+        session_label: str = "",
+        session_key: str = "",
+    ) -> bool:
+        target_path = str(file_path or "").strip()
+        if not target_path and not str(program_path or "").strip() and not tuple(build_command):
+            self.fatalError.emit({"message": "No native debug target was provided.", "traceback": ""})
+            return False
+
+        editor = self._find_open_editor_for_path(target_path) if target_path else None
+        adapter = IdeDebugEditorAdapter(editor) if isinstance(editor, EditorWidget) else None
+        launch_request = DebugLaunchRequest(
+            file_path=target_path,
+            source_text=self._source_text_for_target(target_path, adapter),
+            launch_kind=DebugLaunchKind.EXECUTABLE,
+            program_path=str(program_path or "").strip(),
+            working_directory=str(working_directory or os.path.dirname(target_path) or self.ide.project_root).strip(),
+            arguments=tuple(str(arg) for arg in arguments),
+            environment=dict(environment or {}),
+            build_command=tuple(str(arg) for arg in build_command),
+            target_name=str(target_name or "").strip(),
+            target_kind=str(target_kind or "").strip(),
+            language=str(language or "").strip(),
+            just_my_code=False,
+            use_source_snapshot=False,
+        )
+        return self._start_launch(
+            launch_request,
+            editor=editor,
+            session_label=str(
+                session_label
+                or os.path.basename(target_path or program_path)
+                or target_path
+                or program_path
+                or "Native debug session"
+            ),
+            session_key=str(session_key or program_path or target_path or "native"),
+        )
+
     def start_module_debugging(
         self,
         *,
@@ -183,6 +233,12 @@ class DebuggerController(QObject):
     def send_command(self, action: str, extra: dict | None = None) -> bool:
         return self.backend.send_command(action, extra)
 
+    def send_stdin(self, text: str) -> bool:
+        return self.backend.send_stdin(text)
+
+    def supports_stdin(self) -> bool:
+        return self.backend.supports_stdin()
+
     def set_watch_expressions(self, expressions: list[str]) -> None:
         ordered: list[str] = []
         seen: set[str] = set()
@@ -208,7 +264,7 @@ class DebuggerController(QObject):
         return self.backend.state != ExecutionState.IDLE
 
     def session_label(self) -> str:
-        return str(self._session_label or self._last_session_label or "Python debug session")
+        return str(self._session_label or self._last_session_label or "Debug session")
 
     def session_key(self) -> str:
         return str(self._session_key or self._last_session_key or "")
@@ -320,6 +376,7 @@ class DebuggerController(QObject):
         self.context.file_path = str(launch_request.file_path or "")
         self.context.launch_kind = launch_request.launch_kind
         self.context.module_name = str(launch_request.module_name or "")
+        self.context.program_path = str(launch_request.program_path or "")
         self.context.interpreter = str(launch_request.interpreter or "")
         self.context.working_directory = str(launch_request.working_directory or "")
         self.context.arguments = tuple(str(arg) for arg in launch_request.arguments)

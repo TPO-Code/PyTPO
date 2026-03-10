@@ -18,6 +18,7 @@ class ExecutionState(Enum):
 class DebugLaunchKind(Enum):
     SCRIPT = "script"
     MODULE = "module"
+    EXECUTABLE = "executable"
 
 
 @dataclass(slots=True)
@@ -27,9 +28,14 @@ class DebugLaunchRequest:
     launch_kind: DebugLaunchKind = DebugLaunchKind.SCRIPT
     module_name: str = ""
     interpreter: str = ""
+    program_path: str = ""
     working_directory: str = ""
     arguments: tuple[str, ...] = field(default_factory=tuple)
     environment: dict[str, str] = field(default_factory=dict)
+    build_command: tuple[str, ...] = field(default_factory=tuple)
+    target_name: str = ""
+    target_kind: str = ""
+    language: str = ""
     just_my_code: bool = True
     use_source_snapshot: bool = False
 
@@ -76,3 +82,9 @@ class DebuggerBackend(QObject):
     @abstractmethod
     def send_command(self, action: str, extra: dict | None = None) -> bool:
         raise NotImplementedError
+
+    def send_stdin(self, text: str) -> bool:
+        return False
+
+    def supports_stdin(self) -> bool:
+        return False

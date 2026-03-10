@@ -331,6 +331,7 @@ class TerminalWidget(QtWidgets.QWidget):
     def __init__(
         self,
         shell=None,
+        argv: Optional[Sequence[str]] = None,
         login: bool = False,
         cwd=None,
         env=None,
@@ -338,6 +339,7 @@ class TerminalWidget(QtWidgets.QWidget):
         history_lines=5000,
         quick_commands: Optional[List[Dict]] = None,
         templates: Optional[List[Dict]] = None,
+        show_toolbar: bool = True,
     ):
         if shell is None:
             # Prefer the user's configured login shell (reflects `chsh`), even if we inherited stale env.
@@ -383,11 +385,15 @@ class TerminalWidget(QtWidgets.QWidget):
             env2["SHELL"] = shell  # many tools key off this
             if env:
                 env2.update(env)
-    
+
+            exec_argv = [str(part) for part in (argv or []) if str(part)]
+            if exec_argv:
+                os.execvpe(exec_argv[0], exec_argv, env2)
+
             # Always interactive; optionally also login (Tilix-like default is interactive, non-login)
-            argv = [shell] + (["-l", "i"] if login else []) + ["-i"]
-    
-            os.execvpe(shell, argv, env2)
+            exec_argv = [shell] + (["-l", "i"] if login else []) + ["-i"]
+
+            os.execvpe(shell, exec_argv, env2)
     
         self._pid, self._fd = pid, fd
     
@@ -436,8 +442,9 @@ class TerminalWidget(QtWidgets.QWidget):
         self._edit_commands_callback: Optional[Callable[[], None]] = None
     
         # UI: toolbar + context menu + Run button
-        self._build_toolbar()
-        self._build_run_button()
+        if show_toolbar:
+            self._build_toolbar()
+            self._build_run_button()
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         

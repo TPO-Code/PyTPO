@@ -11,6 +11,7 @@ class DebugSessionContext:
     file_path: str = ""
     launch_kind: DebugLaunchKind = DebugLaunchKind.SCRIPT
     module_name: str = ""
+    program_path: str = ""
     working_directory: str = ""
     interpreter: str = ""
     arguments: tuple[str, ...] = field(default_factory=tuple)

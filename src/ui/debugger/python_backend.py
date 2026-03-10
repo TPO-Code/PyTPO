@@ -338,7 +338,7 @@ class PythonDebuggerBackend(DebuggerBackend):
         super().__init__(parent)
         self.ide = ide
         self._backend_name = self._resolve_backend_name(ide=ide, preferred_backend=preferred_backend)
-        self._impl = self._create_backend(self._backend_name)
+        self._impl = self._create_backend(self._backend_name, ide=ide, io_host=parent)
         self._impl.setParent(self)
         self._forward_backend_signals()
 
@@ -392,11 +392,11 @@ class PythonDebuggerBackend(DebuggerBackend):
         return "bdb"
 
     @staticmethod
-    def _create_backend(name: str) -> DebuggerBackend:
+    def _create_backend(name: str, *, ide=None, io_host=None) -> DebuggerBackend:
         if str(name or "").strip().lower() == "debugpy":
             from .debugpy_backend import DebugpyPythonDebuggerBackend
 
-            return DebugpyPythonDebuggerBackend()
+            return DebugpyPythonDebuggerBackend(ide=ide, io_host=io_host)
         if str(name or "").strip().lower() == "bdb":
             return BdbPythonDebuggerBackend()
         return BdbPythonDebuggerBackend()

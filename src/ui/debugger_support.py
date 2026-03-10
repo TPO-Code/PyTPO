@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DEBUGGER_BREAKPOINT_SUFFIXES: frozenset[str] = frozenset({".py"})
+DEBUGGER_BREAKPOINT_SUFFIXES: frozenset[str] = frozenset({".py", ".rs"})
 
 
 def debugger_breakpoints_supported_for_path(file_path: str | None) -> bool:

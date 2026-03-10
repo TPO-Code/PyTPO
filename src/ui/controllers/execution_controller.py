@@ -10,7 +10,8 @@ import shlex
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QToolButton
 
-from src.lang_rust.cargo_discovery import discover_workspace_root_for_file
+from src.lang_rust.cargo_discovery import discover_workspace_root_for_file, find_nearest_cargo_project_dir
+from src.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
 from src.ui.widgets.terminal_widget import TerminalWidget
 
 _CPP_RUNNABLE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx"}
@@ -51,7 +52,7 @@ class ExecutionController:
         return {
             "kind": "debugger",
             "key": str(session.session_key() or "__debugger__"),
-            "label": str(session.session_label() or "Python debug session"),
+            "label": str(session.session_label() or "debug session"),
         }
 
     def _running_debugger_sessions(self) -> list[dict]:
@@ -248,7 +249,16 @@ class ExecutionController:
         return bool(file_path and self._is_python_runnable_file(file_path))
 
     def can_debug_current_file(self) -> bool:
-        return self.can_run_python_current_file()
+        file_path = self.current_editor_file_path()
+        if file_path and self._is_python_runnable_file(file_path):
+            return True
+        if file_path and self._is_rust_runnable_file(file_path):
+            return bool(self.rust_debugger_available() and self._resolve_rust_debug_directory(file_path))
+        return False
+
+    @staticmethod
+    def rust_debugger_available() -> bool:
+        return bool(LldbDapDebuggerBackend.is_available())
 
     def can_run_rust_current_context(self) -> bool:
         current_file = self.current_editor_file_path()
@@ -265,6 +275,18 @@ class ExecutionController:
         if self.has_python_run_configs():
             return True
         return self.can_debug_current_file()
+
+    def can_offer_rust_debug_setup(self) -> bool:
+        if not self.rust_debugger_available():
+            return False
+        if self.has_rust_run_configs():
+            return True
+        file_path = self.current_editor_file_path()
+        return bool(
+            file_path
+            and self._is_rust_runnable_file(file_path)
+            and self._resolve_rust_debug_directory(file_path)
+        )
 
     def can_offer_rust_run_setup(self) -> bool:
         if self.has_rust_run_configs():
@@ -807,6 +829,21 @@ class ExecutionController:
         manifest = os.path.join(root, "Cargo.toml")
         return root if os.path.isfile(manifest) else ""
 
+    def _resolve_rust_debug_directory(self, target_path: str) -> str:
+        cpath = self._canonical_path(target_path)
+        if not cpath:
+            return ""
+        root = find_nearest_cargo_project_dir(
+            file_path=cpath,
+            project_root=self.project_root,
+            canonicalize=self._canonical_path,
+            path_has_prefix=self._path_has_prefix,
+        )
+        root = self._canonical_path(root) if root else ""
+        if root and os.path.isfile(os.path.join(root, "Cargo.toml")):
+            return root
+        return self._resolve_rust_workspace_root(cpath)
+
     def _resolve_rust_run_directory(self, *, working_dir_spec: str, context_file: str) -> str:
         spec = str(working_dir_spec or "").strip()
         if spec:
@@ -817,6 +854,71 @@ class ExecutionController:
 
         context_target = str(context_file or "").strip() or self.project_root
         return self._resolve_rust_workspace_root(context_target)
+
+    def _rust_debug_target_for_file(self, file_path: str, run_in: str) -> tuple[str, str]:
+        path = self._canonical_path(file_path) if str(file_path or "").strip() else ""
+        if not path or not run_in:
+            return "", ""
+        try:
+            rel_path = os.path.relpath(path, run_in)
+        except Exception:
+            rel_path = path
+        rel_norm = rel_path.replace("\\", "/")
+        if rel_norm.startswith("src/bin/") and rel_norm.endswith(".rs"):
+            return os.path.splitext(os.path.basename(rel_norm))[0], "bin"
+        if rel_norm == "src/main.rs":
+            return self._cargo_package_name(os.path.join(run_in, "Cargo.toml")), "bin"
+        return "", ""
+
+    @staticmethod
+    def _cargo_package_name(manifest_path: str) -> str:
+        path = str(manifest_path or "").strip()
+        if not path or not os.path.isfile(path):
+            return ""
+        in_package = False
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    line = str(raw or "").strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("[") and line.endswith("]"):
+                        in_package = line.lower() == "[package]"
+                        continue
+                    if in_package and line.lower().startswith("name"):
+                        _key, _eq, value = line.partition("=")
+                        return str(value or "").strip().strip('"').strip("'")
+        except Exception:
+            return ""
+        return ""
+
+    def _build_rust_debug_build_command(
+        self,
+        *,
+        package: str = "",
+        binary: str = "",
+        profile: str = "debug",
+        features: str = "",
+        command_type: str = "run",
+    ) -> tuple[str, ...]:
+        parts = ["cargo", "build", "--message-format=json-render-diagnostics"]
+        package_text = str(package or "").strip()
+        binary_text = str(binary or "").strip()
+        feature_text = str(features or "").strip()
+        profile_text = str(profile or "debug").strip().lower()
+        command_text = str(command_type or "run").strip().lower()
+        if package_text:
+            parts.extend(["--package", package_text])
+        if binary_text:
+            parts.extend(["--bin", binary_text])
+        if feature_text:
+            parts.extend(["--features", feature_text])
+        if profile_text == "release":
+            parts.append("--release")
+        if command_text == "test":
+            parts[1] = "test"
+            parts.append("--no-run")
+        return tuple(parts)
 
     def _build_cargo_command_from_config(self, cfg: dict) -> str:
         command_type = str(cfg.get("command_type") or "run").strip().lower()
@@ -901,10 +1003,11 @@ class ExecutionController:
         if not run_in:
             self.ide.statusBar().showMessage("No Cargo.toml found for this Rust file.", 2800)
             return False
+        command = self._default_rust_run_command()
 
         command_block = self._build_shell_run_block(
             run_in=run_in,
-            command="cargo run",
+            command=command,
             env_assignments=[],
             require_cargo=True,
         )
@@ -920,10 +1023,14 @@ class ExecutionController:
         if self._run_config().get("focus_output_on_run", True):
             self.dock_terminal.raise_()
         self.ide.statusBar().showMessage(
-            f"{status_prefix} cargo run ({os.path.basename(run_in) or run_in})",
+            f"{status_prefix} {command} ({os.path.basename(run_in) or run_in})",
             2200,
         )
         return True
+
+    @staticmethod
+    def _default_rust_run_command() -> str:
+        return "cargo run --release"
 
     def build_current_file(self):
         ed = self.current_editor()
@@ -1284,12 +1391,16 @@ class ExecutionController:
         if debugger is None:
             self.ide.statusBar().showMessage("Debugger is not available.", 2200)
             return False
-        ok = bool(debugger.start_current_file_debugging())
+        current_file = self.current_editor_file_path()
+        if current_file and self._is_rust_runnable_file(current_file):
+            ok = bool(self._start_debugger_for_rust_current_file(current_file))
+        else:
+            ok = bool(debugger.start_current_file_debugging())
         if ok:
             self._show_debugger_dock()
             session = debugger.active_session()
             self.ide.statusBar().showMessage(
-                f"Debugging {session.session_label() if session is not None else 'Python file'}",
+                f"Debugging {session.session_label() if session is not None else 'current file'}",
                 1800,
             )
             self._update_toolbar_run_controls()
@@ -1437,6 +1548,151 @@ class ExecutionController:
             self._show_debugger_dock()
             self._update_toolbar_run_controls()
         return ok
+
+    def _start_debugger_for_executable(
+        self,
+        *,
+        file_path: str,
+        program_path: str = "",
+        working_directory: str,
+        arguments: tuple[str, ...],
+        environment: dict[str, str],
+        build_command: tuple[str, ...],
+        target_name: str,
+        target_kind: str,
+        language: str,
+        session_label: str,
+        session_key: str,
+    ) -> bool:
+        debugger = self._debugger_widget()
+        if debugger is None:
+            self.ide.statusBar().showMessage("Debugger is not available.", 2200)
+            return False
+        ok = bool(
+            debugger.start_executable_debugging(
+                file_path=file_path,
+                program_path=program_path,
+                working_directory=working_directory,
+                arguments=arguments,
+                environment=environment,
+                build_command=build_command,
+                target_name=target_name,
+                target_kind=target_kind,
+                language=language,
+                session_label=session_label,
+                session_key=session_key,
+            )
+        )
+        if ok:
+            self._show_debugger_dock()
+            self._update_toolbar_run_controls()
+        return ok
+
+    def _start_debugger_for_rust_current_file(self, file_path: str) -> bool:
+        if not LldbDapDebuggerBackend.is_available():
+            self.ide.statusBar().showMessage(
+                "Rust debugging requires an LLDB debug adapter in PATH (lldb-dap or lldb-vscode).",
+                3200,
+            )
+            return False
+        if not self._save_all_dirty_editors_for_run():
+            return False
+        current_path = self._canonical_path(file_path)
+        debug_in = self._resolve_rust_debug_directory(current_path)
+        if not debug_in:
+            self.ide.statusBar().showMessage("No Cargo.toml found for this Rust file.", 2800)
+            return False
+        target_name, target_kind = self._rust_debug_target_for_file(current_path, debug_in)
+        build_command = self._build_rust_debug_build_command(
+            binary=target_name if target_kind == "bin" else "",
+            command_type="run",
+        )
+        return self._start_debugger_for_executable(
+            file_path=current_path,
+            working_directory=debug_in,
+            arguments=(),
+            environment={},
+            build_command=build_command,
+            target_name=target_name,
+            target_kind=target_kind or "bin",
+            language="rust",
+            session_label=os.path.basename(debug_in) or os.path.basename(current_path) or current_path,
+            session_key=f"{debug_in}::rustdbg::current",
+        )
+
+    def debug_named_rust_config(self, config_name: str, *, set_active: bool = False) -> bool:
+        name = str(config_name or "").strip()
+        if not name:
+            return False
+        if not LldbDapDebuggerBackend.is_available():
+            self.ide.statusBar().showMessage(
+                "Rust debugging requires an LLDB debug adapter in PATH (lldb-dap or lldb-vscode).",
+                3200,
+            )
+            return False
+        chosen = None
+        for cfg in self._normalized_rust_run_configs():
+            if str(cfg.get("name") or "").strip().lower() == name.lower():
+                chosen = cfg
+                break
+        if not isinstance(chosen, dict):
+            self.ide.statusBar().showMessage(f"Cargo config not found: {name}", 2200)
+            return False
+        command_type = str(chosen.get("command_type") or "run").strip().lower()
+        if command_type not in {"run", "test", "build"}:
+            self.ide.statusBar().showMessage(
+                f"Cargo config '{name}' cannot be debugged because custom cargo commands are not supported.",
+                3200,
+            )
+            return False
+        if not self._save_all_dirty_editors_for_run():
+            return False
+        current_file = self._current_editor_path_for_rust_context()
+        run_in = self._resolve_rust_run_directory(
+            working_dir_spec=str(chosen.get("working_dir") or "").strip(),
+            context_file=current_file,
+        )
+        if not run_in:
+            self.ide.statusBar().showMessage("No Cargo.toml found for the selected Rust debug target.", 2800)
+            return False
+        args = self._split_args(str(chosen.get("args") or ""))
+        if args is None:
+            self.ide.statusBar().showMessage(f"Cargo config '{name}' has invalid shell-style arguments.", 2800)
+            return False
+        runtime_args = tuple(args)
+        if command_type == "test":
+            filter_args = self._split_args(str(chosen.get("test_filter") or ""))
+            if filter_args is None:
+                self.ide.statusBar().showMessage(f"Cargo config '{name}' has invalid test filter arguments.", 2800)
+                return False
+            runtime_args = tuple(filter_args) + tuple(args)
+        target_name = str(chosen.get("binary") or "").strip() or str(chosen.get("package") or "").strip()
+        target_kind = "test" if command_type == "test" else "bin"
+        build_command = self._build_rust_debug_build_command(
+            package=str(chosen.get("package") or "").strip(),
+            binary=str(chosen.get("binary") or "").strip(),
+            profile=str(chosen.get("profile") or "debug"),
+            features=str(chosen.get("features") or "").strip(),
+            command_type=command_type,
+        )
+        ok = self._start_debugger_for_executable(
+            file_path=current_file or os.path.join(run_in, "src", "main.rs"),
+            working_directory=run_in,
+            arguments=runtime_args,
+            environment=dict(self._normalize_env_assignments(chosen.get("env"))),
+            build_command=build_command,
+            target_name=target_name,
+            target_kind=target_kind,
+            language="rust",
+            session_label=f"Cargo: {name}",
+            session_key=f"{run_in}::rustdbg::{name}",
+        )
+        if not ok:
+            return False
+        if set_active:
+            self.set_active_rust_run_config(name)
+        self.ide.statusBar().showMessage(f"Debugging Cargo config '{name}'", 2400)
+        return True
 
     def _resolve_python_module_entry_path(self, module_name: str, working_directory: str) -> str:
         module = str(module_name or "").strip()

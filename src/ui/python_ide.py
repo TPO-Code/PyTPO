@@ -2259,9 +2259,10 @@ class PythonIDE(Window):
         has_active_python_run_config = bool(
             project_loaded and self.execution_controller.active_python_run_config_name()
         )
+        rust_debug_available = bool(project_loaded and self.execution_controller.rust_debugger_available())
         has_rust_run_configs = bool(project_loaded and self.execution_controller.has_rust_run_configs())
         has_active_rust_run_config = bool(
-            project_loaded and self.execution_controller.active_rust_run_config_name()
+            project_loaded and rust_debug_available and self.execution_controller.active_rust_run_config_name()
         )
         extract_language = (
             str(self.language_intelligence_controller._effective_refactor_language(active_editor) or "").strip().lower()
@@ -2291,7 +2292,7 @@ class PythonIDE(Window):
             )
         if self._act_debug_current is not None:
             self._act_debug_current.setEnabled(
-                project_loaded and (can_debug_current_file or has_active_python_run_config)
+                project_loaded and (can_debug_current_file or has_active_python_run_config or has_active_rust_run_config)
             )
         if self._act_rerun_current is not None:
             self._act_rerun_current.setEnabled(project_loaded and (has_runnable or running_count > 0))
@@ -2339,6 +2340,7 @@ class PythonIDE(Window):
                 and (
                     can_debug_current_file
                     or (has_python_run_configs and has_active_python_run_config)
+                    or (has_rust_run_configs and has_active_rust_run_config)
                 )
             )
             self._toolbar_debug_btn.setEnabled(can_toolbar_debug)
@@ -6463,6 +6465,44 @@ class PythonIDE(Window):
             manage = menu.addAction("Manage Rust Configurations...")
             manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
 
+    def _populate_cargo_debug_menu(
+        self,
+        menu: QMenu,
+        *,
+        include_current_entry: bool = True,
+        include_manage_entry: bool = True,
+    ) -> None:
+        menu.clear()
+        active_name = self.execution_controller.active_rust_run_config_name()
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+
+        if include_current_entry and self.execution_controller.can_debug_current_file():
+            debug_current = menu.addAction("Debug Rust Project (Current Context)")
+            debug_current.setCheckable(True)
+            debug_current.setChecked(not active_name)
+            debug_current.triggered.connect(lambda _checked=False: self.execution_controller.debug_current_file())
+            group.addAction(debug_current)
+
+        names = self.execution_controller.rust_run_config_names()
+        if names:
+            if include_current_entry and self.execution_controller.can_debug_current_file():
+                menu.addSeparator()
+            for name in names:
+                action = menu.addAction(name)
+                action.setCheckable(True)
+                action.setChecked(name.lower() == active_name.lower())
+                action.triggered.connect(
+                    lambda checked=False, cfg_name=name: self.debug_cargo_config(cfg_name, set_active=True)
+                )
+                group.addAction(action)
+
+        if include_manage_entry:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            manage = menu.addAction("Manage Rust Configurations...")
+            manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
+
     def populate_python_run_config_menu(self) -> None:
         menu = self._run_python_config_menu
         if menu is None:
@@ -6539,7 +6579,10 @@ class PythonIDE(Window):
 
         can_debug_current = self.execution_controller.can_debug_current_file()
         has_python_configs = self.execution_controller.has_python_run_configs()
+        has_rust_configs = self.execution_controller.has_rust_run_configs()
+        rust_debug_available = self.execution_controller.rust_debugger_available()
         show_python_setup = self.execution_controller.can_offer_python_debug_setup() and not has_python_configs
+        show_rust_setup = self.execution_controller.can_offer_rust_debug_setup() and not has_rust_configs
 
         if can_debug_current:
             action = menu.addAction("Debug Current File")
@@ -6560,6 +6603,21 @@ class PythonIDE(Window):
             action = menu.addAction("Set Up Python Run Configurations...")
             action.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
 
+        if rust_debug_available and has_rust_configs:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            rust_menu = menu.addMenu("Rust Configurations")
+            self._populate_cargo_debug_menu(
+                rust_menu,
+                include_current_entry=False,
+                include_manage_entry=True,
+            )
+        elif show_rust_setup:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            action = menu.addAction("Set Up Rust Run Configurations...")
+            action.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
+
         if menu.isEmpty():
             empty = menu.addAction("No Debug Targets Available")
             empty.setEnabled(False)
@@ -6569,6 +6627,9 @@ class PythonIDE(Window):
 
     def debug_python_config(self, config_name: str, *, set_active: bool = False) -> None:
         self.execution_controller.debug_named_python_config(config_name, set_active=bool(set_active))
+
+    def debug_cargo_config(self, config_name: str, *, set_active: bool = False) -> None:
+        self.execution_controller.debug_named_rust_config(config_name, set_active=bool(set_active))
 
     def _set_python_run_target_current_file(self, *, run_now: bool = False) -> None:
         if not self.execution_controller.set_active_python_run_config(""):
@@ -6611,6 +6672,10 @@ class PythonIDE(Window):
         active_config = self.execution_controller.active_python_debug_config_name()
         if active_config:
             self.execution_controller.debug_named_python_config(active_config, set_active=False)
+            return
+        active_rust = self.execution_controller.active_rust_run_config_name()
+        if active_rust:
+            self.execution_controller.debug_named_rust_config(active_rust, set_active=False)
             return
         if self.execution_controller.can_debug_current_file():
             self.execution_controller.debug_current_file()

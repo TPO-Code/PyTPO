@@ -13,14 +13,18 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEventLoop, QProcess, QTimer
+from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QProcess, QTimer
 
 from src.ui.debugger.breakpoint_store import DebuggerBreakpointStore
 from src.ui.debugger.backend import DebugLaunchKind, DebugLaunchRequest, ExecutionState
 from src.ui.debugger.debugpy_backend import DebugpyPythonDebuggerBackend
+from src.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
 from src.ui.debugger.python_backend import BdbPythonDebuggerBackend, DEBUGGER_HARNESS_CODE, normalize_breakpoint_map
 from src.ui.debugger.python_backend import PythonDebuggerBackend
 from src.ui.debugger.session_widget import DebuggerSessionWidget
+from src.ui.debugger.terminal_bridge import DebugTerminalBridge
+from src.ui.debugger_support import debugger_breakpoints_supported_for_path
+from src.ui.console_run_manager import ConsoleRunManager
 from src.ui.controllers.execution_controller import ExecutionController
 
 
@@ -55,6 +59,8 @@ class _FakeIde:
     def __init__(self) -> None:
         self.settings_manager = _FakeSettingsManager()
         self._status_messages: list[tuple[str, int]] = []
+        self.console_run_manager = None
+        self.execution_controller = None
 
     @staticmethod
     def _canonical_path(path: str) -> str:
@@ -68,6 +74,69 @@ class _FakeIde:
 
     def _refresh_runtime_settings_from_manager(self) -> None:
         return None
+
+
+class _FakeDebugIoHost:
+    def __init__(self) -> None:
+        self.launches: list[dict] = []
+        self.inputs: list[str] = []
+        self.started = False
+
+    def start_debug_io_terminal(
+        self,
+        *,
+        label: str,
+        cwd: str,
+        argv: list[str],
+        env: dict[str, str | None],
+        start_stopped: bool = False,
+    ) -> int:
+        self.launches.append(
+            {
+                "label": str(label),
+                "cwd": str(cwd),
+                "argv": list(argv),
+                "env": dict(env),
+                "start_stopped": bool(start_stopped),
+            }
+        )
+        self.started = True
+        return 4321
+
+    def send_debug_io_input(self, text: str) -> bool:
+        if not self.started:
+            return False
+        self.inputs.append(str(text))
+        return True
+
+    def debug_io_terminal_available(self) -> bool:
+        return self.started
+
+
+class _FakeSessionHost(QObject):
+    def start_debug_io_terminal(self, *, label: str, cwd: str, argv: list[str], env: dict[str, str | None], start_stopped: bool = False) -> int:
+        return 1
+
+    def send_debug_io_input(self, text: str) -> bool:
+        return True
+
+    def debug_io_terminal_available(self) -> bool:
+        return True
+
+
+class _CapturingConsoleRunManager:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def run_custom_command(self, *, file_key: str, label: str, run_in: str, command_block: str) -> None:
+        self.calls.append(
+            {
+                "file_key": str(file_key),
+                "label": str(label),
+                "run_in": str(run_in),
+                "command_block": str(command_block),
+            }
+        )
 
 
 def _qt_app() -> QCoreApplication:
@@ -127,6 +196,10 @@ def _wait_for_signal(signal, *, predicate=None, timeout_ms: int = 5000):
 
 
 class DebuggerBreakpointStoreTests(unittest.TestCase):
+    def test_debugger_support_accepts_rust_paths(self) -> None:
+        self.assertTrue(debugger_breakpoints_supported_for_path("/tmp/example.rs"))
+        self.assertFalse(debugger_breakpoints_supported_for_path("/tmp/example.txt"))
+
     def test_breakpoint_store_reads_legacy_and_rich_specs(self) -> None:
         ide = _FakeIde()
         target = ide._canonical_path("example.py")
@@ -324,6 +397,108 @@ class PythonDebuggerBackendUnitTests(unittest.TestCase):
                 os.path.normcase(os.path.abspath(tmpdir)),
             )
 
+    def test_build_rust_debug_build_command_uses_json_output(self) -> None:
+        controller = ExecutionController.__new__(ExecutionController)
+        command = ExecutionController._build_rust_debug_build_command(
+            controller,
+            package="demo_pkg",
+            binary="demo_bin",
+            profile="release",
+            features="serde",
+            command_type="test",
+        )
+        self.assertEqual(
+            command,
+            (
+                "cargo",
+                "test",
+                "--message-format=json-render-diagnostics",
+                "--package",
+                "demo_pkg",
+                "--bin",
+                "demo_bin",
+                "--features",
+                "serde",
+                "--release",
+                "--no-run",
+            ),
+        )
+
+    def test_wrapper_passes_session_io_host_into_debugpy_backend(self) -> None:
+        host = _FakeSessionHost()
+        with mock.patch.object(PythonDebuggerBackend, "_debugpy_available", return_value=True):
+            with mock.patch.object(PythonDebuggerBackend, "_debugpy_ready", return_value=True):
+                backend = PythonDebuggerBackend(parent=host, ide=_FakeIde(), preferred_backend="debugpy")
+        self.assertEqual(backend.backend_name(), "debugpy")
+        bridge = getattr(backend._impl, "_terminal_bridge", None)
+        self.assertIsNotNone(bridge)
+        self.assertIs(getattr(bridge, "host", None), host)
+
+
+class LldbDapBackendUnitTests(unittest.TestCase):
+    def test_adapter_path_accepts_versioned_lldb_vscode_binary(self) -> None:
+        with mock.patch.object(LldbDapDebuggerBackend, "_adapter_candidates", return_value=("lldb-dap", "lldb-vscode-14")):
+            with mock.patch("src.ui.debugger.lldb_dap_backend.shutil.which") as which_mock:
+                which_mock.side_effect = lambda name: {"lldb-dap": "", "lldb-vscode-14": "/usr/bin/lldb-vscode-14"}.get(name, "")
+                self.assertEqual(LldbDapDebuggerBackend.adapter_path(), "/usr/bin/lldb-vscode-14")
+
+    def test_parse_cargo_json_stream_collects_rendered_messages_and_artifacts(self) -> None:
+        stream = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "reason": "compiler-message",
+                        "message": {"rendered": "warning: sample warning\n --> src/main.rs:1:1"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "reason": "compiler-artifact",
+                        "executable": "/tmp/target/debug/demo",
+                        "target": {"name": "demo", "kind": ["bin"]},
+                    }
+                ),
+            ]
+        )
+        artifacts, rendered = LldbDapDebuggerBackend._parse_cargo_json_stream(stream)
+
+        self.assertEqual(
+            [(item.executable, item.target_name, item.target_kinds) for item in artifacts],
+            [("/tmp/target/debug/demo", "demo", ("bin",))],
+        )
+        self.assertEqual(rendered, ["warning: sample warning", " --> src/main.rs:1:1"])
+
+    def test_select_artifact_path_prefers_requested_name_and_kind(self) -> None:
+        artifacts = [
+            LldbDapDebuggerBackend._parse_cargo_json_stream(
+                json.dumps(
+                    {
+                        "reason": "compiler-artifact",
+                        "executable": "/tmp/target/debug/demo",
+                        "target": {"name": "demo", "kind": ["bin"]},
+                    }
+                )
+            )[0][0],
+            LldbDapDebuggerBackend._parse_cargo_json_stream(
+                json.dumps(
+                    {
+                        "reason": "compiler-artifact",
+                        "executable": "/tmp/target/debug/deps/demo_tests",
+                        "target": {"name": "demo", "kind": ["test"]},
+                    }
+                )
+            )[0][0],
+        ]
+
+        self.assertEqual(
+            LldbDapDebuggerBackend._select_artifact_path(
+                artifacts,
+                target_name="demo",
+                target_kind="test",
+            ),
+            "/tmp/target/debug/deps/demo_tests",
+        )
+
     def test_launch_roots_are_deduplicated_and_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             package_dir = Path(tmpdir) / "pkg"
@@ -374,6 +549,30 @@ class PythonDebuggerBackendUnitTests(unittest.TestCase):
             backend = PythonDebuggerBackend(ide=_FakeIde(), preferred_backend="debugpy")
         self.assertEqual(backend.backend_name(), "debugpy")
 
+    def test_lldb_backend_uses_legacy_run_in_terminal_flag_for_lldb_vscode(self) -> None:
+        host = _FakeDebugIoHost()
+        backend = LldbDapDebuggerBackend()
+        backend._terminal_bridge = DebugTerminalBridge(host)
+        backend._adapter_path = "/usr/bin/lldb-vscode-14"
+        backend._launch_request = DebugLaunchRequest(
+            file_path="/tmp/main.rs",
+            source_text="",
+            launch_kind=DebugLaunchKind.EXECUTABLE,
+            program_path="/tmp/target/debug/demo",
+            working_directory="/tmp",
+        )
+        calls: list[tuple[str, dict]] = []
+        backend._send_request = lambda command, arguments, callback: calls.append((command, dict(arguments))) or 1  # type: ignore[method-assign]
+        backend._send_launch_request()
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0], "attach")
+        self.assertEqual(calls[0][1].get("pid"), 4321)
+        self.assertEqual(host.launches[0]["argv"][0], sys.executable)
+        self.assertTrue(host.launches[0]["argv"][1].endswith("native_debug_launch_helper.py"))
+        self.assertIn("--ptracer", host.launches[0]["argv"])
+        self.assertEqual(host.launches[0]["argv"][-1], "/tmp/target/debug/demo")
+        self.assertIs(host.launches[0]["start_stopped"], False)
+
 
 class DebugpyBackendBridgeTests(unittest.TestCase):
     def test_debugpy_backend_reports_ready(self) -> None:
@@ -418,6 +617,76 @@ class DebugpyBackendBridgeTests(unittest.TestCase):
             backend._poll_target_process_exit()
         self.assertEqual(calls, [False])
         self.assertEqual(backend._exited_info, {"exit_code": 0, "exit_status": "finished"})
+
+    def test_debugpy_run_in_terminal_request_launches_terminal_session(self) -> None:
+        host = _FakeDebugIoHost()
+        backend = DebugpyPythonDebuggerBackend()
+        backend._terminal_bridge = DebugTerminalBridge(host)
+        backend._launch_request = DebugLaunchRequest(
+            file_path="/tmp/example.py",
+            source_text="",
+            launch_kind=DebugLaunchKind.SCRIPT,
+            interpreter=sys.executable,
+            working_directory="/tmp",
+        )
+        packets: list[dict] = []
+        backend._send_response = (
+            lambda request_seq, command, *, success, body, message="": packets.append(
+                {
+                    "request_seq": request_seq,
+                    "command": command,
+                    "success": success,
+                    "body": dict(body),
+                    "message": message,
+                }
+            )
+        )  # type: ignore[method-assign]
+
+        backend._handle_dap_message(
+            {
+                "type": "request",
+                "seq": 7,
+                "command": "runInTerminal",
+                "arguments": {
+                    "cwd": "/tmp",
+                    "args": [sys.executable, "/tmp/example.py", "--flag"],
+                    "env": {"DEMO": "1"},
+                },
+            }
+        )
+
+        self.assertEqual(len(host.launches), 1)
+        call = host.launches[0]
+        self.assertEqual(call["cwd"], "/tmp")
+        self.assertEqual(call["argv"], [sys.executable, "/tmp/example.py", "--flag"])
+        self.assertEqual(call["env"], {"DEMO": "1"})
+        self.assertEqual(packets, [{"request_seq": 7, "command": "runInTerminal", "success": True, "body": {}, "message": ""}])
+        backend._state = ExecutionState.RUNNING
+        self.assertTrue(backend.supports_stdin())
+        self.assertTrue(backend.send_stdin("hello"))
+        self.assertEqual(host.inputs, ["hello"])
+
+
+class DebugTerminalBridgeTests(unittest.TestCase):
+    def test_bridge_forwards_launch_and_input_to_host(self) -> None:
+        host = _FakeDebugIoHost()
+        bridge = DebugTerminalBridge(host)
+        self.assertFalse(bridge.available())
+        self.assertTrue(
+            bridge.launch(
+                label="Debug I/O: demo",
+                cwd="/tmp",
+                argv=["python3", "/tmp/main.py"],
+                env={"DEMO": "1"},
+            )
+        )
+        self.assertTrue(bridge.available())
+        self.assertEqual(
+            host.launches,
+            [{"label": "Debug I/O: demo", "cwd": "/tmp", "argv": ["python3", "/tmp/main.py"], "env": {"DEMO": "1"}, "start_stopped": False}],
+        )
+        self.assertTrue(bridge.send_input("hello"))
+        self.assertEqual(host.inputs, ["hello"])
 
     def test_debugpy_force_shutdown_terminates_and_kills_when_needed(self) -> None:
         backend = DebugpyPythonDebuggerBackend()
@@ -784,6 +1053,32 @@ class ExecutionControllerPythonModuleResolutionTests(unittest.TestCase):
         self.assertIn("export PYTHONPATH=/tmp/project/src", command)
         self.assertIn("/usr/bin/python3 -m demo_pkg --flag value", command)
         self.assertIn("__PYTPO_RUN_EXIT__", command)
+
+    def test_console_run_manager_wraps_command_block_before_dispatch(self) -> None:
+        wrapped = ConsoleRunManager._wrap_command_block_for_dispatch(
+            "cargo run\nstatus=$?\nprintf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"\n"
+        )
+        self.assertTrue(wrapped.startswith("(\n"))
+        self.assertTrue(wrapped.endswith("\n)"))
+        self.assertIn("cargo run", wrapped)
+        self.assertIn("__PYTPO_RUN_EXIT__", wrapped)
+        self.assertNotIn("\n\n)", wrapped)
+
+    def test_default_rust_run_uses_release_profile(self) -> None:
+        ide = _FakeIde()
+        ide.console_run_manager = _CapturingConsoleRunManager()
+        ide.dock_terminal = mock.Mock()
+        controller = ExecutionController(ide)
+        controller.project_root = "/tmp/project"
+        controller._canonical_path = staticmethod(lambda path: os.path.normcase(os.path.abspath(path)))  # type: ignore[attr-defined]
+        controller._resolve_rust_workspace_root = lambda _path: "/tmp/project"  # type: ignore[method-assign]
+        controller._run_config = lambda: {"focus_output_on_run": False}  # type: ignore[method-assign]
+
+        ok = controller._run_default_rust_context(file_path="/tmp/project/src/main.rs", status_prefix="Running")
+
+        self.assertTrue(ok)
+        self.assertEqual(len(ide.console_run_manager.calls), 1)
+        self.assertIn("cargo run --release", ide.console_run_manager.calls[0]["command_block"])
 
 
 class DebuggerOutputFormattingTests(unittest.TestCase):

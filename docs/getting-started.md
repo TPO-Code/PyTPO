@@ -10,7 +10,7 @@ Install tooling based on your stack:
 
 - Python: `python3`, `ruff`
 - C/C++: `clangd`, `cmake`, `clang-format`
-- Rust: `rustup`, `cargo`, `rust-analyzer`, `rustfmt`
+- Rust: `rustup`, `cargo`, `rust-analyzer`, `rustfmt`, and an LLDB debug adapter such as `lldb-dap` or `lldb-vscode-14` (for debugging)
 
 Quick checks:
 
@@ -23,6 +23,8 @@ clang-format --version
 rust-analyzer --version
 cargo --version
 rustfmt --version
+lldb-dap --version
+which lldb-vscode
 ```
 
 ## 1. Launch PyTPO
@@ -59,7 +61,8 @@ Recommended screenshot: `docs/assets/screenshots/03-settings-dialog-overview.png
 
 - Python: press `F5` on a `.py` file, or use `Run -> Run Configuration`.
 - C/C++: use `Run -> Build Current File` or `Run -> Build + Run Current File`.
-- Rust: use `F5` on `.rs` or select a target from `Run -> Cargo Configuration`.
+- Rust run: use `F5` on `.rs` or select a target from `Run -> Cargo Configuration`.
+- Rust debug: use the Debug action on `.rs` files or a Rust target from the debug menu, but only after a supported LLDB adapter (`lldb-dap`, `lldb-vscode`, or a versioned `lldb-vscode-*`) is installed and on `PATH`.
 
 ## 5. Format your code
 

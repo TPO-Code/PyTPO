@@ -202,7 +202,16 @@ class ConsoleRunManager(QObject):
         if bool(run_cfg.get("focus_output_on_run", True)):
             self.tab_widget.setCurrentWidget(session.terminal)
 
-        session.terminal.post(command_block + "\n")
+        session.terminal.post(self._wrap_command_block_for_dispatch(command_block))
+
+    @staticmethod
+    def _wrap_command_block_for_dispatch(command_block: str) -> str:
+        body = str(command_block or "").rstrip("\r\n")
+        if not body:
+            return ""
+        # Run the full block in a subshell so the interactive parent shell must
+        # parse the entire command before the child program can read from the TTY.
+        return "\n".join(("(", body, ")"))
 
     def stop_file(self, file_path: str) -> int:
         key = self._canonicalize(file_path)

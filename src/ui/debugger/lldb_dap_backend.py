@@ -1,26 +1,35 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
-import tempfile
+from pathlib import Path
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
+from PySide6.QtCore import QProcess
 
-from .backend import DebugLaunchKind, DebugLaunchRequest, DebuggerBackend, ExecutionState
+from .backend import DebugLaunchRequest, DebuggerBackend, ExecutionState
 from .python_backend import normalize_breakpoint_map
 from .terminal_bridge import DebugTerminalBridge
 
+_NATIVE_DEBUG_LAUNCH_HELPER = str(Path(__file__).with_name("native_debug_launch_helper.py"))
 
-class DebugpyPythonDebuggerBackend(DebuggerBackend):
-    def __init__(self, parent=None, *, ide=None, io_host=None):
+
+@dataclass(slots=True)
+class _CargoArtifact:
+    executable: str
+    target_name: str
+    target_kinds: tuple[str, ...]
+
+
+class LldbDapDebuggerBackend(DebuggerBackend):
+    def __init__(self, parent=None, *, ide=None):
         super().__init__(parent)
         self.ide = ide
         self.process = QProcess(self)
-        self.user_script_path: str | None = None
         self._state = ExecutionState.IDLE
         self._stdout_buffer = b""
         self._stderr_buffer = ""
@@ -32,27 +41,18 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         self._current_thread_id: int | None = None
         self._current_frame_id: int | None = None
         self._current_frames: list[dict] = []
-        self._exited_info: dict | None = None
         self._launch_request: DebugLaunchRequest | None = None
-        self._stop_stage = 0
-        self._configuration_sent = False
-        self._process_error_seen = False
+        self._exited_info: dict | None = None
         self._adapter_initialized = False
         self._launch_sent = False
+        self._configuration_sent = False
         self._disconnect_sent = False
+        self._process_error_seen = False
         self._shutdown_expected = False
+        self._stop_stage = 0
         self._last_breakpoint_signature: tuple[tuple[str, tuple[tuple[int, str, int, str], ...]], ...] | None = None
-        self._target_process_id: int | None = None
-        self._fallback_terminal_process: subprocess.Popen[str] | None = None
-        host = io_host if io_host is not None else parent
-        self._terminal_bridge = DebugTerminalBridge(host) if host is not None else None
-        self._target_exit_poll = QTimer(self)
-        self._target_exit_poll.setInterval(250)
-        self._target_exit_poll.timeout.connect(self._poll_target_process_exit)
-        self._shutdown_timeout = QTimer(self)
-        self._shutdown_timeout.setSingleShot(True)
-        self._shutdown_timeout.setInterval(1200)
-        self._shutdown_timeout.timeout.connect(self._force_shutdown_adapter)
+        self._terminal_bridge = DebugTerminalBridge(parent) if parent is not None else None
+        self._adapter_path = ""
 
         self.process.readyReadStandardOutput.connect(self._handle_stdout_ready)
         self.process.readyReadStandardError.connect(self._handle_stderr_ready)
@@ -64,12 +64,39 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         return self._state
 
     @classmethod
-    def is_available(cls) -> bool:
-        return importlib.util.find_spec("debugpy") is not None
+    def adapter_path(cls) -> str:
+        for candidate in cls._adapter_candidates():
+            resolved = str(shutil.which(candidate) or "").strip()
+            if resolved:
+                return resolved
+        return ""
 
     @classmethod
-    def implementation_ready(cls) -> bool:
-        return True
+    def is_available(cls) -> bool:
+        return bool(cls.adapter_path())
+
+    @staticmethod
+    def _adapter_candidates() -> tuple[str, ...]:
+        names = ["lldb-dap", "lldb-vscode"]
+        discovered: list[str] = []
+        seen: set[str] = set(names)
+        for raw_dir in str(os.environ.get("PATH") or "").split(os.pathsep):
+            directory = str(raw_dir or "").strip()
+            if not directory:
+                continue
+            try:
+                entries = sorted(Path(directory).glob("lldb-vscode-*"), reverse=True)
+            except Exception:
+                continue
+            for entry in entries:
+                if not entry.is_file() or not os.access(entry, os.X_OK):
+                    continue
+                name = entry.name
+                if name in seen:
+                    continue
+                seen.add(name)
+                discovered.append(name)
+        return tuple(names + discovered)
 
     def start_debugging(self, launch_request: DebugLaunchRequest, breakpoints: dict[str, list[dict]]) -> None:
         self.stop_debugging(clean_only=True)
@@ -77,14 +104,23 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         self._pending_breakpoints = normalize_breakpoint_map(breakpoints)
         self._launch_request = self._materialize_launch_request(launch_request)
 
-        adapter_python = sys.executable
+        adapter_path = self.adapter_path()
+        if not adapter_path:
+            self.fatalError.emit({"message": "No supported LLDB debug adapter was found in PATH.", "traceback": ""})
+            self._apply_state(ExecutionState.IDLE)
+            return
+
+        self._adapter_path = adapter_path
+        if not self._prepare_program_path():
+            self._apply_state(ExecutionState.IDLE)
+            return
+
         self._apply_state(ExecutionState.STARTING)
         self.process.setWorkingDirectory(self._launch_request.working_directory)
         self.process.setProcessEnvironment(self._build_process_environment(self._launch_request))
-        self.process.start(adapter_python, ["-m", "debugpy.adapter"])
+        self.process.start(adapter_path, [])
         if not self.process.waitForStarted(3000):
-            self.fatalError.emit({"message": "debugpy adapter failed to start.", "traceback": ""})
-            self._cleanup_temp_files()
+            self.fatalError.emit({"message": "The LLDB debug adapter failed to start.", "traceback": ""})
             self._apply_state(ExecutionState.IDLE)
             return
         self._send_initialize_request()
@@ -92,28 +128,26 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
     def stop_debugging(self, clean_only: bool = False) -> None:
         if self.process.state() != QProcess.NotRunning:
             self._apply_state(ExecutionState.STOPPING)
-            self._send_disconnect_request(terminate_debuggee=self._debuggee_is_running())
+            self._send_disconnect_request(terminate_debuggee=True)
             if not self.process.waitForFinished(700):
                 self.process.terminate()
                 if not self.process.waitForFinished(1200):
                     self.process.kill()
                     self.process.waitForFinished()
-        self._cleanup_fallback_terminal_process()
         if clean_only:
             self._reset_runtime_state()
-            self._cleanup_temp_files()
             self._apply_state(ExecutionState.IDLE)
 
     def request_stop(self) -> int:
         if self.process.state() == QProcess.NotRunning:
             return 0
         self._apply_state(ExecutionState.STOPPING)
-        next_stage, action = self._stop_plan(self._stop_stage, self._state)
+        next_stage, action = self._stop_plan(self._stop_stage)
         self._stop_stage = next_stage
-        if action == "terminate":
+        if action == "disconnect":
+            self._send_disconnect_request(terminate_debuggee=True)
+        elif action == "terminate":
             self._send_request("terminate", {}, callback=None)
-        elif action == "disconnect":
-            self._send_disconnect_request(terminate_debuggee=self._debuggee_is_running())
         else:
             self.process.kill()
         return next_stage
@@ -128,7 +162,11 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         if self.process.state() != QProcess.Running:
             return False
         if action == "set_watches":
-            expressions = [str(expr or "").strip() for expr in ((extra or {}).get("expressions") or []) if str(expr or "").strip()]
+            expressions = [
+                str(expr or "").strip()
+                for expr in ((extra or {}).get("expressions") or [])
+                if str(expr or "").strip()
+            ]
             self._watch_expressions = expressions
             self._refresh_watch_values()
             return True
@@ -174,57 +212,177 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         self._seq = 0
         self._pending_requests.clear()
         self._applied_breakpoint_paths.clear()
+        self._watch_expressions = []
         self._current_thread_id = None
         self._current_frame_id = None
         self._current_frames = []
-        self._watch_expressions = []
-        self._exited_info = None
         self._launch_request = None
-        self._stop_stage = 0
-        self._configuration_sent = False
-        self._process_error_seen = False
+        self._exited_info = None
         self._adapter_initialized = False
         self._launch_sent = False
+        self._configuration_sent = False
         self._disconnect_sent = False
+        self._process_error_seen = False
         self._shutdown_expected = False
+        self._stop_stage = 0
         self._last_breakpoint_signature = None
-        self._target_process_id = None
-        self._fallback_terminal_process = None
-        self._target_exit_poll.stop()
-        self._shutdown_timeout.stop()
+        self._adapter_path = ""
 
-    def _materialize_launch_request(self, launch_request: DebugLaunchRequest) -> DebugLaunchRequest:
+    @staticmethod
+    def _materialize_launch_request(launch_request: DebugLaunchRequest) -> DebugLaunchRequest:
         request = DebugLaunchRequest(
             file_path=str(launch_request.file_path or ""),
             source_text=str(launch_request.source_text or ""),
             launch_kind=launch_request.launch_kind,
             module_name=str(launch_request.module_name or ""),
-            interpreter=str(launch_request.interpreter or "").strip() or sys.executable,
+            interpreter=str(launch_request.interpreter or ""),
             program_path=str(launch_request.program_path or ""),
             working_directory=str(launch_request.working_directory or "").strip(),
             arguments=tuple(str(arg) for arg in launch_request.arguments),
             environment=dict(launch_request.environment),
             build_command=tuple(str(arg) for arg in launch_request.build_command),
-            target_name=str(launch_request.target_name or ""),
-            target_kind=str(launch_request.target_kind or ""),
-            language=str(launch_request.language or ""),
-            just_my_code=bool(launch_request.just_my_code),
-            use_source_snapshot=bool(launch_request.use_source_snapshot),
+            target_name=str(launch_request.target_name or "").strip(),
+            target_kind=str(launch_request.target_kind or "").strip(),
+            language=str(launch_request.language or "").strip(),
+            just_my_code=False,
+            use_source_snapshot=False,
         )
-        target_script_path = request.file_path
-        if request.launch_kind == DebugLaunchKind.SCRIPT and (request.use_source_snapshot or not target_script_path):
-            user_tmp = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".py", encoding="utf-8")
-            user_tmp.write(request.source_text)
-            user_tmp.close()
-            self.user_script_path = user_tmp.name
-            target_script_path = self.user_script_path
-            request.file_path = target_script_path
-        else:
-            self.user_script_path = None
-        request.working_directory = self._resolved_working_directory(request, target_script_path)
+        request.working_directory = LldbDapDebuggerBackend._resolved_working_directory(request)
         return request
 
-    def _build_process_environment(self, launch_request: DebugLaunchRequest) -> QProcessEnvironment:
+    def _prepare_program_path(self) -> bool:
+        request = self._launch_request
+        if request is None:
+            self.fatalError.emit({"message": "Missing native launch request.", "traceback": ""})
+            return False
+        program_path = str(request.program_path or "").strip()
+        if program_path and os.path.isfile(program_path):
+            request.program_path = program_path
+            return True
+        build_command = tuple(str(arg) for arg in request.build_command if str(arg).strip())
+        if not build_command:
+            self.fatalError.emit({"message": "No executable or build command was provided for native debugging.", "traceback": ""})
+            return False
+        built_program = self._build_program_from_cargo(request)
+        if not built_program:
+            return False
+        request.program_path = built_program
+        return True
+
+    def _build_program_from_cargo(self, request: DebugLaunchRequest) -> str:
+        env = os.environ.copy()
+        env.update({str(key): str(value) for key, value in request.environment.items()})
+        try:
+            proc = subprocess.run(
+                list(request.build_command),
+                cwd=request.working_directory or None,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except FileNotFoundError:
+            self.fatalError.emit({"message": "cargo was not found in PATH.", "traceback": ""})
+            return ""
+        except Exception as exc:
+            self.fatalError.emit({"message": f"Rust build failed to start: {exc}", "traceback": ""})
+            return ""
+
+        artifacts, rendered = self._parse_cargo_json_stream(proc.stdout)
+        for line in rendered:
+            self.stderrReceived.emit(line)
+        stderr_lines = [line.rstrip() for line in proc.stderr.splitlines() if line.rstrip()]
+        for line in stderr_lines:
+            self.stderrReceived.emit(line)
+        if proc.returncode != 0:
+            self.fatalError.emit({"message": "Cargo build failed.", "traceback": proc.stderr.strip()})
+            return ""
+        program_path = self._select_artifact_path(
+            artifacts,
+            target_name=request.target_name,
+            target_kind=request.target_kind,
+        )
+        if not program_path:
+            self.fatalError.emit(
+                {
+                    "message": "Cargo build succeeded, but no debuggable executable could be resolved.",
+                    "traceback": "",
+                }
+            )
+            return ""
+        return program_path
+
+    @classmethod
+    def _parse_cargo_json_stream(cls, text: str) -> tuple[list[_CargoArtifact], list[str]]:
+        artifacts: list[_CargoArtifact] = []
+        rendered: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                rendered.append(line)
+                continue
+            if not isinstance(payload, dict):
+                continue
+            reason = str(payload.get("reason") or "").strip()
+            if reason == "compiler-message":
+                message = payload.get("message") or {}
+                rendered_text = str(message.get("rendered") or "").strip()
+                if rendered_text:
+                    rendered.extend(item.rstrip() for item in rendered_text.splitlines() if item.rstrip())
+                continue
+            if reason != "compiler-artifact":
+                continue
+            executable = str(payload.get("executable") or "").strip()
+            target = payload.get("target") or {}
+            target_name = str(target.get("name") or "").strip()
+            raw_kinds = target.get("kind") or []
+            target_kinds = tuple(str(kind or "").strip() for kind in raw_kinds if str(kind or "").strip())
+            if executable:
+                artifacts.append(
+                    _CargoArtifact(
+                        executable=executable,
+                        target_name=target_name,
+                        target_kinds=target_kinds,
+                    )
+                )
+        return artifacts, rendered
+
+    @staticmethod
+    def _select_artifact_path(
+        artifacts: list[_CargoArtifact],
+        *,
+        target_name: str = "",
+        target_kind: str = "",
+    ) -> str:
+        name_filter = str(target_name or "").strip()
+        kind_filter = str(target_kind or "").strip().lower()
+        candidates = list(artifacts)
+        if name_filter:
+            named = [item for item in candidates if item.target_name == name_filter]
+            if named:
+                candidates = named
+        if kind_filter:
+            typed = [item for item in candidates if kind_filter in {kind.lower() for kind in item.target_kinds}]
+            if typed:
+                candidates = typed
+        if len(candidates) == 1:
+            return candidates[0].executable
+        if not candidates and len(artifacts) == 1:
+            return artifacts[0].executable
+        if len(candidates) > 1:
+            exact = [item for item in candidates if item.target_name == name_filter and kind_filter in {kind.lower() for kind in item.target_kinds}]
+            if len(exact) == 1:
+                return exact[0].executable
+        return candidates[0].executable if len(candidates) == 1 else ""
+
+    def _build_process_environment(self, launch_request: DebugLaunchRequest):
+        from PySide6.QtCore import QProcessEnvironment
+
         env = QProcessEnvironment.systemEnvironment()
         for key, value in launch_request.environment.items():
             env.insert(str(key), str(value))
@@ -232,70 +390,99 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
 
     def _send_initialize_request(self) -> None:
         args = {
-            "adapterID": "pytpo",
+            "adapterID": "lldb",
             "clientID": "pytpo",
             "clientName": "PyTPO",
             "pathFormat": "path",
             "linesStartAt1": True,
             "columnsStartAt1": True,
             "supportsVariableType": True,
-            "supportsRunInTerminalRequest": self._terminal_bridge is not None,
+            "supportsRunInTerminalRequest": True,
             "supportsArgsCanBeInterpretedByShell": False,
         }
         self._send_request("initialize", args, self._handle_initialize_response)
 
     def _handle_initialize_response(self, success: bool, body: dict, message: str) -> None:
         if not success:
-            self.fatalError.emit({"message": message or "Failed to initialize debugpy adapter.", "traceback": ""})
+            self.fatalError.emit({"message": message or "Failed to initialize the LLDB debug adapter.", "traceback": ""})
             return
         self._send_launch_request()
 
     def _send_launch_request(self) -> None:
         request = self._launch_request
         if request is None:
-            self.fatalError.emit({"message": "Missing debug launch request.", "traceback": ""})
+            self.fatalError.emit({"message": "Missing native launch request.", "traceback": ""})
             return
+        if self._uses_legacy_run_in_terminal_flag():
+            if self._send_legacy_attach_request(request):
+                self.started.emit({"file": str(request.file_path or ""), "module": ""})
+            return
+        env = [f"{key}={value}" for key, value in request.environment.items()]
         args = {
-            "noDebug": False,
+            "program": str(request.program_path or ""),
             "cwd": request.working_directory,
-            "python": [request.interpreter],
             "args": list(request.arguments),
-            "env": dict(request.environment),
-            "justMyCode": bool(request.just_my_code),
+            "env": env,
+            "stopOnEntry": False,
         }
-        if self._terminal_bridge is None:
-            args["console"] = "internalConsole"
-            args["redirectOutput"] = True
-        else:
-            args["console"] = "integratedTerminal"
-            args["redirectOutput"] = False
-        if request.launch_kind == DebugLaunchKind.MODULE:
-            args["module"] = str(request.module_name or "")
-        else:
-            args["program"] = str(request.file_path or "")
+        args["console"] = "integratedTerminal"
         self._launch_sent = True
         self._send_request("launch", args, self._handle_launch_response)
-        self.started.emit(
-            {
-                "file": str(request.file_path or ""),
-                "module": str(request.module_name or ""),
-            }
+        self.started.emit({"file": str(request.file_path or ""), "module": ""})
+
+    def _send_legacy_attach_request(self, request: DebugLaunchRequest) -> bool:
+        bridge = self._terminal_bridge
+        if bridge is None:
+            self.fatalError.emit({"message": "Interactive I/O is unavailable for this debug session.", "traceback": ""})
+            return False
+        argv = [str(request.program_path or ""), *[str(arg) for arg in request.arguments]]
+        argv = self._legacy_attach_argv(request)
+        env_map = {str(key): str(value) for key, value in request.environment.items()}
+        pid = int(
+            bridge.launch(
+                label=self._terminal_label(),
+                cwd=request.working_directory,
+                argv=argv,
+                env=env_map,
+            )
+            or 0
         )
-        self._maybe_send_configuration()
+        if pid <= 0:
+            self.fatalError.emit({"message": "Failed to start the native debug target in the debugger I/O panel.", "traceback": ""})
+            return False
+        self.stdoutReceived.emit(f"[debug] interactive I/O attached below: {self._terminal_label()}")
+        self._launch_sent = True
+        self._send_request(
+            "attach",
+            {
+                "pid": pid,
+                "program": str(request.program_path or ""),
+                "waitFor": False,
+            },
+            self._handle_launch_response,
+        )
+        return True
+
+    def _legacy_attach_argv(self, request: DebugLaunchRequest) -> list[str]:
+        adapter_pid = int(self.process.processId() or 0)
+        return [
+            str(sys.executable or "python3"),
+            _NATIVE_DEBUG_LAUNCH_HELPER,
+            "--ptracer",
+            str(adapter_pid),
+            str(request.program_path or ""),
+            *[str(arg) for arg in request.arguments],
+        ]
 
     def _handle_launch_response(self, success: bool, body: dict, message: str) -> None:
         if not success:
-            self.fatalError.emit({"message": message or "debugpy launch failed.", "traceback": ""})
+            self.fatalError.emit({"message": message or "The LLDB debug adapter launch failed.", "traceback": ""})
             return
-        return
 
-    def _send_exception_and_configuration(self) -> None:
-        self._emit_breakpoints_set()
-        self._send_request(
-            "setExceptionBreakpoints",
-            {"filters": ["uncaught"]},
-            lambda _success, _body, _message: self._send_configuration_done(),
-        )
+    def _maybe_send_configuration(self) -> None:
+        if not self._adapter_initialized or not self._launch_sent or self._configuration_sent:
+            return
+        self._apply_breakpoints(callback=self._send_configuration_done)
 
     def _send_configuration_done(self) -> None:
         if self._configuration_sent:
@@ -305,7 +492,7 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
 
     def _handle_configuration_done(self, success: bool, body: dict, message: str) -> None:
         if not success:
-            self.fatalError.emit({"message": message or "debugpy configuration failed.", "traceback": ""})
+            self.fatalError.emit({"message": message or "The LLDB debug adapter configuration failed.", "traceback": ""})
             return
         self._apply_state(ExecutionState.RUNNING)
         if self._watch_expressions:
@@ -326,13 +513,26 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
                 return
             file_path = paths[index]
             specs = self._pending_breakpoints.get(file_path, [])
-            dap_breakpoints = [{"line": int(item.get("line") or 0), "condition": str(item.get("condition") or "").strip() or None} for item in specs if int(item.get("line") or 0) > 0]
-            args = {
-                "source": {"path": file_path},
-                "lines": [bp["line"] for bp in dap_breakpoints],
-                "breakpoints": dap_breakpoints,
-                "sourceModified": False,
-            }
+            dap_breakpoints = []
+            for item in specs:
+                try:
+                    line = int(item.get("line") or 0)
+                    hit_count = int(item.get("hit_count") or 0)
+                except Exception:
+                    continue
+                if line <= 0:
+                    continue
+                breakpoint = {"line": line}
+                condition = str(item.get("condition") or "").strip()
+                log_message = str(item.get("log_message") or "").strip()
+                if condition:
+                    breakpoint["condition"] = condition
+                if hit_count > 0:
+                    breakpoint["hitCondition"] = str(hit_count)
+                if log_message:
+                    breakpoint["logMessage"] = log_message
+                dap_breakpoints.append(breakpoint)
+            args = {"source": {"path": file_path}, "breakpoints": dap_breakpoints, "sourceModified": False}
             self._send_request("setBreakpoints", args, lambda _s, _b, _m, i=index + 1: apply_next(i))
 
         apply_next(0)
@@ -407,58 +607,35 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
     def _dispatch_run_in_terminal(self, arguments: dict) -> tuple[bool, dict, str]:
         bridge = self._terminal_bridge
         request = self._launch_request
-        if request is None:
+        if bridge is None or request is None:
             return False, {}, "Interactive terminal support is unavailable."
         argv = [str(item) for item in (arguments.get("args") or []) if str(item)]
         cwd = str(arguments.get("cwd") or request.working_directory or "").strip()
-        env = arguments.get("env") or {}
-        env_map = {str(key): (None if value is None else str(value)) for key, value in dict(env).items()}
+        env_map: dict[str, str | None] = {}
+        raw_env = arguments.get("env")
+        if isinstance(raw_env, dict):
+            env_map = {str(key): (None if value is None else str(value)) for key, value in raw_env.items()}
         label = self._terminal_label()
-        launched = int(bridge.launch(label=label, cwd=cwd, argv=argv, env=env_map) or 0) if bridge is not None else 0
-        if launched <= 0:
-            launched = self._launch_fallback_terminal_process(cwd=cwd, argv=argv, env=env_map)
-        if launched <= 0:
+        if not bridge.launch(label=label, cwd=cwd, argv=argv, env=env_map):
             return False, {}, "Failed to launch the debuggee in the IDE terminal."
-        if bridge is not None:
-            self.stdoutReceived.emit(f"[debug] interactive I/O attached below: {label}")
+        self.stdoutReceived.emit(f"[debug] interactive I/O attached below: {label}")
         return True, {}, ""
-
-    def _launch_fallback_terminal_process(
-        self,
-        *,
-        cwd: str,
-        argv: list[str],
-        env: dict[str, str | None],
-    ) -> int:
-        if not argv:
-            return 0
-        child_env = os.environ.copy()
-        for key, value in env.items():
-            name = str(key or "").strip()
-            if not name:
-                continue
-            if value is None:
-                child_env.pop(name, None)
-            else:
-                child_env[name] = str(value)
-        try:
-            proc = subprocess.Popen(
-                argv,
-                cwd=cwd or None,
-                env=child_env,
-                text=True,
-            )
-        except Exception:
-            return 0
-        self._fallback_terminal_process = proc
-        return int(proc.pid or 0)
 
     def _terminal_label(self) -> str:
         request = self._launch_request
         if request is None:
             return "Debug I/O"
-        target = str(request.module_name or os.path.basename(str(request.file_path or "")) or "Python")
+        target = str(
+            request.target_name
+            or os.path.basename(str(request.program_path or ""))
+            or os.path.basename(str(request.file_path or ""))
+            or "Native"
+        )
         return f"Debug I/O: {target}"
+
+    def _uses_legacy_run_in_terminal_flag(self) -> bool:
+        name = os.path.basename(str(self._adapter_path or "")).strip().lower()
+        return name.startswith("lldb-vscode")
 
     def _handle_event(self, event: str, body: dict) -> None:
         if event == "initialized":
@@ -468,20 +645,11 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         if event == "output":
             category = str(body.get("category") or "").strip().lower()
             text = str(body.get("output") or "")
-            if not text or category == "telemetry":
+            if not text:
                 return
-            if category == "stderr":
-                self.stderrReceived.emit(text.rstrip("\n"))
-            else:
-                for line in text.splitlines() or [text]:
-                    self.stdoutReceived.emit(line)
-            return
-        if event == "process":
-            process_id = int(body.get("systemProcessId") or 0)
-            if process_id > 0:
-                self._target_process_id = process_id
-                if not self._target_exit_poll.isActive():
-                    self._target_exit_poll.start()
+            target_signal = self.stderrReceived if category == "stderr" else self.stdoutReceived
+            for line in text.splitlines() or [text]:
+                target_signal.emit(line)
             return
         if event == "continued":
             self._apply_state(ExecutionState.RUNNING)
@@ -499,20 +667,18 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
             self._apply_state(ExecutionState.PAUSED)
             self._current_thread_id = int(body.get("threadId") or 0) or self._current_thread_id
             self._handle_stopped_event(body)
-            return
-
-    def _maybe_send_configuration(self) -> None:
-        if not self._adapter_initialized or not self._launch_sent or self._configuration_sent:
-            return
-        self._apply_breakpoints(callback=self._send_exception_and_configuration)
 
     def _handle_stopped_event(self, body: dict) -> None:
         thread_id = int(body.get("threadId") or 0) or int(self._current_thread_id or 0)
         if thread_id <= 0:
-            self.fatalError.emit({"message": "debugpy stopped without a thread id.", "traceback": ""})
+            self.fatalError.emit({"message": "The LLDB debug adapter stopped without a thread id.", "traceback": ""})
             return
         self._current_thread_id = thread_id
-        self._send_request("stackTrace", {"threadId": thread_id}, lambda success, data, message: self._handle_stack_trace_response(success, data, message, body))
+        self._send_request(
+            "stackTrace",
+            {"threadId": thread_id},
+            lambda success, data, message: self._handle_stack_trace_response(success, data, message, body),
+        )
 
     def _handle_stack_trace_response(self, success: bool, body: dict, message: str, stopped_body: dict) -> None:
         if not success:
@@ -527,16 +693,16 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
             frames.append(
                 {
                     "id": int(raw.get("id") or 0),
-                    "file": str((source.get("path") or "")),
+                    "file": str(source.get("path") or ""),
                     "line": int(raw.get("line") or 0),
                     "column": int(raw.get("column") or 1),
-                    "function": str(raw.get("name") or "<module>"),
+                    "function": str(raw.get("name") or ""),
                     "locals": {},
                     "globals": {},
                 }
             )
         if not frames:
-            self.fatalError.emit({"message": "debugpy returned no stack frames.", "traceback": ""})
+            self.fatalError.emit({"message": "The LLDB debug adapter returned no stack frames.", "traceback": ""})
             return
         self._current_frames = frames
         self._current_frame_id = int(frames[0].get("id") or 0)
@@ -548,21 +714,25 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
             return
         frame = self._current_frames[index]
         frame_id = int(frame.get("id") or 0)
-        self._send_request("scopes", {"frameId": frame_id}, lambda success, body, message, i=index: self._handle_scopes_response(success, body, message, i, stopped_body))
+        self._send_request(
+            "scopes",
+            {"frameId": frame_id},
+            lambda success, body, message, i=index: self._handle_scopes_response(success, body, message, i, stopped_body),
+        )
 
     def _handle_scopes_response(self, success: bool, body: dict, message: str, index: int, stopped_body: dict) -> None:
         if not success:
             self._populate_frame_scopes(index + 1, stopped_body)
             return
         scopes = [item for item in (body.get("scopes") or []) if isinstance(item, dict)]
-        target = {"locals": None, "globals": None}
+        refs = {"locals": None, "globals": None}
         for scope in scopes:
             name = str(scope.get("name") or "").strip().lower()
-            if name == "locals" and target["locals"] is None:
-                target["locals"] = int(scope.get("variablesReference") or 0)
-            elif name == "globals" and target["globals"] is None:
-                target["globals"] = int(scope.get("variablesReference") or 0)
-        self._load_scope_variables(index, target, "locals", stopped_body)
+            if "local" in name and refs["locals"] is None:
+                refs["locals"] = int(scope.get("variablesReference") or 0)
+            elif "global" in name and refs["globals"] is None:
+                refs["globals"] = int(scope.get("variablesReference") or 0)
+        self._load_scope_variables(index, refs, "locals", stopped_body)
 
     def _load_scope_variables(self, index: int, refs: dict[str, int | None], scope_name: str, stopped_body: dict) -> None:
         ref = int(refs.get(scope_name) or 0)
@@ -611,9 +781,7 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
             )
         else:
             self._emit_paused_payload(stopped_body, [])
-
-        reason = str(stopped_body.get("reason") or "").strip().lower()
-        if reason == "exception":
+        if str(stopped_body.get("reason") or "").strip().lower() == "exception":
             self._request_exception_info()
 
     def _emit_paused_payload(self, stopped_body: dict, watches: list[dict]) -> None:
@@ -649,16 +817,13 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
     def _handle_exception_info(self, success: bool, body: dict, message: str) -> None:
         if not success:
             return
-        details = dict(body.get("details") or {})
-        text = str(body.get("description") or details.get("message") or body.get("breakMode") or "Exception")
-        exc_type = str(body.get("exceptionId") or details.get("typeName") or "Exception")
         top_frame = self._current_frames[0] if self._current_frames else {}
         self.exceptionRaised.emit(
             {
                 "file": str(top_frame.get("file") or ""),
                 "line": int(top_frame.get("line") or 0),
-                "type": exc_type,
-                "message": text,
+                "type": str(body.get("exceptionId") or "Exception"),
+                "message": str(body.get("description") or body.get("breakMode") or "Exception"),
                 "traceback": "",
             }
         )
@@ -667,7 +832,11 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         if not self._watch_expressions:
             self.watchValuesUpdated.emit({"watches": []})
             return
-        self._collect_watch_values(list(self._watch_expressions), [], lambda watches: self.watchValuesUpdated.emit({"watches": watches}))
+        self._collect_watch_values(
+            list(self._watch_expressions),
+            [],
+            lambda watches: self.watchValuesUpdated.emit({"watches": watches}),
+        )
 
     def _collect_watch_values(
         self,
@@ -717,8 +886,12 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
             if done is not None:
                 done(result)
             return
-        args = {"expression": expr, "frameId": int(self._current_frame_id or 0), "context": "watch" if not emit_signal else "repl"}
-        self._send_request("evaluate", args, lambda success, body, message: self._handle_evaluate_response(expr, success, body, message, emit_signal, done))
+        args = {"expression": expr, "frameId": int(self._current_frame_id or 0), "context": "repl" if emit_signal else "watch"}
+        self._send_request(
+            "evaluate",
+            args,
+            lambda success, body, message: self._handle_evaluate_response(expr, success, body, message, emit_signal, done),
+        )
 
     def _handle_evaluate_response(
         self,
@@ -745,42 +918,11 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         return {"threadId": max(1, int(self._current_thread_id or 1)), "singleThread": False}
 
     def _send_disconnect_request(self, *, terminate_debuggee: bool) -> None:
-        if self.process.state() != QProcess.Running:
-            return
-        if self._disconnect_sent:
+        if self.process.state() != QProcess.Running or self._disconnect_sent:
             return
         self._disconnect_sent = True
         self._shutdown_expected = True
-        self._shutdown_timeout.start()
         self._send_request("disconnect", {"terminateDebuggee": bool(terminate_debuggee)}, callback=None)
-
-    def _debuggee_is_running(self) -> bool:
-        process_id = int(self._target_process_id or 0)
-        if process_id > 0:
-            return self._process_exists(process_id)
-        return self._exited_info is None
-
-    def _poll_target_process_exit(self) -> None:
-        process_id = int(self._target_process_id or 0)
-        if process_id <= 0:
-            self._target_exit_poll.stop()
-            return
-        if self._exited_info is not None or self._disconnect_sent or self.process.state() != QProcess.Running:
-            self._target_exit_poll.stop()
-            return
-        if self._process_exists(process_id):
-            return
-        self._target_exit_poll.stop()
-        self._exited_info = {"exit_code": 0, "exit_status": "finished"}
-        self._shutdown_expected = True
-        self._send_disconnect_request(terminate_debuggee=False)
-
-    def _force_shutdown_adapter(self) -> None:
-        if self.process.state() == QProcess.NotRunning:
-            return
-        self.process.terminate()
-        if not self.process.waitForFinished(250):
-            self.process.kill()
 
     def _send_request(
         self,
@@ -790,12 +932,7 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
     ) -> int:
         self._seq += 1
         seq = self._seq
-        message = {
-            "seq": seq,
-            "type": "request",
-            "command": str(command or ""),
-            "arguments": dict(arguments or {}),
-        }
+        message = {"seq": seq, "type": "request", "command": str(command or ""), "arguments": dict(arguments or {})}
         packet = self._encode_protocol_message(message)
         self._pending_requests[seq] = (str(command or ""), callback)
         self.process.write(packet)
@@ -850,10 +987,6 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         process_info.setdefault("exit_code", int(exit_code or 0))
         process_info.setdefault("exit_status", "crashed" if exit_status == QProcess.CrashExit else "finished")
         self.processEnded.emit(process_info)
-        self._cleanup_fallback_terminal_process()
-        self._cleanup_temp_files()
-        self._target_exit_poll.stop()
-        self._shutdown_timeout.stop()
         self._apply_state(ExecutionState.IDLE)
         self._stop_stage = 0
         self.finished.emit()
@@ -865,31 +998,21 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         self._last_breakpoint_signature = signature
         self.breakpointsSet.emit({"files": sorted(self._pending_breakpoints)})
 
-    def _cleanup_temp_files(self) -> None:
-        if self.user_script_path and os.path.exists(self.user_script_path):
-            try:
-                os.unlink(self.user_script_path)
-            except OSError:
-                pass
-        self.user_script_path = None
-
-    def _cleanup_fallback_terminal_process(self) -> None:
-        proc = self._fallback_terminal_process
-        if proc is None:
-            return
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=0.5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        self._fallback_terminal_process = None
+    @staticmethod
+    def _resolved_working_directory(launch_request: DebugLaunchRequest) -> str:
+        candidates = [
+            str(launch_request.working_directory or "").strip(),
+            os.path.dirname(str(launch_request.program_path or "").strip()),
+            os.path.dirname(str(launch_request.file_path or "").strip()),
+            os.getcwd(),
+        ]
+        for raw in candidates:
+            if raw and os.path.isdir(raw):
+                return os.path.abspath(raw)
+        return os.getcwd()
 
     @staticmethod
-    def _stop_plan(current_stage: int, state: ExecutionState) -> tuple[int, str]:
+    def _stop_plan(current_stage: int) -> tuple[int, str]:
         stage = max(0, int(current_stage or 0))
         if stage <= 0:
             return 1, "disconnect"
@@ -898,53 +1021,15 @@ class DebugpyPythonDebuggerBackend(DebuggerBackend):
         return 3, "kill"
 
     @staticmethod
-    def _process_exists(process_id: int) -> bool:
-        try:
-            os.kill(int(process_id), 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return False
-        return True
-
-    @staticmethod
-    def _normalized_existing_directories(paths: list[str]) -> list[str]:
-        out: list[str] = []
-        seen: set[str] = set()
-        for raw in paths:
-            text = str(raw or "").strip()
-            if not text:
-                continue
-            resolved = os.path.normcase(os.path.abspath(os.path.expanduser(text)))
-            if resolved in seen or not os.path.isdir(resolved):
-                continue
-            seen.add(resolved)
-            out.append(resolved)
-        return out
-
-    @classmethod
-    def _resolved_working_directory(cls, launch_request: DebugLaunchRequest, target_script_path: str) -> str:
-        candidates = [
-            str(launch_request.working_directory or "").strip(),
-            os.path.dirname(str(target_script_path or "").strip()),
-            os.path.dirname(str(launch_request.file_path or "").strip()),
-            os.getcwd(),
-        ]
-        roots = cls._normalized_existing_directories(candidates)
-        return roots[0] if roots else os.getcwd()
-
-    @staticmethod
     def _process_error_message(error: QProcess.ProcessError) -> str:
         mapping = {
-            QProcess.ProcessError.FailedToStart: "debugpy adapter failed to start.",
-            QProcess.ProcessError.Crashed: "debugpy adapter crashed.",
-            QProcess.ProcessError.Timedout: "debugpy adapter timed out.",
-            QProcess.ProcessError.WriteError: "debugpy adapter write failed.",
-            QProcess.ProcessError.ReadError: "debugpy adapter read failed.",
+            QProcess.ProcessError.FailedToStart: "The LLDB debug adapter failed to start.",
+            QProcess.ProcessError.Crashed: "The LLDB debug adapter crashed.",
+            QProcess.ProcessError.Timedout: "The LLDB debug adapter timed out.",
+            QProcess.ProcessError.WriteError: "The LLDB debug adapter write failed.",
+            QProcess.ProcessError.ReadError: "The LLDB debug adapter read failed.",
         }
-        return mapping.get(error, "debugpy adapter failed.")
+        return mapping.get(error, "The LLDB debug adapter failed.")
 
     @staticmethod
     def _breakpoint_signature(

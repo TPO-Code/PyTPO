@@ -21,8 +21,10 @@ Recommended screenshot: `docs/assets/screenshots/05-problems-dock-with-diagnosti
 ## 3. Run, build, or cargo-run
 
 - Quick run: `F5` or `Run -> Run`.
+- Quick debug: use the Debug action or toolbar debug menu.
 - Python config run: `Run -> Run Configuration`.
 - Cargo config run: `Run -> Cargo Configuration`.
+- Cargo config debug: use the Rust section in the debug menu when a supported LLDB adapter (`lldb-dap`, `lldb-vscode`, or versioned `lldb-vscode-*`) is installed and on `PATH`.
 - C/C++ build-only: `Run -> Build Current File`.
 - C/C++ build+run: `Run -> Build + Run Current File`.
 

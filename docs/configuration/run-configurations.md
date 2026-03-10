@@ -2,6 +2,12 @@
 
 PyTPO supports named run/build configurations for Python, Rust/Cargo, and CMake.
 
+Rust debug note:
+
+- Rust Cargo targets can also be used from the debugger UI, but Rust debugging requires a supported LLDB adapter on `PATH`
+- supported adapter names include `lldb-dap`, `lldb-vscode`, and distro-versioned `lldb-vscode-*`
+- if no supported adapter is found, Rust debug actions remain disabled even though Rust run configurations still work
+
 ## Where to manage them
 
 From the run menu:
@@ -43,6 +49,12 @@ Command types:
 Common fields:
 
 - `name`, `command_type`, `package`, `binary`, `profile`, `features`, `args`, `working_dir`, `env`
+
+Debug behavior:
+
+- current Rust file debugging uses the nearest Cargo project context
+- named Cargo targets can be launched from the debug menu using the same stored configuration data
+- custom Cargo commands are run-only; they are not valid Rust debug targets
 
 ## CMake build configurations
 

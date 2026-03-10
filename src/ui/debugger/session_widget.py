@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import os
 import re
+import signal
 
 from PySide6.QtCore import QSize, Qt, QUrl, QUrlQuery, Signal
 from PySide6.QtGui import QTextCursor
@@ -25,7 +26,9 @@ from PySide6.QtWidgets import (
 
 from .backend import ExecutionState
 from .controller import DebuggerController
+from .io_terminal_widget import DebuggerIoTerminalWidget
 from .python_backend import PythonDebuggerBackend
+from .lldb_dap_backend import LldbDapDebuggerBackend
 
 
 class DebuggerSessionWidget(QWidget):
@@ -43,20 +46,28 @@ class DebuggerSessionWidget(QWidget):
     _STEP_SKIP_LINE = 'Frame skipped from debugging during step-in.'
     _STEP_SKIP_NOTE_PREFIX = 'Note: may have been skipped because of "justMyCode" option'
 
-    def __init__(self, ide, *, session_key: str, session_label: str, parent=None):
+    def __init__(self, ide, *, session_key: str, session_label: str, backend_id: str = "python", parent=None):
         super().__init__(parent)
         self.ide = ide
         self._session_key = str(session_key or "")
-        self._session_label = str(session_label or self._session_key or "Python debug session")
-        self.controller = DebuggerController(ide, PythonDebuggerBackend(self, ide=ide), self)
+        self._backend_id = str(backend_id or "python").strip().lower() or "python"
+        default_label = "Rust debug session" if self._backend_id == "rust" else "Python debug session"
+        self._session_label = str(session_label or self._session_key or default_label)
+        self.controller = DebuggerController(ide, self._create_backend(), self)
         self._state = ExecutionState.IDLE
         self._last_visual_state = "idle"
         self._stack_frames: list[dict] = []
         self._watch_expressions: list[str] = []
+        self._debug_io_terminal: DebuggerIoTerminalWidget | None = None
 
         self._build_ui()
         self._restore_layout()
         self._connect_controller()
+
+    def _create_backend(self):
+        if self._backend_id == "rust":
+            return LldbDapDebuggerBackend(self, ide=self.ide)
+        return PythonDebuggerBackend(self, ide=self.ide)
 
     def session_key(self) -> str:
         return self._session_key
@@ -128,7 +139,7 @@ class DebuggerSessionWidget(QWidget):
         return "Idle"
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(320, 60)
+        return QSize(320, 220 if self._debug_io_terminal is not None else 60)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -141,6 +152,11 @@ class DebuggerSessionWidget(QWidget):
         self.main_splitter = QSplitter(Qt.Horizontal, self)
         self.main_splitter.setChildrenCollapsible(True)
         self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+
+        self.output_panel = QWidget(self)
+        output_layout = QVBoxLayout(self.output_panel)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(4)
 
         self.output_view = QTextBrowser(self)
         self.output_view.setReadOnly(True)
@@ -163,6 +179,16 @@ class DebuggerSessionWidget(QWidget):
             a { color: palette(link); text-decoration: underline; }
             """
         )
+        output_layout.addWidget(self.output_view, 1)
+
+        self.io_host = QWidget(self)
+        self.io_host.setVisible(False)
+        self.io_host.setMinimumHeight(120)
+        self.io_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.io_layout = QVBoxLayout(self.io_host)
+        self.io_layout.setContentsMargins(0, 0, 0, 0)
+        self.io_layout.setSpacing(0)
+        output_layout.addWidget(self.io_host, 1)
 
         self.inspector_splitter = QSplitter(Qt.Vertical, self)
         self.inspector_splitter.setChildrenCollapsible(True)
@@ -240,13 +266,27 @@ class DebuggerSessionWidget(QWidget):
         self.inspector_splitter.setStretchFactor(0, 2)
         self.inspector_splitter.setStretchFactor(1, 3)
 
-        self.main_splitter.addWidget(self.output_view)
+        self.main_splitter.addWidget(self.output_panel)
         self.main_splitter.addWidget(self.inspector_splitter)
         self.main_splitter.setStretchFactor(0, 3)
         self.main_splitter.setStretchFactor(1, 2)
 
+        self.console_host = QWidget(self)
+        console_layout = QHBoxLayout(self.console_host)
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(4)
+        self.console_input = QLineEdit(self)
+        self.console_input.setPlaceholderText("Debugger console")
+        self.console_input.returnPressed.connect(self._submit_console_input)
+        self.console_submit_button = QPushButton("Send", self)
+        self.console_submit_button.clicked.connect(self._submit_console_input)
+        console_layout.addWidget(self.console_input, 1)
+        console_layout.addWidget(self.console_submit_button)
+
         root.addWidget(self.summary_label)
         root.addWidget(self.main_splitter, 1)
+        root.addWidget(self.console_host)
+        self._refresh_console_input_affordance()
 
     def _connect_controller(self) -> None:
         self.controller.stateChanged.connect(self._on_state_changed)
@@ -341,6 +381,7 @@ class DebuggerSessionWidget(QWidget):
         elif self._state == ExecutionState.PAUSED:
             self._last_visual_state = "paused"
         self._set_summary(self.status_text())
+        self._refresh_console_input_affordance()
         self.stateChanged.emit(state_value)
 
     def _on_started(self, data: dict) -> None:
@@ -437,6 +478,7 @@ class DebuggerSessionWidget(QWidget):
         if self._last_visual_state not in {"failed", "paused"}:
             self._last_visual_state = "finished"
             self._set_summary("Finished")
+        self._refresh_console_input_affordance()
         self.finished.emit()
         self.stateChanged.emit(self._state.value)
 
@@ -638,6 +680,98 @@ class DebuggerSessionWidget(QWidget):
         if not expression:
             return
         self.controller.evaluate_expression(expression)
+
+    def _submit_console_input(self) -> None:
+        if self._state == ExecutionState.PAUSED:
+            expression = str(self.console_input.text() or "").strip()
+            if not expression:
+                return
+            self.console_input.clear()
+            if not self.controller.evaluate_expression(expression):
+                self._append_output("[debug] Evaluation is unavailable for this frame.", category="debug")
+            return
+        text = str(self.console_input.text() or "")
+        if not text and not self.controller.supports_stdin():
+            return
+        self.console_input.clear()
+        if not self.controller.send_stdin(text):
+            self._append_output("[debug] Program input is unavailable for this debugger session.", category="debug")
+
+    def _refresh_console_input_affordance(self) -> None:
+        if self._state == ExecutionState.PAUSED:
+            self.console_input.setEnabled(True)
+            self.console_submit_button.setEnabled(True)
+            self.console_input.setPlaceholderText("Evaluate expression in paused frame")
+            self.console_submit_button.setText("Evaluate")
+            return
+        stdin_enabled = self.controller.supports_stdin()
+        self.console_input.setEnabled(stdin_enabled)
+        self.console_submit_button.setEnabled(stdin_enabled)
+        if stdin_enabled:
+            self.console_input.setPlaceholderText("Send input to the running program")
+            self.console_submit_button.setText("Send")
+        else:
+            self.console_input.setPlaceholderText("Program input is unavailable until interactive I/O is attached")
+            self.console_submit_button.setText("Send")
+
+    def start_debug_io_terminal(
+        self,
+        *,
+        label: str,
+        cwd: str,
+        argv: list[str],
+        env: dict[str, str | None],
+        start_stopped: bool = False,
+    ) -> int:
+        command = [str(part) for part in (argv or []) if str(part)]
+        if not command:
+            return 0
+        if self._debug_io_terminal is not None:
+            self.io_layout.removeWidget(self._debug_io_terminal)
+            self._debug_io_terminal.deleteLater()
+            self._debug_io_terminal = None
+        env_map = {str(key): str(value) for key, value in dict(env or {}).items() if value is not None}
+        terminal = DebuggerIoTerminalWidget(
+            argv=command,
+            cwd=str(cwd or "").strip(),
+            env=env_map,
+            parent=self.io_host,
+        )
+        terminal.setObjectName("DebuggerIoTerminalWidget")
+        terminal.setToolTip(str(label or "Debugger I/O"))
+        self.io_layout.addWidget(terminal, 1)
+        self._debug_io_terminal = terminal
+        pid = int(terminal.process_id() or 0)
+        if start_stopped and pid > 0:
+            terminal.signal_process(pid, signal.SIGSTOP)
+        self.io_host.setVisible(True)
+        terminal.setFocus()
+        self._ensure_debug_io_visible()
+        self._refresh_console_input_affordance()
+        return pid
+
+    def send_debug_io_input(self, text: str) -> bool:
+        if self._debug_io_terminal is None:
+            return False
+        self._debug_io_terminal.post(str(text))
+        self._debug_io_terminal.setFocus()
+        return True
+
+    def debug_io_terminal_available(self) -> bool:
+        return self._debug_io_terminal is not None
+
+    def _ensure_debug_io_visible(self) -> None:
+        dock = getattr(self.ide, "dock_debugger", None)
+        if dock is None:
+            return
+        dock.show()
+        dock.raise_()
+        dock.setMinimumHeight(max(int(dock.minimumHeight() or 0), 220))
+        try:
+            dock.resize(dock.width(), max(dock.height(), 260))
+        except Exception:
+            pass
+        self.updateGeometry()
 
     @staticmethod
     def _populate_variable_group(parent: QTreeWidgetItem, values: dict) -> None:
