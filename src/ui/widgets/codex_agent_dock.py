@@ -102,12 +102,13 @@ _MENTION_MAX_FILES = 5000
 _MENTION_CACHE_TTL_SECONDS = 8.0
 _BUBBLE_DEBUG_LOG_BASENAME = "codex-agent-bubble-debug.log"
 _RATE_LIMITS_DEBUG_LOG_BASENAME = "codex-agent-rate-limits-debug.log"
+_RATE_LIMITS_RECENT_LOG_SCAN_LIMIT = 48
 _APP_ROOT = Path(__file__).resolve().parents[3]
 _PROMPT_USER_MESSAGE_START = "<tide_user_message>"
 _PROMPT_USER_MESSAGE_END = "</tide_user_message>"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _STREAM_RATE_LIMITS_RE = re.compile(
-    r"5h:\s*(\d{1,3})%\s*remaining.*?(?:weekly|week):\s*(\d{1,3})%\s*remaining",
+    r"^\s*5h:\s*(\d{1,3})%\s*remaining\s*\|\s*(?:weekly|week):\s*(\d{1,3})%\s*remaining\s*$",
     re.IGNORECASE,
 )
 _WORD_TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
@@ -194,6 +195,14 @@ def _normalize_rate_limits_tooltip(text: object) -> str:
     return normalized or "Rate limit data unavailable"
 
 
+def _stale_rate_limits_tooltip(text: object) -> str:
+    base = _normalize_rate_limits_tooltip(text)
+    notice = "Showing last known quota because the current Codex session did not provide rate_limits."
+    if notice in base:
+        return base
+    return f"{base}\n\n{notice}"
+
+
 def _timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
@@ -229,6 +238,7 @@ class _TranscriptEntry:
     role: str
     text: str
     timestamp: str | None = None
+    item_count: int = 1
 
 
 @dataclass(slots=True)
@@ -1866,6 +1876,15 @@ class CodexAgentDockWidget(QWidget):
             return chunk.lstrip("\r\n")
         return f"{current_text}\n{chunk}"
 
+    @staticmethod
+    def _append_transcript_block(current_text: str, text: str) -> str:
+        chunk = str(text or "").strip("\r\n")
+        if not current_text:
+            return chunk
+        if not chunk:
+            return str(current_text or "")
+        return f"{current_text}\n\n{chunk}"
+
     def _buffer_diff_line(self, line: str) -> None:
         self._pending_diff_lines.append(str(line or ""))
 
@@ -1941,6 +1960,7 @@ class CodexAgentDockWidget(QWidget):
             timestamp=str(entry.timestamp or "").strip() or None,
             link_activated=self._on_bubble_link_activated,
             role_label=_ROLE_LABELS.get(role, role.title()),
+            item_count=entry.item_count,
         )
         self._apply_bubble_theme(bubble)
         bubble.sizeHintChanged.connect(self._on_transcript_bubble_size_hint_changed)
@@ -3167,13 +3187,17 @@ class CodexAgentDockWidget(QWidget):
         stripped = _strip_ansi(str(text or "")).strip()
         if not stripped:
             return
-        match = _STREAM_RATE_LIMITS_RE.search(stripped)
+        match = _STREAM_RATE_LIMITS_RE.fullmatch(stripped)
         if match is None:
             return
         five_hour = max(0, min(100, int(match.group(1))))
         weekly = max(0, min(100, int(match.group(2))))
         label = f"5h: {five_hour}% remaining | Weekly: {weekly}% remaining"
-        self._apply_rate_limits_label(label, "Live rate limits from Codex output", remember=True)
+        tooltip = "Live rate limits from Codex output"
+        last_tooltip = str(self._last_rate_limits_tooltip or "").strip()
+        if last_tooltip.startswith("5h reset:"):
+            tooltip = last_tooltip
+        self._apply_rate_limits_label(label, tooltip, remember=True)
 
     def _use_stream_transcript_fallback(self) -> bool:
         if not self._transcript_watch_active:
@@ -3239,13 +3263,21 @@ class CodexAgentDockWidget(QWidget):
         line = str(text).rstrip("\n")
         last_entry = self._transcript_entries[-1] if self._transcript_entries else None
         force_boundary = self._consume_forced_bubble_boundary(role)
-        can_merge = (
-            merge
-            and not force_boundary
-            and timestamp is None
+        can_group_tools = (
+            role == "tools"
             and last_entry is not None
-            and last_entry.role == role
-            and last_entry.timestamp is None
+            and last_entry.role == "tools"
+        )
+        can_merge = (
+            can_group_tools
+            or (
+                merge
+                and not force_boundary
+                and timestamp is None
+                and last_entry is not None
+                and last_entry.role == role
+                and last_entry.timestamp is None
+            )
         )
         if (
             not line.strip()
@@ -3254,18 +3286,28 @@ class CodexAgentDockWidget(QWidget):
             return
 
         if can_merge and last_entry is not None:
-            last_entry.text = self._append_transcript_line(last_entry.text, line)
+            if can_group_tools:
+                last_entry.text = self._append_transcript_block(last_entry.text, line)
+                last_entry.item_count = max(1, int(last_entry.item_count)) + 1
+            else:
+                last_entry.text = self._append_transcript_line(last_entry.text, line)
             if role == "assistant":
                 self._latest_assistant_bubble_text = str(last_entry.text or "")
             if self._transcript_bubbles:
-                self._transcript_bubbles[-1].append_line(line)
-                self._prune_repeated_suffix_in_last_entry()
+                bubble = self._transcript_bubbles[-1]
+                if can_group_tools:
+                    bubble.set_text(last_entry.text)
+                    bubble.set_item_count(last_entry.item_count)
+                else:
+                    bubble.append_line(line)
+                    self._prune_repeated_suffix_in_last_entry()
             self._prune_replayed_transcript_tail()
         else:
             entry = _TranscriptEntry(
                 role=role,
                 timestamp=timestamp,
                 text=self._append_transcript_line("", line),
+                item_count=1,
             )
             self._transcript_entries.append(entry)
             bubble = self._new_transcript_bubble(entry)
@@ -3511,6 +3553,9 @@ class CodexAgentDockWidget(QWidget):
                 for index, entry in enumerate(visible_entries, start=1):
                     role = str(entry.role or "").strip()
                     label = _ROLE_LABELS.get(role, role.title())
+                    count = max(1, int(entry.item_count))
+                    if count > 1:
+                        label = f"{label} (x{count})"
                     header = f"[bubble {index}] {label}"
                     if entry.timestamp:
                         header = f"{header} @ {entry.timestamp}"
@@ -3868,30 +3913,28 @@ class CodexAgentDockWidget(QWidget):
         except Exception:
             return "--"
 
-    def _rate_limit_display_for_session(self, session_id: str) -> tuple[str, str]:
-        normalized_id = str(session_id or "").strip()
-        if not normalized_id:
-            self._append_rate_limits_debug_log("task: empty session_id")
-            return _RATE_LIMITS_UNAVAILABLE, "Rate limit data unavailable"
+    def _rate_limits_display_from_payload(self, rate_limits: dict[str, Any]) -> tuple[str, str] | None:
+        def _remaining(bucket: Any) -> str:
+            if not isinstance(bucket, dict):
+                return "--"
+            try:
+                used = float(bucket.get("used_percent", 0.0))
+            except Exception:
+                return "--"
+            remaining = max(0.0, min(100.0, 100.0 - used))
+            return f"{remaining:.0f}%"
 
-        sessions_dir = Path.home() / ".codex" / "sessions"
-        if not sessions_dir.is_dir():
-            self._append_rate_limits_debug_log("task: sessions_dir not found")
-            return _RATE_LIMITS_UNAVAILABLE, "Codex sessions directory not found"
+        primary = rate_limits.get("primary")
+        secondary = rate_limits.get("secondary")
+        display = f"5h: {_remaining(primary)} remaining | Weekly: {_remaining(secondary)} remaining"
+        if display == "5h: -- remaining | Weekly: -- remaining":
+            return None
+        primary_reset = self._format_reset_time(primary.get("resets_at") if isinstance(primary, dict) else None)
+        secondary_reset = self._format_reset_time(secondary.get("resets_at") if isinstance(secondary, dict) else None)
+        tooltip = f"5h reset: {primary_reset}\nWeekly reset: {secondary_reset}"
+        return display, tooltip
 
-        candidates = list(sessions_dir.rglob(f"*{normalized_id}.jsonl"))
-        if not candidates:
-            self._append_rate_limits_debug_log(f"task: no candidates for {normalized_id}")
-            return _RATE_LIMITS_UNAVAILABLE, "No rate limit data found for current session yet"
-
-        try:
-            log_path = max(candidates, key=lambda path: path.stat().st_mtime)
-        except Exception:
-            log_path = candidates[-1]
-        self._append_rate_limits_debug_log(
-            f"task: reading {log_path} (candidates={len(candidates)}) for {normalized_id}"
-        )
-
+    def _rate_limit_display_from_log(self, log_path: Path) -> tuple[str, str] | None:
         rate_limits: dict[str, Any] | None = None
         scanned_lines = 0
         try:
@@ -3914,37 +3957,96 @@ class CodexAgentDockWidget(QWidget):
                     if isinstance(candidate, dict):
                         rate_limits = candidate
         except Exception:
-            rate_limits = None
             self._append_rate_limits_debug_log(
                 f"task: read exception while scanning {log_path} (lines={scanned_lines})"
             )
+            return None
 
-        if not isinstance(rate_limits, dict):
-            self._append_rate_limits_debug_log(
-                f"task: no rate_limits found after scan (lines={scanned_lines}) for {normalized_id}"
-            )
-            return _RATE_LIMITS_UNAVAILABLE, "No rate limit data found for current session yet"
-
-        def _remaining(bucket: Any) -> str:
-            if not isinstance(bucket, dict):
-                return "--"
-            try:
-                used = float(bucket.get("used_percent", 0.0))
-            except Exception:
-                return "--"
-            remaining = max(0.0, min(100.0, 100.0 - used))
-            return f"{remaining:.0f}%"
-
-        primary = rate_limits.get("primary")
-        secondary = rate_limits.get("secondary")
-        display = f"5h: {_remaining(primary)} remaining | Weekly: {_remaining(secondary)} remaining"
-        primary_reset = self._format_reset_time(primary.get("resets_at") if isinstance(primary, dict) else None)
-        secondary_reset = self._format_reset_time(secondary.get("resets_at") if isinstance(secondary, dict) else None)
-        tooltip = f"5h reset: {primary_reset}\nWeekly reset: {secondary_reset}"
+        display = self._rate_limits_display_from_payload(rate_limits) if isinstance(rate_limits, dict) else None
+        if display is None:
+            return None
         self._append_rate_limits_debug_log(
-            f"task: parsed display='{display}' (lines={scanned_lines})"
+            f"task: parsed display='{display[0]}' (lines={scanned_lines}) from {log_path.name}"
         )
-        return display, tooltip
+        return display
+
+    def _recent_session_log_candidates(self, session_id: str | None = None) -> list[Path]:
+        sessions_dir = Path.home() / ".codex" / "sessions"
+        if not sessions_dir.is_dir():
+            self._append_rate_limits_debug_log("task: sessions_dir not found")
+            return []
+
+        normalized_id = str(session_id or "").strip()
+        if normalized_id:
+            matches = list(sessions_dir.rglob(f"*{normalized_id}.jsonl"))
+            if not matches:
+                self._append_rate_limits_debug_log(f"task: no candidates for {normalized_id}")
+                return []
+            try:
+                matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            except Exception:
+                matches = list(reversed(matches))
+            return matches
+
+        try:
+            candidates = sorted(
+                sessions_dir.rglob("*.jsonl"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            candidates = list(sessions_dir.rglob("*.jsonl"))
+            candidates.reverse()
+        return candidates[:_RATE_LIMITS_RECENT_LOG_SCAN_LIMIT]
+
+    def _latest_rate_limit_display(self) -> tuple[str, str]:
+        for log_path in self._recent_session_log_candidates():
+            display = self._rate_limit_display_from_log(log_path)
+            if display is not None:
+                self._append_rate_limits_debug_log(
+                    f"task: using latest global rate limits from {log_path}"
+                )
+                return display
+        self._append_rate_limits_debug_log("task: no usable global rate limits found")
+        return _RATE_LIMITS_UNAVAILABLE, "No rate limit data found in recent sessions"
+
+    def _rate_limit_display_for_session(self, session_id: str) -> tuple[str, str]:
+        normalized_id = str(session_id or "").strip()
+        if not normalized_id:
+            self._append_rate_limits_debug_log("task: empty session_id")
+            return self._latest_rate_limit_display()
+
+        candidates = self._recent_session_log_candidates(normalized_id)
+        if not candidates:
+            fallback = self._latest_rate_limit_display()
+            if fallback[0] != _RATE_LIMITS_UNAVAILABLE:
+                self._append_rate_limits_debug_log(
+                    f"task: using global fallback for {normalized_id}"
+                )
+            return fallback
+
+        try:
+            log_path = candidates[0]
+        except Exception:
+            log_path = candidates[-1]
+        self._append_rate_limits_debug_log(
+            f"task: reading {log_path} (candidates={len(candidates)}) for {normalized_id}"
+        )
+
+        display = self._rate_limit_display_from_log(log_path)
+        if display is not None:
+            return display
+
+        fallback = self._latest_rate_limit_display()
+        if fallback[0] != _RATE_LIMITS_UNAVAILABLE:
+            self._append_rate_limits_debug_log(
+                f"task: using global fallback after empty session payload for {normalized_id}"
+            )
+        else:
+            self._append_rate_limits_debug_log(
+                f"task: no rate_limits found for {normalized_id}; keeping unavailable"
+            )
+        return fallback
 
     def _update_rate_limits_label(self) -> None:
         session_id = str(self._session_id or "").strip()
@@ -3980,10 +4082,10 @@ class CodexAgentDockWidget(QWidget):
             tooltip = str(result[1] or "Rate limit data unavailable")
             if text == _RATE_LIMITS_UNAVAILABLE and self._last_rate_limits_text != _RATE_LIMITS_UNAVAILABLE:
                 text = self._last_rate_limits_text
-                tooltip = self._last_rate_limits_tooltip
+                tooltip = _stale_rate_limits_tooltip(self._last_rate_limits_tooltip)
         else:
             text = self._last_rate_limits_text
-            tooltip = self._last_rate_limits_tooltip
+            tooltip = _stale_rate_limits_tooltip(self._last_rate_limits_tooltip)
         self._apply_rate_limits_label(text, tooltip, remember=True)
         self._append_rate_limits_debug_log(
             f"update: applied token={token} elapsed_ms={elapsed_ms} text='{text}'"

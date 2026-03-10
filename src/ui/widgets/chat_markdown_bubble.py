@@ -105,10 +105,13 @@ class ChatMarkdownBubble(QFrame):
         timestamp: str | None = None,
         link_activated: Callable[[str], None] | None = None,
         role_label: str | None = None,
+        item_count: int = 1,
     ) -> None:
         super().__init__()
         self.role = role
         self.timestamp = timestamp
+        self._role_label = str(role_label or role.title())
+        self._item_count = max(1, int(item_count))
         self._text = ""
         self._link_activated = link_activated
         self._collapsible = role in {"tools", "diff"}
@@ -122,15 +125,13 @@ class ChatMarkdownBubble(QFrame):
         layout.setContentsMargins(8, 5, 8, 6)
         layout.setSpacing(2)
 
-        header_label = str(role_label or role.title())
-        header_text = f"{header_label}  {timestamp}" if timestamp else header_label
         header_row: QHBoxLayout | None = None
         self.header: QLabel | None = None
         if self._show_header:
             header_row = QHBoxLayout()
             header_row.setContentsMargins(0, 0, 2, 0)
             header_row.setSpacing(4)
-            self.header = QLabel(header_text)
+            self.header = QLabel(self._header_text())
             self.header.setObjectName("codexBubbleHeader")
             self.header.setStyleSheet("background-color: transparent;")
             header_row.addWidget(self.header, 1)
@@ -170,6 +171,14 @@ class ChatMarkdownBubble(QFrame):
 
         self.append_line(text)
         self._apply_collapsed_state()
+
+    def set_item_count(self, count: int) -> None:
+        next_count = max(1, int(count))
+        if next_count == self._item_count:
+            return
+        self._item_count = next_count
+        self._refresh_header()
+        self._notify_size_hint_changed()
 
     def append_line(self, text: str) -> None:
         line = str(text or "")
@@ -212,6 +221,18 @@ class ChatMarkdownBubble(QFrame):
         if self.toggle_btn is not None:
             self.toggle_btn.setText("Expand" if collapsed else "Collapse")
         self._notify_size_hint_changed()
+
+    def _refresh_header(self) -> None:
+        if self.header is not None:
+            self.header.setText(self._header_text())
+
+    def _header_text(self) -> str:
+        label = self._role_label
+        if self._item_count > 1:
+            label = f"{label} (x{self._item_count})"
+        if self.timestamp:
+            return f"{label}  {self.timestamp}"
+        return label
 
     def _apply_body_scroll_behavior(self) -> None:
         if self.role == "diff" and self._text_line_count(self._text) > self._DIFF_SCROLL_THRESHOLD_LINES:
