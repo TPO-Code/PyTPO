@@ -425,18 +425,23 @@ class ActionRegistry:
         ide._act_new_terminal = act_new_terminal
 
         run_menu = menubar.addMenu("&Run")
-        run_cfg_menu = run_menu.addMenu("Run Configuration")
+        run_menu.aboutToShow.connect(ide._refresh_runtime_action_states)
+        run_cfg_menu = run_menu.addMenu("Run Configurations")
         run_cfg_menu.aboutToShow.connect(ide.populate_python_run_config_menu)
         ide._run_python_config_menu = run_cfg_menu
-        debug_cfg_menu = run_menu.addMenu("Debug Configuration")
+        ide._run_python_config_menu_action = run_cfg_menu.menuAction()
+        debug_cfg_menu = run_menu.addMenu("Debug Configurations")
         debug_cfg_menu.aboutToShow.connect(ide.populate_python_debug_config_menu)
         ide._run_python_debug_menu = debug_cfg_menu
-        cargo_cfg_menu = run_menu.addMenu("Cargo Configuration")
+        ide._run_python_debug_menu_action = debug_cfg_menu.menuAction()
+        cargo_cfg_menu = run_menu.addMenu("Rust Configurations")
         cargo_cfg_menu.aboutToShow.connect(ide.populate_cargo_run_config_menu)
         ide._run_cargo_config_menu = cargo_cfg_menu
-        build_cfg_menu = run_menu.addMenu("Build Configuration")
+        ide._run_cargo_config_menu_action = cargo_cfg_menu.menuAction()
+        build_cfg_menu = run_menu.addMenu("Build Configurations")
         build_cfg_menu.aboutToShow.connect(ide.populate_build_config_menu)
         ide._run_build_config_menu = build_cfg_menu
+        ide._run_build_config_menu_action = build_cfg_menu.menuAction()
 
         act_build = QAction("Build Current File", ide)
         act_build.triggered.connect(ide.build_current_file)

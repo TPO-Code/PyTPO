@@ -221,6 +221,65 @@ class ExecutionController:
     def has_rust_run_configs(self) -> bool:
         return bool(self.rust_run_config_names())
 
+    def has_cmake_build_configs(self) -> bool:
+        return bool(self.cmake_build_config_names())
+
+    def current_editor_file_path(self) -> str:
+        ed = self.current_editor()
+        if not ed:
+            return ""
+        file_path = getattr(ed, "file_path", "") or ""
+        return self._canonical_path(file_path) if str(file_path or "").strip() else ""
+
+    def can_run_current_file(self) -> bool:
+        file_path = self.current_editor_file_path()
+        if not file_path:
+            return False
+        if self._is_python_runnable_file(file_path):
+            return True
+        if self._is_rust_runnable_file(file_path):
+            return bool(self._resolve_rust_workspace_root(file_path))
+        if self._is_cpp_runnable_file(file_path):
+            return bool(self._find_cmake_root_for_file(file_path))
+        return False
+
+    def can_run_python_current_file(self) -> bool:
+        file_path = self.current_editor_file_path()
+        return bool(file_path and self._is_python_runnable_file(file_path))
+
+    def can_debug_current_file(self) -> bool:
+        return self.can_run_python_current_file()
+
+    def can_run_rust_current_context(self) -> bool:
+        current_file = self.current_editor_file_path()
+        if current_file and self._is_rust_runnable_file(current_file):
+            return bool(self._resolve_rust_workspace_root(current_file))
+        return bool(self._resolve_rust_workspace_root(self.project_root))
+
+    def can_offer_python_run_setup(self) -> bool:
+        if self.has_python_run_configs():
+            return True
+        return self.can_run_python_current_file()
+
+    def can_offer_python_debug_setup(self) -> bool:
+        if self.has_python_run_configs():
+            return True
+        return self.can_debug_current_file()
+
+    def can_offer_rust_run_setup(self) -> bool:
+        if self.has_rust_run_configs():
+            return True
+        return self.can_run_rust_current_context()
+
+    def can_offer_cmake_build_setup(self) -> bool:
+        if self.has_cmake_build_configs():
+            return True
+        file_path = self.current_editor_file_path()
+        if file_path and self._is_cpp_buildable_file(file_path):
+            return bool(self._find_cmake_root_for_file(file_path))
+        root_cmake = os.path.join(self.project_root, "CMakeLists.txt")
+        return os.path.isfile(root_cmake)
+
     def _normalized_python_run_configs(self) -> list[dict]:
         project_python = self.settings_manager.get("build.python", scope_preference="project", default={})
         if not isinstance(project_python, dict):
@@ -1083,18 +1142,16 @@ class ExecutionController:
         return suffix in _CPP_BUILDABLE_SUFFIXES
 
     def can_build_current_file(self) -> bool:
-        ed = self.current_editor()
-        if not ed:
+        file_path = self.current_editor_file_path()
+        if not file_path or not self._is_cpp_buildable_file(file_path):
             return False
-        file_path = getattr(ed, "file_path", "") or ""
-        return self._is_cpp_buildable_file(file_path)
+        return bool(self._find_cmake_root_for_file(file_path))
 
     def can_build_and_run_current_file(self) -> bool:
-        ed = self.current_editor()
-        if not ed:
+        file_path = self.current_editor_file_path()
+        if not file_path or not self._is_cpp_runnable_file(file_path):
             return False
-        file_path = getattr(ed, "file_path", "") or ""
-        return self._is_cpp_runnable_file(file_path)
+        return bool(self._find_cmake_root_for_file(file_path))
 
     def _find_cmake_root_for_file(self, file_path: str) -> str:
         cpath = self._canonical_path(file_path)

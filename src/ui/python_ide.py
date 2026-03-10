@@ -556,11 +556,15 @@ class PythonIDE(Window):
         self._act_extract_method: QAction | None = None
         self._act_toggle_markdown_preview: QAction | None = None
         self._run_python_config_menu: QMenu | None = None
+        self._run_python_config_menu_action: QAction | None = None
         self._run_python_config_action_group: QActionGroup | None = None
         self._run_python_debug_menu: QMenu | None = None
+        self._run_python_debug_menu_action: QAction | None = None
         self._run_cargo_config_menu: QMenu | None = None
+        self._run_cargo_config_menu_action: QAction | None = None
         self._run_cargo_config_action_group: QActionGroup | None = None
         self._run_build_config_menu: QMenu | None = None
+        self._run_build_config_menu_action: QAction | None = None
         self._run_build_config_action_group: QActionGroup | None = None
         self._find_in_files_dialog: FindInFilesDialog | None = None
         self._find_results_dock: QDockWidget | None = None
@@ -1874,12 +1878,44 @@ class PythonIDE(Window):
     def _has_runnable_target(self) -> bool:
         if not self._has_project_loaded():
             return False
-        current = self.current_editor()
-        if isinstance(current, EditorWidget):
+        if self.execution_controller.can_run_current_file():
+            return True
+        if self.execution_controller.active_python_run_config_name():
+            return True
+        if self.execution_controller.active_rust_run_config_name():
             return True
         if self.console_run_manager and self.console_run_manager.active_file_key():
             return True
         return False
+
+    def _has_any_run_menu_option(self) -> bool:
+        if not self._has_project_loaded():
+            return False
+        ctrl = self.execution_controller
+        return bool(
+            ctrl.can_run_current_file()
+            or ctrl.has_python_run_configs()
+            or ctrl.has_rust_run_configs()
+            or ctrl.can_offer_python_run_setup()
+            or ctrl.can_offer_rust_run_setup()
+        )
+
+    def _refresh_execution_menu_visibility(self) -> None:
+        project_loaded = self._has_project_loaded()
+        ctrl = self.execution_controller
+        show_python_run = bool(project_loaded and ctrl.can_offer_python_run_setup())
+        show_python_debug = bool(project_loaded and ctrl.can_offer_python_debug_setup())
+        show_rust = bool(project_loaded and ctrl.can_offer_rust_run_setup())
+        show_build = bool(project_loaded and ctrl.can_offer_cmake_build_setup())
+
+        if self._run_python_config_menu_action is not None:
+            self._run_python_config_menu_action.setVisible(show_python_run)
+        if self._run_python_debug_menu_action is not None:
+            self._run_python_debug_menu_action.setVisible(show_python_debug)
+        if self._run_cargo_config_menu_action is not None:
+            self._run_cargo_config_menu_action.setVisible(show_rust)
+        if self._run_build_config_menu_action is not None:
+            self._run_build_config_menu_action.setVisible(show_build)
 
     def _bind_global_action_recompute_hooks(self) -> None:
         app = QApplication.instance()
@@ -2218,8 +2254,6 @@ class PythonIDE(Window):
         project_loaded = self._has_project_loaded()
         active_editor = self.current_editor()
         has_active_editor = isinstance(active_editor, EditorWidget)
-        active_editor_path = str(getattr(active_editor, "file_path", "") or "") if has_active_editor else ""
-        has_active_python_editor = bool(active_editor_path and active_editor_path.lower().endswith(".py"))
         has_selection = bool(has_active_editor and active_editor.textCursor().hasSelection())
         has_python_run_configs = bool(project_loaded and self.execution_controller.has_python_run_configs())
         has_active_python_run_config = bool(
@@ -2237,6 +2271,8 @@ class PythonIDE(Window):
         can_extract_variable = bool(has_selection and extract_language in {"python", "c", "cpp"})
         can_extract_method = bool(has_selection and extract_language in {"python", "cpp"})
         has_runnable = self._has_runnable_target()
+        can_run_current_file = bool(project_loaded and self.execution_controller.can_run_current_file())
+        can_debug_current_file = bool(project_loaded and self.execution_controller.can_debug_current_file())
         has_buildable = bool(project_loaded and self.execution_controller.can_build_current_file())
         has_build_and_run = bool(project_loaded and self.execution_controller.can_build_and_run_current_file())
         active_doc_widget = self._current_document_widget()
@@ -2251,11 +2287,11 @@ class PythonIDE(Window):
             self._act_build_and_run_current.setVisible(has_build_and_run)
         if self._act_run_current is not None:
             self._act_run_current.setEnabled(
-                project_loaded and (has_active_editor or has_active_python_run_config or has_active_rust_run_config)
+                project_loaded and (can_run_current_file or has_active_python_run_config or has_active_rust_run_config)
             )
         if self._act_debug_current is not None:
             self._act_debug_current.setEnabled(
-                project_loaded and (has_active_python_editor or has_active_python_run_config)
+                project_loaded and (can_debug_current_file or has_active_python_run_config)
             )
         if self._act_rerun_current is not None:
             self._act_rerun_current.setEnabled(project_loaded and (has_runnable or running_count > 0))
@@ -2290,9 +2326,10 @@ class PythonIDE(Window):
             can_toolbar_run = bool(
                 project_loaded
                 and (
-                    has_active_editor
+                    can_run_current_file
                     or (has_python_run_configs and has_active_python_run_config)
                     or (has_rust_run_configs and has_active_rust_run_config)
+                    or self._has_any_run_menu_option()
                 )
             )
             self._toolbar_run_btn.setEnabled(can_toolbar_run)
@@ -2300,7 +2337,7 @@ class PythonIDE(Window):
             can_toolbar_debug = bool(
                 project_loaded
                 and (
-                    has_active_python_editor
+                    can_debug_current_file
                     or (has_python_run_configs and has_active_python_run_config)
                 )
             )
@@ -2314,9 +2351,8 @@ class PythonIDE(Window):
         if self._toolbar_tdoc_index_btn is not None:
             self._toolbar_tdoc_index_btn.setEnabled(has_active_tdoc)
             self._toolbar_tdoc_index_btn.setVisible(has_active_tdoc)
-        if self._run_build_config_menu is not None:
-            show_build_menu = bool(project_loaded and (has_buildable or has_build_and_run))
-            self._run_build_config_menu.menuAction().setVisible(show_build_menu)
+
+        self._refresh_execution_menu_visibility()
         if self._toolbar_controls_host is not None:
             self._toolbar_controls_host.setVisible(project_loaded)
         if self._toolbar_ai_checkbox is not None:
@@ -6308,25 +6344,33 @@ class PythonIDE(Window):
         manage = menu.addAction("Manage Build Configurations...")
         manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-build-configs"))
 
-    def _populate_python_run_menu(self, menu: QMenu) -> None:
+    def _populate_python_run_menu(
+        self,
+        menu: QMenu,
+        *,
+        include_current_entry: bool = True,
+        include_manage_entry: bool = True,
+    ) -> None:
         menu.clear()
         active_name = self.execution_controller.active_python_run_config_name()
         group = QActionGroup(menu)
         group.setExclusive(True)
         self._run_python_config_action_group = group
 
-        run_current = menu.addAction("Run Current File")
-        run_current.setCheckable(True)
-        run_current.setChecked(not active_name)
-        run_current.triggered.connect(
-            lambda _checked=False: self._set_python_run_target_current_file(run_now=True)
-        )
-        group.addAction(run_current)
+        if include_current_entry and self.execution_controller.can_run_python_current_file():
+            run_current = menu.addAction("Run Current File")
+            run_current.setCheckable(True)
+            run_current.setChecked(not active_name)
+            run_current.triggered.connect(
+                lambda _checked=False: self._set_python_run_target_current_file(run_now=True)
+            )
+            group.addAction(run_current)
 
         names = self.execution_controller.python_run_config_names()
 
         if names:
-            menu.addSeparator()
+            if include_current_entry and self.execution_controller.can_run_python_current_file():
+                menu.addSeparator()
             for name in names:
                 action = menu.addAction(name)
                 action.setCheckable(True)
@@ -6336,22 +6380,34 @@ class PythonIDE(Window):
                 )
                 group.addAction(action)
 
-        menu.addSeparator()
-        manage = menu.addAction("Manage Run Configurations...")
-        manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
+        if include_manage_entry:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            manage = menu.addAction("Manage Run Configurations...")
+            manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
 
-    def _populate_python_debug_menu(self, menu: QMenu) -> None:
+    def _populate_python_debug_menu(
+        self,
+        menu: QMenu,
+        *,
+        include_current_entry: bool = True,
+        include_manage_entry: bool = True,
+    ) -> None:
         menu.clear()
         active_name = self.execution_controller.active_python_debug_config_name()
 
-        debug_current = menu.addAction("Debug Current File")
-        debug_current.setCheckable(True)
-        debug_current.setChecked(not active_name)
-        debug_current.triggered.connect(lambda _checked=False: self._set_python_debug_target_current_file(debug_now=True))
+        if include_current_entry and self.execution_controller.can_debug_current_file():
+            debug_current = menu.addAction("Debug Current File")
+            debug_current.setCheckable(True)
+            debug_current.setChecked(not active_name)
+            debug_current.triggered.connect(
+                lambda _checked=False: self._set_python_debug_target_current_file(debug_now=True)
+            )
 
         names = self.execution_controller.python_run_config_names()
         if names:
-            menu.addSeparator()
+            if include_current_entry and self.execution_controller.can_debug_current_file():
+                menu.addSeparator()
             for name in names:
                 action = menu.addAction(name)
                 action.setCheckable(True)
@@ -6360,28 +6416,38 @@ class PythonIDE(Window):
                     lambda checked=False, cfg_name=name: self.debug_python_config(cfg_name, set_active=True)
                 )
 
-        menu.addSeparator()
-        manage = menu.addAction("Manage Run Configurations...")
-        manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
+        if include_manage_entry:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            manage = menu.addAction("Manage Run Configurations...")
+            manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
 
-    def _populate_cargo_run_menu(self, menu: QMenu) -> None:
+    def _populate_cargo_run_menu(
+        self,
+        menu: QMenu,
+        *,
+        include_current_entry: bool = True,
+        include_manage_entry: bool = True,
+    ) -> None:
         menu.clear()
         active_name = self.execution_controller.active_rust_run_config_name()
         group = QActionGroup(menu)
         group.setExclusive(True)
         self._run_cargo_config_action_group = group
 
-        run_current = menu.addAction("Run Cargo Project (Current Context)")
-        run_current.setCheckable(True)
-        run_current.setChecked(not active_name)
-        run_current.triggered.connect(
-            lambda _checked=False: self._set_rust_run_target_default(run_now=True)
-        )
-        group.addAction(run_current)
+        if include_current_entry and self.execution_controller.can_run_rust_current_context():
+            run_current = menu.addAction("Run Rust Project (Current Context)")
+            run_current.setCheckable(True)
+            run_current.setChecked(not active_name)
+            run_current.triggered.connect(
+                lambda _checked=False: self._set_rust_run_target_default(run_now=True)
+            )
+            group.addAction(run_current)
 
         names = self.execution_controller.rust_run_config_names()
         if names:
-            menu.addSeparator()
+            if include_current_entry and self.execution_controller.can_run_rust_current_context():
+                menu.addSeparator()
             for name in names:
                 action = menu.addAction(name)
                 action.setCheckable(True)
@@ -6391,9 +6457,11 @@ class PythonIDE(Window):
                 )
                 group.addAction(action)
 
-        menu.addSeparator()
-        manage = menu.addAction("Manage Cargo Configurations...")
-        manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
+        if include_manage_entry:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            manage = menu.addAction("Manage Rust Configurations...")
+            manage.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
 
     def populate_python_run_config_menu(self) -> None:
         menu = self._run_python_config_menu
@@ -6417,16 +6485,84 @@ class PythonIDE(Window):
         menu = self._toolbar_run_menu
         if menu is None:
             return
-        self._populate_python_run_menu(menu)
-        menu.addSeparator()
-        cargo = menu.addMenu("Cargo Configurations")
-        self._populate_cargo_run_menu(cargo)
+        menu.clear()
+
+        can_run_current = self.execution_controller.can_run_current_file()
+        has_python_configs = self.execution_controller.has_python_run_configs()
+        has_rust_configs = self.execution_controller.has_rust_run_configs()
+        show_python_setup = self.execution_controller.can_offer_python_run_setup() and not has_python_configs
+        show_rust_setup = self.execution_controller.can_offer_rust_run_setup() and not has_rust_configs
+
+        if can_run_current:
+            action = menu.addAction("Run Current File")
+            action.triggered.connect(lambda _checked=False: self.execution_controller.run_current_file())
+
+        if has_python_configs:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            python_menu = menu.addMenu("Python Configurations")
+            self._populate_python_run_menu(
+                python_menu,
+                include_current_entry=False,
+                include_manage_entry=True,
+            )
+        elif show_python_setup:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            action = menu.addAction("Set Up Python Run Configurations...")
+            action.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
+
+        if has_rust_configs:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            rust_menu = menu.addMenu("Rust Configurations")
+            self._populate_cargo_run_menu(
+                rust_menu,
+                include_current_entry=self.execution_controller.can_run_rust_current_context(),
+                include_manage_entry=True,
+            )
+        elif show_rust_setup:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            action = menu.addAction("Set Up Rust Run Configurations...")
+            action.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-rust-run-configs"))
+
+        if menu.isEmpty():
+            empty = menu.addAction("No Run Targets Available")
+            empty.setEnabled(False)
 
     def populate_toolbar_python_debug_menu(self) -> None:
         menu = self._toolbar_debug_menu
         if menu is None:
             return
-        self._populate_python_debug_menu(menu)
+        menu.clear()
+
+        can_debug_current = self.execution_controller.can_debug_current_file()
+        has_python_configs = self.execution_controller.has_python_run_configs()
+        show_python_setup = self.execution_controller.can_offer_python_debug_setup() and not has_python_configs
+
+        if can_debug_current:
+            action = menu.addAction("Debug Current File")
+            action.triggered.connect(lambda _checked=False: self.execution_controller.debug_current_file())
+
+        if has_python_configs:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            python_menu = menu.addMenu("Python Configurations")
+            self._populate_python_debug_menu(
+                python_menu,
+                include_current_entry=False,
+                include_manage_entry=True,
+            )
+        elif show_python_setup:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            action = menu.addAction("Set Up Python Run Configurations...")
+            action.triggered.connect(lambda _checked=False: self.open_settings(initial_page_id="project-run-configs"))
+
+        if menu.isEmpty():
+            empty = menu.addAction("No Debug Targets Available")
+            empty.setEnabled(False)
 
     def run_python_config(self, config_name: str, *, set_active: bool = False) -> None:
         self.execution_controller.run_named_python_config(config_name, set_active=bool(set_active))
@@ -6464,14 +6600,24 @@ class PythonIDE(Window):
         if active_rust:
             self.execution_controller.run_named_rust_config(active_rust, set_active=False)
             return
-        self.execution_controller.run_current_file()
+        if self.execution_controller.can_run_current_file():
+            self.execution_controller.run_current_file()
+            return
+        button = self._toolbar_run_btn
+        if button is not None and button.menu() is not None:
+            button.showMenu()
 
     def debug_primary_python_target(self) -> None:
         active_config = self.execution_controller.active_python_debug_config_name()
         if active_config:
             self.execution_controller.debug_named_python_config(active_config, set_active=False)
             return
-        self.execution_controller.debug_current_file()
+        if self.execution_controller.can_debug_current_file():
+            self.execution_controller.debug_current_file()
+            return
+        button = self._toolbar_debug_btn
+        if button is not None and button.menu() is not None:
+            button.showMenu()
 
     def run_current_file(self):
         self.execution_controller.run_current_file()
