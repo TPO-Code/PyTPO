@@ -2699,6 +2699,14 @@ class TDocEditorWidget(QTextEdit):
         self.setFont(font)
         self._restyle_collapsed_markdown_headings()
 
+    def setFont(self, font) -> None:
+        super().setFont(font)
+        if hasattr(self, "lineNumberArea") and isinstance(self.lineNumberArea, QWidget):
+            self.lineNumberArea.setFont(self.font())
+            self.lineNumberArea.update()
+        if hasattr(self, "overviewMarkerArea") and isinstance(self.overviewMarkerArea, QWidget):
+            self.overviewMarkerArea.setFont(self.font())
+
     def set_editor_indent_preferences(self, *, use_tabs: bool | None = None, indent_width: int | None = None) -> None:
         if indent_width is not None:
             try:

@@ -612,6 +612,14 @@ class CodeEditor(QPlainTextEdit):
                 return True
         return super().event(event)
 
+    def setFont(self, font) -> None:
+        super().setFont(font)
+        if hasattr(self, "lineNumberArea") and isinstance(self.lineNumberArea, QWidget):
+            self.lineNumberArea.setFont(self.font())
+            self.lineNumberArea.update()
+        if hasattr(self, "overviewMarkerArea") and isinstance(self.overviewMarkerArea, QWidget):
+            self.overviewMarkerArea.setFont(self.font())
+
     def set_editor_font_preferences(self, *, family: str | None = None, point_size: int | None = None) -> None:
         font = self.font()
         if isinstance(family, str) and family.strip():
