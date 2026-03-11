@@ -1633,7 +1633,7 @@ class CodexAgentDockWidget(QWidget):
         preamble_layout = QVBoxLayout(self.preamble_container)
         preamble_layout.setContentsMargins(0, 0, 0, 0)
         preamble_layout.setSpacing(4)
-        preamble_layout.addWidget(QLabel("System preamble (first turn only)"))
+        preamble_layout.addWidget(QLabel("System instructions"))
         self.preamble_frame = _ShimmerBorderFrame()
         self.preamble_edit = _ChatInputEdit(
             mention_provider=self._mention_candidates,
