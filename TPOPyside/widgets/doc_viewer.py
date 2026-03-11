@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QToolButton,
 )
+from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
 # ---------------------------------------------------------
@@ -580,6 +581,23 @@ class DocumentationViewer(QWidget):
             self._navigate_to_file(target, anchor=anchor, push_history=False, select_tree=True)
         finally:
             self._navigating_history = False
+
+
+class DocumentationViewerDialog(DialogWindow):
+    """Dialog wrapper for DocumentationViewer."""
+
+    def __init__(
+        self,
+        doc_root_path: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(use_native_chrome=False, resizable=True, parent=parent)
+        self.setObjectName("DocumentationViewerDialog")
+        self.setWindowTitle("Documentation")
+        self.resize(1180, 760)
+
+        self.viewer = DocumentationViewer(doc_root_path, parent=self)
+        self.set_content_widget(self.viewer)
 
 
 if __name__ == "__main__":

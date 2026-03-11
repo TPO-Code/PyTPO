@@ -10,10 +10,12 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QObject, Slot, QTimer, QUrl, Property, QEvent, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QPalette
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QLineEdit, QWidgetAction, QFileDialog, QApplication, QSplitter, QListWidget, QListWidgetItem, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QLineEdit, QWidgetAction, QApplication, QSplitter, QListWidget, QListWidgetItem, QLabel
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from TPOPyside.dialogs.reusable_file_dialog import FileDialog
 
 
 # ---- JS bridge for copy buttons ----
@@ -841,7 +843,12 @@ window.MV_scrollToRatio = function(ratio, smooth) {
 
     @Slot()
     def _print_to_pdf_dialog(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save as PDF", "", "PDF Files (*.pdf)")
+        path, _selected_filter, _starred = FileDialog.getSaveFileName(
+            self,
+            "Save as PDF",
+            "",
+            "PDF Files (*.pdf)",
+        )
         if path:
             self.print_to_pdf(path)
 

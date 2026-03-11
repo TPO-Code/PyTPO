@@ -324,8 +324,11 @@ class TerminalWidget(QtWidgets.QWidget):
         self._link_color: QtGui.QColor = None    # set by _install_palette_defaults
         self._bg_image: Optional[QtGui.QPixmap] = None
         self._bg_image_path: str = ""
-        self._bg_image_mode: str = "cover"
+        self._bg_image_mode: str = "fit"
         self._bg_image_opacity: float = 0.18
+        self._bg_tint_color: QtGui.QColor | None = None
+        self._bg_tint_strength: float = self._bg_image_opacity
+        self._bg_image_alpha_mode: str = "preserve"
         self._install_palette_defaults()
     
         # Font metrics from current widget font (QSS friendly)
@@ -357,7 +360,7 @@ class TerminalWidget(QtWidgets.QWidget):
                 os.execvpe(exec_argv[0], exec_argv, env2)
 
             # Always interactive; optionally also login (Tilix-like default is interactive, non-login)
-            exec_argv = [shell] + (["-l", "i"] if login else []) + ["-i"]
+            exec_argv = [shell] + (["-l"] if login else []) + ["-i"]
 
             os.execvpe(shell, exec_argv, env2)
     
@@ -387,6 +390,12 @@ class TerminalWidget(QtWidgets.QWidget):
         self._blink = QtCore.QTimer(self)
         self._blink.timeout.connect(self._toggle_cursor)
         self._blink.start(600)
+
+        # Coalesce expensive PTY geometry updates while dragging resize handles.
+        self._geometry_sync_delay_ms = 24
+        self._geometry_sync_timer = QtCore.QTimer(self)
+        self._geometry_sync_timer.setSingleShot(True)
+        self._geometry_sync_timer.timeout.connect(self._flush_pending_geometry_sync)
     
         # Mouse / bracketed paste modes
         self.setMouseTracking(True)
@@ -426,6 +435,8 @@ class TerminalWidget(QtWidgets.QWidget):
             self._cursor_color = pal.color(QtGui.QPalette.Text)
         if self._link_color is None:
             self._link_color = QtGui.QColor("#2f6fff")
+        if self._bg_tint_color is None:
+            self._bg_tint_color = QtGui.QColor(self._bg_default)
 
     def _recompute_metrics(self):
         fm = QtGui.QFontMetrics(self.font())
@@ -451,9 +462,49 @@ class TerminalWidget(QtWidgets.QWidget):
     @staticmethod
     def _normalize_bg_image_mode(mode: str) -> str:
         key = str(mode or "").strip().lower()
-        if key in {"cover", "contain", "stretch", "tile", "center"}:
-            return key
-        return "cover"
+        aliases = {
+            "fit width": "fit_width",
+            "fit_width": "fit_width",
+            "fit height": "fit_height",
+            "fit_height": "fit_height",
+            "fit": "fit",
+            "contain": "contain",
+            "cover": "fit",
+            "stretch": "stretch",
+            "tile": "tile",
+            "center": "center",
+        }
+        return aliases.get(key, "fit")
+
+    @staticmethod
+    def _normalize_bg_alpha_mode(mode: str) -> str:
+        key = str(mode or "").strip().lower()
+        if key in {"preserve", "keep", "alpha"}:
+            return "preserve"
+        if key in {"flatten", "opaque", "ignore_alpha", "ignore alpha"}:
+            return "flatten"
+        return "preserve"
+
+    @staticmethod
+    def _coerce_qcolor(value: QtGui.QColor | str | tuple[int, int, int] | tuple[int, int, int, int] | None) -> QtGui.QColor | None:
+        if value is None:
+            return None
+        if isinstance(value, QtGui.QColor):
+            return QtGui.QColor(value) if value.isValid() else None
+        if isinstance(value, str):
+            color = QtGui.QColor(value.strip())
+            return color if color.isValid() else None
+        if isinstance(value, (tuple, list)):
+            try:
+                if len(value) == 3:
+                    r, g, b = (int(v) for v in value)
+                    return QtGui.QColor(r, g, b)
+                if len(value) == 4:
+                    r, g, b, a = (int(v) for v in value)
+                    return QtGui.QColor(r, g, b, a)
+            except Exception:
+                return None
+        return None
 
     def set_background_image(
             self,
@@ -467,7 +518,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._bg_image = None
             self._bg_image_path = ""
             if opacity is not None:
-                self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+                self.set_background_tint_strength(float(opacity))
             if mode is not None:
                 self._bg_image_mode = self._normalize_bg_image_mode(mode)
             self.update()
@@ -479,7 +530,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._bg_image = pix
         self._bg_image_path = image_path
         if opacity is not None:
-            self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+            self.set_background_tint_strength(float(opacity))
         if mode is not None:
             self._bg_image_mode = self._normalize_bg_image_mode(mode)
         self.update()
@@ -491,7 +542,28 @@ class TerminalWidget(QtWidgets.QWidget):
         self.update()
 
     def set_background_image_opacity(self, opacity: float) -> None:
-        self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+        self.set_background_tint_strength(opacity)
+
+    def set_background_tint(
+            self,
+            color: QtGui.QColor | str | tuple[int, int, int] | tuple[int, int, int, int] | None,
+    ) -> bool:
+        parsed = self._coerce_qcolor(color)
+        if parsed is None:
+            return False
+        self._bg_tint_color = QtGui.QColor(parsed)
+        self.update()
+        return True
+
+    def set_background_tint_strength(self, strength: float) -> None:
+        clamped = max(0.0, min(1.0, float(strength)))
+        self._bg_tint_strength = clamped
+        # Backward-compatible alias for existing callers.
+        self._bg_image_opacity = clamped
+        self.update()
+
+    def set_background_image_alpha_mode(self, mode: str) -> None:
+        self._bg_image_alpha_mode = self._normalize_bg_alpha_mode(mode)
         self.update()
 
     def set_background_image_mode(self, mode: str) -> None:
@@ -503,33 +575,51 @@ class TerminalWidget(QtWidgets.QWidget):
         if pix is None or pix.isNull() or rect.width() <= 0 or rect.height() <= 0:
             return
         mode = self._normalize_bg_image_mode(self._bg_image_mode)
+        alpha_mode = self._normalize_bg_alpha_mode(self._bg_image_alpha_mode)
+
+        source = pix
+        if alpha_mode == "flatten" and source.hasAlpha():
+            flattened = QtGui.QPixmap(source.size())
+            flattened.fill(self._bg_default)
+            merge = QtGui.QPainter(flattened)
+            merge.drawPixmap(0, 0, source)
+            merge.end()
+            source = flattened
+
         p.save()
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
 
         if mode == "tile":
-            p.drawTiledPixmap(rect, pix)
+            p.drawTiledPixmap(rect, source)
         elif mode == "stretch":
-            p.drawPixmap(rect, pix)
+            p.drawPixmap(rect, source)
         else:
-            pw, ph = pix.width(), pix.height()
+            pw, ph = source.width(), source.height()
             if pw > 0 and ph > 0:
                 sx = rect.width() / float(pw)
                 sy = rect.height() / float(ph)
-                if mode == "contain":
+                if mode == "fit":
+                    # "fit" is intentionally cover-style: fill the viewport without stretching.
+                    scale = max(sx, sy)
+                elif mode == "contain":
                     scale = min(sx, sy)
+                elif mode == "fit_width":
+                    scale = sx
+                elif mode == "fit_height":
+                    scale = sy
                 elif mode == "center":
                     scale = 1.0
-                else:  # cover
+                else:
                     scale = max(sx, sy)
                 tw = max(1, int(round(pw * scale)))
                 th = max(1, int(round(ph * scale)))
                 tx = rect.x() + (rect.width() - tw) // 2
                 ty = rect.y() + (rect.height() - th) // 2
-                p.drawPixmap(QtCore.QRect(tx, ty, tw, th), pix)
+                p.drawPixmap(QtCore.QRect(tx, ty, tw, th), source)
 
-        alpha = int(round(max(0.0, min(1.0, float(self._bg_image_opacity))) * 255.0))
+        alpha = int(round(max(0.0, min(1.0, float(self._bg_tint_strength))) * 255.0))
         if alpha > 0:
-            overlay = QtGui.QColor(self._bg_default)
+            overlay = QtGui.QColor(self._bg_tint_color or self._bg_default)
             overlay.setAlpha(alpha)
             p.fillRect(rect, overlay)
         p.restore()
@@ -756,6 +846,20 @@ class TerminalWidget(QtWidgets.QWidget):
         self._set_winsize(rows, cols)
         self._view_offset = min(self._view_offset, self._max_view_offset())
         self.update()
+
+    def _flush_pending_geometry_sync(self) -> None:
+        self._sync_terminal_geometry()
+
+    def _schedule_terminal_geometry_sync(self, *, delay_ms: int | None = None) -> None:
+        delay = self._geometry_sync_delay_ms if delay_ms is None else max(0, int(delay_ms))
+        if delay == 0:
+            if self._geometry_sync_timer.isActive():
+                self._geometry_sync_timer.stop()
+            self._sync_terminal_geometry()
+            return
+        # Throttle (not debounce): keep periodic updates during drag-resize.
+        if not self._geometry_sync_timer.isActive():
+            self._geometry_sync_timer.start(delay)
 
     def _snapshot_all_lines(self) -> list[str]:
         """Oldest→newest: history strings + live buffer rows (trimmed)."""
@@ -1670,7 +1774,7 @@ class TerminalWidget(QtWidgets.QWidget):
 
     def resizeEvent(self, e: QtGui.QResizeEvent):
         super().resizeEvent(e)
-        self._sync_terminal_geometry()
+        self._schedule_terminal_geometry_sync()
 
     # -------- Cleanup --------
     def closeEvent(self, e: QtGui.QCloseEvent):

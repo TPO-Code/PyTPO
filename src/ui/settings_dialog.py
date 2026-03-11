@@ -1,44 +1,31 @@
 from __future__ import annotations
 
-import json
-import re
 import shlex
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFontDatabase
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
-    QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
-    QFormLayout,
-    QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
     QPushButton,
-    QScrollArea,
-    QSpinBox,
-    QStackedWidget,
-    QTextEdit,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from TPOPyside.dialogs.color_picker_dialog import ColorPickerDialog
+from TPOPyside.dialogs.schema_settings_dialog import (
+    FieldBinding,
+    SchemaField,
+    SchemaPage,
+    SchemaSection,
+    SchemaSettingsDialog,
+    SettingsSchema,
+)
 from src.settings_manager import SettingsManager
-from src.settings_models import SettingsScope
-from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory, get_open_file_name
 from src.ui.dialogs.font_selection_dialog import FontSelectionDialog
 from src.ui.interpreter_utils import (
@@ -48,93 +35,17 @@ from src.ui.interpreter_utils import (
 )
 from src.ui.settings.ai_settings_page import AIAssistSettingsPage
 from src.ui.settings.build_configs_settings_page import BuildConfigsSettingsPage
+from src.ui.settings.clangd_repair_settings_page import ClangdRepairSettingsPage
 from src.ui.settings.file_templates_settings_page import FileTemplatesSettingsPage
 from src.ui.settings.github_settings_page import GitHubSettingsPage
 from src.ui.settings.git_settings_page import GitSettingsPage
 from src.ui.settings.keybindings_settings_page import KeybindingsSettingsPage
-from src.ui.settings.clangd_repair_settings_page import ClangdRepairSettingsPage
 from src.ui.settings.project_maintenance_page import ProjectMaintenancePage
 from src.ui.settings.python_run_configs_settings_page import PythonRunConfigsSettingsPage
 from src.ui.settings.rust_run_configs_settings_page import RustRunConfigsSettingsPage
 from src.ui.settings.syntax_highlighting_settings_page import SyntaxHighlightingSettingsPage
-from src.ui.theme_runtime import apply_settings_color_swatch_size
 
-FieldType = Literal[
-    "checkbox",
-    "lineedit",
-    "color",
-    "path_dir",
-    "path_file",
-    "spin",
-    "combo",
-    "list_str",
-    "json",
-    "font_family",
-    "ai_assist_editor",
-    "github_editor",
-    "git_editor",
-    "keybindings_editor",
-    "file_templates_editor",
-    "build_configs_editor",
-    "python_run_configs_editor",
-    "rust_run_configs_editor",
-    "syntax_highlighting_editor",
-    "project_maintenance_tools",
-    "clangd_repair_tools",
-]
-
-
-@dataclass(slots=True)
-class SchemaField:
-    id: str
-    key: str
-    label: str
-    type: FieldType
-    scope: SettingsScope
-    description: str = ""
-    default: Any = None
-    options: list[str] | list[dict[str, Any]] | None = None
-    min: int | None = None
-    max: int | None = None
-
-
-@dataclass(slots=True)
-class SchemaSection:
-    title: str
-    fields: list[SchemaField]
-    description: str = ""
-
-
-@dataclass(slots=True)
-class SchemaPage:
-    id: str
-    category: str
-    title: str
-    scope: SettingsScope
-    sections: list[SchemaSection]
-    subcategory: str | None = None
-    description: str = ""
-    keywords: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class SettingsSchema:
-    pages: list[SchemaPage]
-
-
-@dataclass(slots=True)
-class FieldBinding:
-    key: str
-    scope: SettingsScope
-    widget: QWidget
-    getter: Callable[[], Any]
-    setter: Callable[[Any], None]
-    on_change: Callable[[Callable[..., None]], None]
-    validate: Callable[[], list[str]]
-    persist: bool = True
-    has_pending_changes: Callable[[], bool] | None = None
-    apply_changes: Callable[[], list[str]] | None = None
-
+SETTINGS_TREE_EXPANDED_PATHS_KEY = "ui.settings_dialog.tree_expanded_paths"
 
 PANEL_FIELD_TYPES: set[str] = {
     "ai_assist_editor",
@@ -150,35 +61,9 @@ PANEL_FIELD_TYPES: set[str] = {
     "clangd_repair_tools",
 }
 
-SETTINGS_TREE_NODE_KEY_ROLE = Qt.UserRole + 2
-SETTINGS_TREE_EXPANDED_PATHS_KEY = "ui.settings_dialog.tree_expanded_paths"
-_HEX_COLOR_WITH_ALPHA_RE = re.compile(r"^#(?P<rgb>[0-9a-fA-F]{6})(?P<alpha>[0-9a-fA-F]{2})?$")
 
-
-def _parse_color_value(value: object) -> QColor:
-    text = str(value or "").strip()
-    if not text:
-        return QColor()
-    match = _HEX_COLOR_WITH_ALPHA_RE.fullmatch(text)
-    if match:
-        rgb = str(match.group("rgb") or "")
-        alpha = str(match.group("alpha") or "")
-        try:
-            red = int(rgb[0:2], 16)
-            green = int(rgb[2:4], 16)
-            blue = int(rgb[4:6], 16)
-            if alpha:
-                return QColor(red, green, blue, int(alpha, 16))
-            return QColor(red, green, blue)
-        except Exception:
-            return QColor()
-    if text.startswith("#"):
-        return QColor()
-    return QColor(text)
-
-
-class SettingsDialog(DialogWindow):
-    """Schema-driven settings editor for both project and IDE scopes."""
+class SettingsDialog(SchemaSettingsDialog):
+    """IDE-specific wrapper around the generic schema settings dialog."""
 
     def __init__(
         self,
@@ -190,140 +75,47 @@ class SettingsDialog(DialogWindow):
         use_native_chrome: bool = False,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(use_native_chrome=use_native_chrome, resizable=True, parent=parent)
-        self.setObjectName("SettingsDialog")
-        self.setWindowTitle("Settings")
-        self.resize(1040, 720)
-
         self.manager = manager
-        self.schema = schema
-        self.initial_page_id = str(initial_page_id or "").strip() or None
-        self.on_applied = on_applied
-
-        self._ignore_changes = False
-        self._dirty_scopes: set[SettingsScope] = set()
-        self._bindings_by_page: dict[int, list[FieldBinding]] = {}
-        self._persisted_tree_expanded_paths = self._load_tree_expanded_paths_from_settings()
-
-        self._build_ui()
-        self._build_tree_and_pages()
-        self._load_widgets_from_store()
-        if not self._select_page_by_id(self.initial_page_id):
-            self._select_first_page()
-        self._refresh_dirty_state()
-
-    def _build_ui(self) -> None:
-        root_host = QWidget(self)
-        self.set_content_widget(root_host)
-
-        root = QVBoxLayout(root_host)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
-
-
-        body = QHBoxLayout()
-        body.setSpacing(12)
-
-        left = QFrame()
-        left.setObjectName("LeftFrame")
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(8)
-
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search settings...")
-        self.search.textChanged.connect(self._on_search_changed)
-        left_layout.addWidget(self.search)
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.setRootIsDecorated(True)
-        self.tree.setItemsExpandable(True)
-        self.tree.setExpandsOnDoubleClick(True)
-        self.tree.setIndentation(12)
-        self.tree.setAllColumnsShowFocus(False)
-        # Keep selection visuals minimal while preserving native tree branch
-        # markers so users can collapse/expand categories.
-        self.tree.setStyleSheet(
-            "QTreeView { "
-            "  outline: none; "
-            "  show-decoration-selected: 0; "
-            "  selection-background-color: transparent; "
-            "} "
-            "QTreeView::item { border: none; } "
-            "QTreeView::item:selected { border: none; } "
+        super().__init__(
+            backend=manager,
+            schema=schema,
+            initial_page_id=initial_page_id,
+            on_applied=on_applied,
+            use_native_chrome=use_native_chrome,
+            parent=parent,
+            object_name="SettingsDialog",
+            window_title="Settings",
+            scope_labeler=self._scope_labeler,
+            tree_expanded_paths_key=SETTINGS_TREE_EXPANDED_PATHS_KEY,
+            tree_expanded_paths_scope="ide",
+            save_all_kwargs={"allow_project_repair": True},
+            browse_providers={
+                "path_dir": self._browse_project_directory,
+                "path_file": self._browse_project_file,
+                "codex_command": self._browse_codex_command_template,
+            },
         )
-        self._apply_configured_tree_font()
-        self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
-        left_layout.addWidget(self.tree, 1)
-        left.setFixedWidth(320)
 
-        body.addWidget(left)
+    @staticmethod
+    def _scope_labeler(scope: str) -> str:
+        key = str(scope or "").strip().lower()
+        if key == "ide":
+            return "IDE"
+        if key == "project":
+            return "Project"
+        return str(scope or "").strip().capitalize() or "Default"
 
-        right = QFrame()
-        right.setObjectName("RightFrame")
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(14, 14, 14, 14)
-        right_layout.setSpacing(8)
-
-        self.page_title = QLabel("")
-        self.page_title.setObjectName("PageTitle")
-        right_layout.addWidget(self.page_title)
-
-        self.page_scope = QLabel("")
-        self.page_scope.setObjectName("PageScope")
-        right_layout.addWidget(self.page_scope)
-
-        self.page_desc = QLabel("")
-        self.page_desc.setWordWrap(True)
-        self.page_desc.setObjectName("PageDesc")
-        right_layout.addWidget(self.page_desc)
-
-        self.stack = QStackedWidget()
-        right_layout.addWidget(self.stack, 1)
-
-        self.status = QLabel("")
-        self.status.setObjectName("SettingsStatus")
-        right_layout.addWidget(self.status)
-
-        body.addWidget(right, 1)
-        root.addLayout(body, 1)
-
-        footer = QHBoxLayout()
-        footer.setSpacing(10)
-
-        self.btn_restore_scope = QPushButton("Restore Defaults (Current Scope)")
-        self.btn_restore_scope.clicked.connect(self._on_restore_scope_defaults)
-        footer.addWidget(self.btn_restore_scope)
-
-        footer.addStretch(1)
-
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.clicked.connect(self._on_cancel)
-        footer.addWidget(self.btn_cancel)
-
-        self.btn_apply = QPushButton("Apply")
-        self.btn_apply.clicked.connect(self._on_apply)
-        self.btn_apply.setEnabled(False)
-        footer.addWidget(self.btn_apply)
-
-        self.btn_save = QPushButton("Save")
-        self.btn_save.setDefault(True)
-        self.btn_save.clicked.connect(self._on_save)
-        footer.addWidget(self.btn_save)
-
-        root.addLayout(footer)
-
-    def _apply_configured_tree_font(self) -> None:
+    def _apply_application_tree_font(self) -> None:
         try:
             size = int(self.manager.get("tree_font_size", scope_preference="ide", default=10))
         except Exception:
             size = 10
         size = max(6, min(48, size))
+
         family = str(self.manager.get("tree_font_family", scope_preference="ide", default="") or "").strip()
         if family and family not in set(QFontDatabase.families()):
             family = ""
+
         try:
             base_font = QApplication.font(self.tree)
             font = self.tree.font()
@@ -331,785 +123,267 @@ class SettingsDialog(DialogWindow):
             font.setFamily(family or base_font.family())
             self.tree.setFont(font)
         except Exception:
-            pass
-
-    def _build_tree_and_pages(self) -> None:
-        runtime_expanded_paths = self._collect_tree_expanded_paths() if self.tree.topLevelItemCount() > 0 else None
-        self.tree.clear()
-        self._bindings_by_page.clear()
-        while self.stack.count():
-            page = self.stack.widget(0)
-            self.stack.removeWidget(page)
-            page.deleteLater()
-
-        grouped: dict[str, dict[str, dict[str, list[SchemaPage]]]] = {}
-        for page in self.schema.pages:
-            scope_key = str(page.scope or "").strip().lower()
-            if scope_key == "ide":
-                scope_label = "IDE"
-            elif scope_key == "project":
-                scope_label = "Project"
-            else:
-                scope_label = str(page.scope or "").strip().capitalize() or "Project"
-            category = str(page.category or "").strip()
-            if not category or category.lower() == scope_label.lower():
-                category = ""
-            sub = page.subcategory or ""
-            grouped.setdefault(scope_label, {}).setdefault(category, {}).setdefault(sub, []).append(page)
-
-        scope_order = {
-            "IDE": 0,
-            "Project": 1,
-        }
-        project_group_order = {
-            "General": 0,
-            "Languages": 1,
-            "Execution": 2,
-            "Maintenance": 3,
-        }
-        ide_group_order = {
-            "General": 0,
-            "Editor": 1,
-            "Execution": 2,
-            "Code Intelligence": 3,
-            "Integrations": 4,
-        }
-        page_order_by_id = {
-            "project-general": 0,
-            "project-indexing": 1,
-            "project-interpreters": 10,
-            "project-cpp": 11,
-            "project-rust": 12,
-            "project-build-configs": 10,
-            "project-rust-run-configs": 11,
-            "project-run-configs": 12,
-            "project-maintenance": 30,
-            "ide-startup-projects": 100,
-            "ide-window": 101,
-            "ide-appearance": 102,
-            "ide-editor-ux": 110,
-            "ide-keybindings": 111,
-            "ide-file-templates": 112,
-            "ide-syntax-highlighting": 113,
-            "ide-run": 120,
-            "ide-linting": 130,
-            "ide-ai-assist": 131,
-            "ide-code-agents": 132,
-            "ide-git": 140,
-            "ide-github": 141,
-        }
-
-        def _scope_sort_key(name: str) -> tuple[int, str]:
-            raw = str(name or "")
-            return (scope_order.get(raw, 100), raw.lower())
-
-        def _group_sort_key(scope_name: str, group_name: str) -> tuple[int, str]:
-            clean_scope = str(scope_name or "")
-            clean_group = str(group_name or "")
-            if not clean_group:
-                return (-1, "")
-            if clean_scope == "Project":
-                return (project_group_order.get(clean_group, 100), clean_group.lower())
-            if clean_scope == "IDE":
-                return (ide_group_order.get(clean_group, 100), clean_group.lower())
-            return (100, clean_group.lower())
-
-        def _page_sort_key(page_spec: SchemaPage) -> tuple[int, str]:
-            page_id = str(page_spec.id or "").strip().lower()
-            return (page_order_by_id.get(page_id, 100), page_spec.title.lower())
-
-        for scope_name in sorted(grouped.keys(), key=_scope_sort_key):
-            scope_item = QTreeWidgetItem([scope_name])
-            scope_item.setFlags(scope_item.flags() & ~Qt.ItemIsSelectable)
-            font = scope_item.font(0)
-            font.setBold(True)
-            scope_item.setFont(0, font)
-            scope_item.setData(0, Qt.UserRole, None)
-            scope_path = (scope_name,)
-            scope_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, scope_path)
-            self.tree.addTopLevelItem(scope_item)
-
-            for group_name in sorted(grouped[scope_name].keys(), key=lambda item: _group_sort_key(scope_name, item)):
-                by_subcategory = grouped[scope_name][group_name]
-
-                group_parent = scope_item
-                group_path = scope_path
-                if group_name:
-                    group_item = QTreeWidgetItem([group_name])
-                    group_item.setFlags(group_item.flags() & ~Qt.ItemIsSelectable)
-                    group_item.setData(0, Qt.UserRole, None)
-                    group_path = scope_path + (group_name,)
-                    group_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, group_path)
-                    scope_item.addChild(group_item)
-                    group_parent = group_item
-
-                for subcategory in sorted(by_subcategory.keys(), key=str.lower):
-                    page_specs = by_subcategory[subcategory]
-                    parent_item = group_parent
-                    if subcategory:
-                        sub_item = QTreeWidgetItem([subcategory])
-                        sub_item.setFlags(sub_item.flags() & ~Qt.ItemIsSelectable)
-                        sub_item.setData(0, Qt.UserRole, None)
-                        sub_item.setData(0, SETTINGS_TREE_NODE_KEY_ROLE, group_path + (subcategory,))
-                        group_parent.addChild(sub_item)
-                        parent_item = sub_item
-
-                    for page_spec in sorted(page_specs, key=_page_sort_key):
-                        page_widget, bindings = self._build_page_widget(page_spec)
-                        self.stack.addWidget(page_widget)
-                        page_index = self.stack.indexOf(page_widget)
-                        self._bindings_by_page[page_index] = bindings
-
-                        leaf = QTreeWidgetItem([page_spec.title])
-                        leaf.setData(0, Qt.UserRole, page_index)
-                        leaf.setData(0, Qt.UserRole + 1, page_spec)
-                        parent_item.addChild(leaf)
-
-                if not group_name:
-                    continue
-
-                # Remove empty group nodes defensively (should not happen).
-                if group_parent.childCount() == 0 and group_parent.parent() is scope_item:
-                    scope_item.removeChild(group_parent)
-
-            # Remove empty scope nodes defensively.
-            if scope_item.childCount() == 0:
-                idx = self.tree.indexOfTopLevelItem(scope_item)
-                if idx >= 0:
-                    self.tree.takeTopLevelItem(idx)
-
-        if runtime_expanded_paths is None:
-            self._apply_tree_expanded_paths(self._persisted_tree_expanded_paths)
-        else:
-            self._apply_tree_expanded_paths(runtime_expanded_paths)
-
-    @staticmethod
-    def _normalize_tree_path(raw: Any) -> tuple[str, ...] | None:
-        if not isinstance(raw, (list, tuple)):
-            return None
-        path: list[str] = []
-        for part in raw:
-            text = str(part or "").strip()
-            if not text:
-                return None
-            path.append(text)
-        return tuple(path) if path else None
-
-    def _load_tree_expanded_paths_from_settings(self) -> set[tuple[str, ...]] | None:
-        stored = self.manager.get(SETTINGS_TREE_EXPANDED_PATHS_KEY, scope_preference="ide", default=None)
-        if stored is None:
-            return None
-        if not isinstance(stored, list):
-            return None
-        expanded_paths: set[tuple[str, ...]] = set()
-        for entry in stored:
-            normalized = self._normalize_tree_path(entry)
-            if normalized is not None:
-                expanded_paths.add(normalized)
-        return expanded_paths
-
-    def _iter_branch_items(self) -> list[QTreeWidgetItem]:
-        branches: list[QTreeWidgetItem] = []
-        stack: list[QTreeWidgetItem] = []
-        for index in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(index)
-            if top is not None:
-                stack.append(top)
-        while stack:
-            item = stack.pop()
-            if item.childCount() > 0:
-                branches.append(item)
-                for child_index in range(item.childCount()):
-                    child = item.child(child_index)
-                    if child is not None:
-                        stack.append(child)
-        return branches
-
-    def _collect_tree_expanded_paths(self) -> set[tuple[str, ...]]:
-        expanded_paths: set[tuple[str, ...]] = set()
-        for item in self._iter_branch_items():
-            if not item.isExpanded():
-                continue
-            normalized = self._normalize_tree_path(item.data(0, SETTINGS_TREE_NODE_KEY_ROLE))
-            if normalized is not None:
-                expanded_paths.add(normalized)
-        return expanded_paths
-
-    def _apply_tree_expanded_paths(self, expanded_paths: set[tuple[str, ...]] | None) -> None:
-        if expanded_paths is None:
-            self.tree.expandAll()
-            return
-        for item in self._iter_branch_items():
-            item.setExpanded(False)
-        for item in self._iter_branch_items():
-            normalized = self._normalize_tree_path(item.data(0, SETTINGS_TREE_NODE_KEY_ROLE))
-            if normalized is not None and normalized in expanded_paths:
-                item.setExpanded(True)
-
-    def _persist_tree_expanded_paths(self) -> None:
-        expanded_paths = self._collect_tree_expanded_paths()
-        serialized_paths = [list(path) for path in sorted(expanded_paths)]
-        try:
-            self.manager.set(SETTINGS_TREE_EXPANDED_PATHS_KEY, serialized_paths, "ide")
-            self.manager.save_all(scopes={"ide"}, only_dirty=True)
-            self._persisted_tree_expanded_paths = set(expanded_paths)
-        except Exception:
             return
 
-    def done(self, result: int) -> None:
-        self._persist_tree_expanded_paths()
-        super().done(result)
+    def _panel_binding(self, *, field: SchemaField, widget: QWidget) -> FieldBinding:
+        return FieldBinding(
+            key=field.key,
+            scope=field.scope,
+            widget=widget,
+            getter=lambda: None,
+            setter=lambda _value: None,
+            on_change=lambda _cb: None,
+            validate=lambda: [],
+            persist=False,
+            full_row=True,
+            has_pending_changes=getattr(widget, "has_pending_settings_changes", None),
+            apply_changes=getattr(widget, "apply_settings_changes", None),
+        )
 
-    def _build_page_widget(self, page_spec: SchemaPage) -> tuple[QWidget, list[FieldBinding]]:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+    def _browse_project_file(self, field: SchemaField, _dialog: SchemaSettingsDialog, current_text: str) -> str | None:
+        selected, _selected_filter = get_open_file_name(
+            parent=self,
+            manager=self.manager,
+            caption=str(field.browse_caption or "Select File"),
+            directory=str(current_text or "").strip(),
+            file_filter=str(
+                field.browse_file_filter
+                or ("Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.svg);;All Files (*)")
+            ),
+        )
+        if not selected:
+            return None
+        return str(selected)
 
-        container = QWidget()
-        content = QVBoxLayout(container)
-        content.setContentsMargins(4, 4, 12, 4)
-        content.setSpacing(14)
+    def _browse_project_directory(
+        self,
+        field: SchemaField,
+        _dialog: SchemaSettingsDialog,
+        current_text: str,
+    ) -> str | None:
+        selected = get_existing_directory(
+            parent=self,
+            manager=self.manager,
+            caption=str(field.browse_caption or "Select Directory"),
+            directory=str(current_text or "").strip(),
+        )
+        if not selected:
+            return None
+        return str(selected)
 
-        page_bindings: list[FieldBinding] = []
-
-        for section in page_spec.sections:
-            group = QGroupBox(section.title)
-            section_layout = QVBoxLayout(group)
-            section_layout.setSpacing(8)
-
-            if section.description:
-                section_desc = QLabel(section.description)
-                section_desc.setWordWrap(True)
-                section_desc.setObjectName("SectionDesc")
-                section_layout.addWidget(section_desc)
-
-            form = QFormLayout()
-            form.setHorizontalSpacing(14)
-            form.setVerticalSpacing(10)
-
-            for schema_field in section.fields:
-                binding = self._create_field_binding(schema_field)
-                page_bindings.append(binding)
-                binding.on_change(lambda *_args, scope=schema_field.scope: self._mark_dirty(scope))
-
-                if schema_field.type == "checkbox" or schema_field.type in PANEL_FIELD_TYPES:
-                    form.addRow(binding.widget)
+    def _browse_codex_command_template(
+        self,
+        field: SchemaField,
+        _dialog: SchemaSettingsDialog,
+        current_text: str,
+    ) -> str | None:
+        raw = str(current_text or "").strip()
+        start_dir = ""
+        if raw:
+            try:
+                parsed = shlex.split(raw)
+            except Exception:
+                parsed = []
+            if parsed:
+                probe = Path(str(parsed[0] or "")).expanduser()
+                if probe.is_dir():
+                    start_dir = str(probe)
                 else:
-                    label = QLabel(schema_field.label)
-                    if schema_field.description:
-                        label.setToolTip(schema_field.description)
-                        binding.widget.setToolTip(schema_field.description)
-                    form.addRow(label, binding.widget)
-
-            section_layout.addLayout(form)
-            content.addWidget(group)
-
-        content.addStretch(1)
-        scroll.setWidget(container)
-        return scroll, page_bindings
+                    start_dir = str(probe.parent)
+        selected, _selected_filter = get_open_file_name(
+            parent=self,
+            manager=self.manager,
+            caption=str(field.browse_caption or "Select Codex Binary"),
+            directory=start_dir,
+            file_filter=str(field.browse_file_filter or "All Files (*)"),
+        )
+        if not selected:
+            return None
+        existing_tail: list[str] = []
+        if raw:
+            try:
+                parsed = shlex.split(raw)
+            except Exception:
+                parsed = []
+            if len(parsed) > 1:
+                existing_tail = [str(part) for part in parsed[1:]]
+        return shlex.join([str(selected), *existing_tail])
 
     def _create_field_binding(self, field: SchemaField) -> FieldBinding:
-        if field.type == "ai_assist_editor":
-            page = AIAssistSettingsPage(manager=self.manager, scope=field.scope, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
+        if field.type in PANEL_FIELD_TYPES:
+            if field.type == "ai_assist_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=AIAssistSettingsPage(manager=self.manager, scope=field.scope, parent=self),
+                )
+            if field.type == "github_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=GitHubSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "git_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=GitSettingsPage(manager=self.manager, scope=field.scope, parent=self),
+                )
+            if field.type == "keybindings_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=KeybindingsSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "file_templates_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=FileTemplatesSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "build_configs_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=BuildConfigsSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "python_run_configs_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=PythonRunConfigsSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "rust_run_configs_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=RustRunConfigsSettingsPage(manager=self.manager, parent=self),
+                )
+            if field.type == "syntax_highlighting_editor":
+                return self._panel_binding(
+                    field=field,
+                    widget=SyntaxHighlightingSettingsPage(manager=self.manager, scope=field.scope, parent=self),
+                )
+            if field.type == "project_maintenance_tools":
+                return self._panel_binding(
+                    field=field,
+                    widget=ProjectMaintenancePage(manager=self.manager, parent=self),
+                )
+            if field.type == "clangd_repair_tools":
+                page = ClangdRepairSettingsPage(
+                    manager=self.manager,
+                    on_runtime_refresh=self.on_applied,
+                    on_query_driver_updated=lambda value: self.set_bound_value(
+                        key="c_cpp.query_driver",
+                        scope="project",
+                        value=value,
+                    ),
+                    parent=self,
+                )
+                return self._panel_binding(field=field, widget=page)
 
-        if field.type == "github_editor":
-            page = GitHubSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "git_editor":
-            page = GitSettingsPage(manager=self.manager, scope=field.scope, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "keybindings_editor":
-            page = KeybindingsSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "file_templates_editor":
-            page = FileTemplatesSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "build_configs_editor":
-            page = BuildConfigsSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "python_run_configs_editor":
-            page = PythonRunConfigsSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "rust_run_configs_editor":
-            page = RustRunConfigsSettingsPage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "syntax_highlighting_editor":
-            page = SyntaxHighlightingSettingsPage(manager=self.manager, scope=field.scope, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "project_maintenance_tools":
-            page = ProjectMaintenancePage(manager=self.manager, parent=self)
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "clangd_repair_tools":
-            page = ClangdRepairSettingsPage(
-                manager=self.manager,
-                on_runtime_refresh=self.on_applied,
-                on_query_driver_updated=lambda value: self._set_bound_value(
-                    key="c_cpp.query_driver",
-                    scope="project",
-                    value=value,
-                ),
-                parent=self,
-            )
-            return FieldBinding(
-                key=field.key,
-                scope=field.scope,
-                widget=page,
-                getter=lambda: None,
-                setter=lambda _value: None,
-                on_change=lambda _cb: None,
-                validate=lambda: [],
-                persist=False,
-                has_pending_changes=page.has_pending_settings_changes,
-                apply_changes=page.apply_settings_changes,
-            )
-
-        if field.type == "checkbox":
-            widget = QCheckBox(field.label)
-
-            def get_value() -> bool:
-                return widget.isChecked()
-
-            def set_value(value: Any) -> None:
-                if isinstance(value, bool):
-                    widget.setChecked(value)
-                    return
-                if isinstance(value, (int, float)):
-                    widget.setChecked(bool(value))
-                    return
-                text = str(value or "").strip().lower()
-                if text in {"1", "true", "yes", "on", "y"}:
-                    widget.setChecked(True)
-                    return
-                if text in {"0", "false", "no", "off", "n", ""}:
-                    widget.setChecked(False)
-                    return
-                widget.setChecked(bool(value))
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                widget.toggled.connect(callback)
-
-            return FieldBinding(field.key, field.scope, widget, get_value, set_value, connect_change, lambda: [])
-
-        if field.type == "color":
-            line = QLineEdit()
-            line.setPlaceholderText("#RRGGBB or #RRGGBBAA")
-
-            swatch = QPushButton()
-            apply_settings_color_swatch_size(swatch)
-            swatch.setCursor(Qt.PointingHandCursor)
-            swatch.setToolTip("Pick color")
-            swatch.setText("")
+        if field.type == "lineedit" and field.scope == "project" and field.key == "interpreters.default":
+            project_root = str(self.manager.paths.project_root)
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.NoInsert)
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(28)
 
             holder = QWidget()
-            row = QHBoxLayout(holder)
+            root_row = QVBoxLayout(holder)
+            root_row.setContentsMargins(0, 0, 0, 0)
+            root_row.setSpacing(6)
+
+            row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
-            row.addWidget(line, 1)
-            row.addWidget(swatch)
 
-            def update_swatch() -> None:
-                color = _parse_color_value(line.text())
-                if color.isValid():
-                    rgba = f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
-                    swatch.setStyleSheet(
-                        "QPushButton { "
-                        f"background-color: {rgba}; "
-                        "border: 1px solid #6a6a6a; "
-                        "border-radius: 3px; "
-                        "min-height: 0px; "
-                        "min-width: 0px; "
-                        "padding: 0px; "
-                        "}"
-                    )
-                    swatch.setText("")
-                    return
-                swatch.setStyleSheet(
-                    "QPushButton { "
-                    "background-color: #2f2f2f; "
-                    "border: 1px solid #6a6a6a; "
-                    "border-radius: 3px; "
-                    "min-height: 0px; "
-                    "min-width: 0px; "
-                    "padding: 0px; "
-                    "}"
+            refresh = QPushButton("Refresh")
+            refresh.setFixedWidth(80)
+            browse = QPushButton("Browse")
+            browse.setFixedWidth(80)
+
+            row.addWidget(combo, 1)
+            row.addWidget(refresh)
+            row.addWidget(browse)
+            root_row.addLayout(row)
+
+            detected_values: list[str] = []
+            detected_row = QHBoxLayout()
+            detected_row.setContentsMargins(0, 0, 0, 0)
+            detected_row.setSpacing(6)
+            detected_row.addWidget(QLabel("Detected in project:"))
+            detected_combo = QComboBox(holder)
+            detected_combo.setEditable(False)
+            detected_row.addWidget(detected_combo, 1)
+            use_detected = QPushButton("Use")
+            use_detected.setFixedWidth(80)
+            detected_row.addWidget(use_detected)
+            root_row.addLayout(detected_row)
+
+            def refresh_options(*, preferred: str | None = None) -> None:
+                current = str(preferred if preferred is not None else combo.currentText()).strip()
+                detected = discover_project_interpreters(project_root)
+                detected_values.clear()
+                detected_values.extend(detected)
+
+                detected_combo.blockSignals(True)
+                detected_combo.clear()
+                if detected:
+                    detected_combo.addItems(detected)
+                else:
+                    detected_combo.addItem("(no project interpreters found)")
+                detected_combo.setEnabled(bool(detected))
+                use_detected.setEnabled(bool(detected))
+                detected_combo.blockSignals(False)
+
+                options = list(detected)
+                for fallback in ("python", "python3"):
+                    if fallback not in options:
+                        options.append(fallback)
+                if current and current not in options:
+                    options.insert(0, current)
+
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(options)
+                combo.setEditText(current)
+                combo.blockSignals(False)
+
+            def on_browse() -> None:
+                selected, _selected_filter = get_open_file_name(
+                    parent=self,
+                    manager=self.manager,
+                    caption="Select Python Interpreter",
+                    directory=interpreter_browse_directory_hint(combo.currentText(), project_root),
+                    file_filter="All Files (*)",
                 )
-                swatch.setText("?")
-
-            def pick_color() -> None:
-                current_text = str(line.text() or "").strip()
-                initial = _parse_color_value(current_text)
-                if not initial.isValid():
-                    initial = QColor("#ffffff")
-                dialog = ColorPickerDialog(initial, self)
-                if dialog.exec() != int(QDialog.DialogCode.Accepted):
+                if not selected:
                     return
-                picked = dialog.get_color()
-                if isinstance(picked, QColor) and picked.isValid():
-                    had_alpha = bool(_HEX_COLOR_WITH_ALPHA_RE.fullmatch(current_text)) and len(current_text) == 9
-                    if had_alpha or picked.alpha() < 255:
-                        line.setText(
-                            f"#{picked.red():02x}{picked.green():02x}{picked.blue():02x}{picked.alpha():02x}"
-                        )
-                    else:
-                        line.setText(picked.name(QColor.HexRgb))
+                refresh_options(preferred=normalize_interpreter_for_project(selected, project_root))
 
-            swatch.clicked.connect(pick_color)
-            line.textChanged.connect(lambda *_args: update_swatch())
-            update_swatch()
+            def on_use_detected() -> None:
+                idx = int(detected_combo.currentIndex())
+                if idx < 0 or idx >= len(detected_values):
+                    return
+                chosen = str(detected_values[idx] or "").strip()
+                if not chosen:
+                    return
+                combo.setEditText(chosen)
 
-            def get_value() -> str:
-                return line.text().strip()
-
-            def set_value(value: Any) -> None:
-                line.setText(str(value) if value is not None else "")
-                update_swatch()
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                line.textChanged.connect(callback)
-
-            def validate() -> list[str]:
-                text = str(line.text() or "").strip()
-                if not text:
-                    return []
-                if _parse_color_value(text).isValid():
-                    return []
-                return [f"{field.label}: invalid color."]
-
-            return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, validate)
-
-        if field.type in {"lineedit", "path_dir", "path_file"}:
-            if field.scope == "project" and field.key == "interpreters.default":
-                project_root = str(self.manager.paths.project_root)
-                combo = QComboBox()
-                combo.setEditable(True)
-                combo.setInsertPolicy(QComboBox.NoInsert)
-                combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-                combo.setMinimumContentsLength(28)
-
-                holder = QWidget()
-                root_row = QVBoxLayout(holder)
-                root_row.setContentsMargins(0, 0, 0, 0)
-                root_row.setSpacing(6)
-
-                row = QHBoxLayout()
-                row.setContentsMargins(0, 0, 0, 0)
-                row.setSpacing(6)
-
-                refresh = QPushButton("Refresh")
-                refresh.setFixedWidth(80)
-                browse = QPushButton("Browse")
-                browse.setFixedWidth(80)
-
-                row.addWidget(combo, 1)
-                row.addWidget(refresh)
-                row.addWidget(browse)
-                root_row.addLayout(row)
-
-                detected_values: list[str] = []
-                detected_row = QHBoxLayout()
-                detected_row.setContentsMargins(0, 0, 0, 0)
-                detected_row.setSpacing(6)
-                detected_row.addWidget(QLabel("Detected in project:"))
-                detected_combo = QComboBox(holder)
-                detected_combo.setEditable(False)
-                detected_row.addWidget(detected_combo, 1)
-                use_detected = QPushButton("Use")
-                use_detected.setFixedWidth(80)
-                detected_row.addWidget(use_detected)
-                root_row.addLayout(detected_row)
-
-                def refresh_options(*, preferred: str | None = None) -> None:
-                    current = str(preferred if preferred is not None else combo.currentText()).strip()
-                    detected = discover_project_interpreters(project_root)
-                    detected_values.clear()
-                    detected_values.extend(detected)
-
-                    detected_combo.blockSignals(True)
-                    detected_combo.clear()
-                    if detected:
-                        detected_combo.addItems(detected)
-                    else:
-                        detected_combo.addItem("(no project interpreters found)")
-                    detected_combo.setEnabled(bool(detected))
-                    use_detected.setEnabled(bool(detected))
-                    detected_combo.blockSignals(False)
-
-                    options = list(detected)
-                    for fallback in ("python", "python3"):
-                        if fallback not in options:
-                            options.append(fallback)
-                    if current and current not in options:
-                        options.insert(0, current)
-
-                    combo.blockSignals(True)
-                    combo.clear()
-                    combo.addItems(options)
-                    combo.setEditText(current)
-                    combo.blockSignals(False)
-
-                def on_browse() -> None:
-                    selected, _selected_filter = get_open_file_name(
-                        parent=self,
-                        manager=self.manager,
-                        caption="Select Python Interpreter",
-                        directory=interpreter_browse_directory_hint(combo.currentText(), project_root),
-                        file_filter="All Files (*)",
-                    )
-                    if not selected:
-                        return
-                    refresh_options(preferred=normalize_interpreter_for_project(selected, project_root))
-
-                def on_use_detected() -> None:
-                    idx = int(detected_combo.currentIndex())
-                    if idx < 0 or idx >= len(detected_values):
-                        return
-                    chosen = str(detected_values[idx] or "").strip()
-                    if not chosen:
-                        return
-                    combo.setEditText(chosen)
-
-                refresh.clicked.connect(lambda: refresh_options())
-                browse.clicked.connect(on_browse)
-                use_detected.clicked.connect(on_use_detected)
-                refresh_options()
-
-                def get_value() -> str:
-                    return normalize_interpreter_for_project(str(combo.currentText() or "").strip(), project_root)
-
-                def set_value(value: Any) -> None:
-                    text = str(value or "").strip()
-                    refresh_options(preferred=text)
-
-                def connect_change(callback: Callable[..., None]) -> None:
-                    line_edit = combo.lineEdit()
-                    if line_edit is not None:
-                        line_edit.textChanged.connect(callback)
-                    else:
-                        combo.currentTextChanged.connect(callback)
-
-                return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, lambda: [])
-
-            line = QLineEdit()
-            if field.key == "codex_agent.command_template":
-                line.setPlaceholderText("codex or /absolute/path/to/codex")
-            else:
-                line.setPlaceholderText(field.description or "")
-
-            control: QWidget = line
-            connect_signal = line.textChanged.connect
-
-            if field.key == "codex_agent.command_template":
-                holder = QWidget()
-                row = QHBoxLayout(holder)
-                row.setContentsMargins(0, 0, 0, 0)
-                row.setSpacing(6)
-                browse = QPushButton("Browse")
-                browse.setFixedWidth(80)
-
-                def on_browse_codex() -> None:
-                    start_dir = ""
-                    raw = str(line.text() or "").strip()
-                    if raw:
-                        try:
-                            parsed = shlex.split(raw)
-                        except Exception:
-                            parsed = []
-                        if parsed:
-                            probe = Path(str(parsed[0] or "")).expanduser()
-                            if probe.is_dir():
-                                start_dir = str(probe)
-                            else:
-                                start_dir = str(probe.parent)
-                    selected, _selected_filter = get_open_file_name(
-                        parent=self,
-                        manager=self.manager,
-                        caption="Select Codex Binary",
-                        directory=start_dir,
-                        file_filter="All Files (*)",
-                    )
-                    if not selected:
-                        return
-                    existing_tail: list[str] = []
-                    if raw:
-                        try:
-                            parsed = shlex.split(raw)
-                        except Exception:
-                            parsed = []
-                        if len(parsed) > 1:
-                            existing_tail = [str(part) for part in parsed[1:]]
-                    line.setText(shlex.join([str(selected), *existing_tail]))
-
-                browse.clicked.connect(on_browse_codex)
-                row.addWidget(line, 1)
-                row.addWidget(browse)
-                control = holder
-
-            if field.type in {"path_dir", "path_file"}:
-                holder = QWidget()
-                row = QHBoxLayout(holder)
-                row.setContentsMargins(0, 0, 0, 0)
-                row.setSpacing(6)
-                browse = QPushButton("Browse")
-                browse.setFixedWidth(80)
-
-                def on_browse() -> None:
-                    start = str(line.text() or "").strip()
-                    if field.type == "path_file":
-                        selected, _selected_filter = get_open_file_name(
-                            parent=self,
-                            manager=self.manager,
-                            caption="Select File",
-                            directory=start,
-                            file_filter=(
-                                "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.svg);;"
-                                "All Files (*)"
-                            ),
-                        )
-                    else:
-                        selected = get_existing_directory(
-                            parent=self,
-                            manager=self.manager,
-                            caption="Select Directory",
-                            directory=start,
-                        )
-                    if selected:
-                        line.setText(selected)
-
-                browse.clicked.connect(on_browse)
-                row.addWidget(line)
-                row.addWidget(browse)
-                control = holder
+            refresh.clicked.connect(lambda: refresh_options())
+            browse.clicked.connect(on_browse)
+            use_detected.clicked.connect(on_use_detected)
+            refresh_options()
 
             def get_value() -> str:
-                return line.text().strip()
+                return normalize_interpreter_for_project(str(combo.currentText() or "").strip(), project_root)
 
             def set_value(value: Any) -> None:
-                line.setText(str(value) if value is not None else "")
+                text = str(value or "").strip()
+                refresh_options(preferred=text)
 
             def connect_change(callback: Callable[..., None]) -> None:
-                connect_signal(callback)
+                line_edit = combo.lineEdit()
+                if line_edit is not None:
+                    line_edit.textChanged.connect(callback)
+                else:
+                    combo.currentTextChanged.connect(callback)
 
-            return FieldBinding(field.key, field.scope, control, get_value, set_value, connect_change, lambda: [])
+            return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, lambda: [])
 
         if field.type == "font_family":
             line = QLineEdit()
@@ -1151,456 +425,63 @@ class SettingsDialog(DialogWindow):
 
             return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, lambda: [])
 
-        if field.type == "spin":
-            widget = QSpinBox()
-            widget.setRange(field.min if field.min is not None else -2147483648, field.max if field.max is not None else 2147483647)
+        return super()._create_field_binding(field)
 
-            def get_value() -> int:
-                return int(widget.value())
 
-            def set_value(value: Any) -> None:
-                try:
-                    widget.setValue(int(value))
-                except Exception:
-                    widget.setValue(widget.minimum())
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                widget.valueChanged.connect(callback)
-
-            return FieldBinding(field.key, field.scope, widget, get_value, set_value, connect_change, lambda: [])
-
-        if field.type == "combo":
-            widget = QComboBox()
-            options = field.options or []
-            for option in options:
-                if isinstance(option, dict):
-                    widget.addItem(str(option.get("label", option.get("value", ""))), option.get("value"))
-                else:
-                    widget.addItem(str(option), option)
-
-            def get_value() -> Any:
-                return widget.currentData()
-
-            def set_value(value: Any) -> None:
-                index = widget.findData(value)
-                if index < 0:
-                    index = 0
-                if widget.count() > 0:
-                    widget.setCurrentIndex(index)
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                widget.currentIndexChanged.connect(callback)
-
-            return FieldBinding(field.key, field.scope, widget, get_value, set_value, connect_change, lambda: [])
-
-        if field.type == "list_str":
-            holder = QWidget()
-            layout = QVBoxLayout(holder)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(4)
-
-            widget = QListWidget()
-            widget.setMinimumHeight(110)
-            layout.addWidget(widget)
-
-            actions = QHBoxLayout()
-            add_btn = QPushButton("+")
-            remove_btn = QPushButton("-")
-            add_btn.setFixedWidth(30)
-            remove_btn.setFixedWidth(30)
-            actions.addWidget(add_btn)
-            actions.addWidget(remove_btn)
-            actions.addStretch(1)
-            layout.addLayout(actions)
-
-            callbacks: list[Callable[..., None]] = []
-
-            def emit_change() -> None:
-                for callback in callbacks:
-                    callback()
-
-            def on_add() -> None:
-                item = QListWidgetItem("new-item")
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
-                widget.addItem(item)
-                widget.editItem(item)
-                emit_change()
-
-            def on_remove() -> None:
-                row = widget.currentRow()
-                if row >= 0:
-                    widget.takeItem(row)
-                    emit_change()
-
-            add_btn.clicked.connect(on_add)
-            remove_btn.clicked.connect(on_remove)
-            widget.itemChanged.connect(lambda *_args: emit_change())
-
-            def get_value() -> list[str]:
-                return [widget.item(i).text() for i in range(widget.count())]
-
-            def set_value(value: Any) -> None:
-                widget.clear()
-                if isinstance(value, list):
-                    for item in value:
-                        entry = QListWidgetItem(str(item))
-                        entry.setFlags(entry.flags() | Qt.ItemIsEditable)
-                        widget.addItem(entry)
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                callbacks.append(callback)
-
-            return FieldBinding(field.key, field.scope, holder, get_value, set_value, connect_change, lambda: [])
-
-        if field.type == "json":
-            widget = QTextEdit()
-            widget.setAcceptRichText(False)
-            widget.setMinimumHeight(140)
-
-            def get_value() -> Any:
-                text = widget.toPlainText().strip()
-                if not text:
-                    return []
-                return json.loads(text)
-
-            def set_value(value: Any) -> None:
-                widget.setPlainText(json.dumps(value, indent=2))
-
-            def connect_change(callback: Callable[..., None]) -> None:
-                widget.textChanged.connect(callback)
-
-            def validate() -> list[str]:
-                try:
-                    text = widget.toPlainText().strip()
-                    if text:
-                        json.loads(text)
-                except Exception as exc:
-                    return [f"{field.label}: {exc}"]
-                return []
-
-            return FieldBinding(field.key, field.scope, widget, get_value, set_value, connect_change, validate)
-
-        fallback = QLabel(f"Unsupported field type: {field.type}")
-        return FieldBinding(field.key, field.scope, fallback, lambda: None, lambda _v: None, lambda _c: None, lambda: [])
-
-    def _load_widgets_from_store(self) -> None:
-        self._ignore_changes = True
-        try:
-            for page_index, bindings in self._bindings_by_page.items():
-                _ = page_index
-                for binding in bindings:
-                    if not binding.persist:
-                        continue
-                    value = self.manager.get(binding.key, scope_preference=binding.scope)
-                    binding.setter(value)
-        finally:
-            self._ignore_changes = False
-
-    def _set_bound_value(self, *, key: str, scope: SettingsScope, value: Any) -> None:
-        self._ignore_changes = True
-        try:
-            for bindings in self._bindings_by_page.values():
-                for binding in bindings:
-                    if not binding.persist:
-                        continue
-                    if str(binding.key) != str(key):
-                        continue
-                    if str(binding.scope) != str(scope):
-                        continue
-                    try:
-                        binding.setter(value)
-                    except Exception:
-                        continue
-        finally:
-            self._ignore_changes = False
-
-    def _collect_all_widget_values(self) -> dict[SettingsScope, list[tuple[str, Any]]]:
-        collected: dict[SettingsScope, list[tuple[str, Any]]] = {"project": [], "ide": []}
-        for bindings in self._bindings_by_page.values():
-            for binding in bindings:
-                if not binding.persist:
-                    continue
-                collected[binding.scope].append((binding.key, binding.getter()))
-        return collected
-
-    def _current_page_spec(self) -> SchemaPage | None:
-        current = self.tree.currentItem()
-        if current is None:
-            return None
-        spec = current.data(0, Qt.UserRole + 1)
-        return spec if isinstance(spec, SchemaPage) else None
-
-    def _on_tree_selection_changed(self) -> None:
-        current = self.tree.currentItem()
-        if current is None:
-            return
-        index = current.data(0, Qt.UserRole)
-        if not isinstance(index, int):
-            return
-
-        self.stack.setCurrentIndex(index)
-        spec = current.data(0, Qt.UserRole + 1)
-        if isinstance(spec, SchemaPage):
-            self.page_title.setText(spec.title)
-            self.page_desc.setText(spec.description)
-            self.page_scope.setText(f"Scope: {spec.scope.capitalize()}")
+def _apply_default_page_ordering(schema: SettingsSchema) -> None:
+    scope_order = {"ide": 0, "project": 1}
+    project_group_order = {
+        "General": 0,
+        "Languages": 1,
+        "Execution": 2,
+        "Maintenance": 3,
+    }
+    ide_group_order = {
+        "General": 0,
+        "Editor": 1,
+        "Execution": 2,
+        "Code Intelligence": 3,
+        "Integrations": 4,
+    }
+    page_order_by_id = {
+        "project-general": 0,
+        "project-indexing": 1,
+        "project-interpreters": 10,
+        "project-cpp": 11,
+        "project-rust": 12,
+        "project-build-configs": 10,
+        "project-rust-run-configs": 11,
+        "project-run-configs": 12,
+        "project-maintenance": 30,
+        "ide-startup-projects": 100,
+        "ide-window": 101,
+        "ide-appearance": 102,
+        "ide-editor-ux": 110,
+        "ide-keybindings": 111,
+        "ide-file-templates": 112,
+        "ide-syntax-highlighting": 113,
+        "ide-run": 120,
+        "ide-linting": 130,
+        "ide-ai-assist": 131,
+        "ide-code-agents": 132,
+        "ide-git": 140,
+        "ide-github": 141,
+    }
+    for page in schema.pages:
+        scope_key = str(page.scope or "").strip().lower()
+        page.scope_order = scope_order.get(scope_key, 100)
+        if scope_key == "project":
+            page.category_order = project_group_order.get(str(page.category or "").strip(), 100)
+        elif scope_key == "ide":
+            page.category_order = ide_group_order.get(str(page.category or "").strip(), 100)
         else:
-            self.page_title.setText("")
-            self.page_desc.setText("")
-            self.page_scope.setText("")
-
-    def _on_search_changed(self, text: str) -> None:
-        query = text.strip().lower()
-
-        def page_matches(spec: SchemaPage) -> bool:
-            if not query:
-                return True
-            page_tokens = [
-                spec.title,
-                spec.category,
-                spec.subcategory or "",
-                spec.description,
-                spec.scope,
-                " ".join(spec.keywords),
-            ]
-            field_tokens: list[str] = []
-            for section in spec.sections:
-                field_tokens.append(section.title)
-                field_tokens.append(section.description)
-                for schema_field in section.fields:
-                    field_tokens.append(schema_field.label)
-                    field_tokens.append(schema_field.key)
-                    field_tokens.append(schema_field.scope)
-                    field_tokens.append(schema_field.description)
-            haystack = " ".join(page_tokens + field_tokens).lower()
-            return query in haystack
-
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            self._filter_tree_item(top, page_matches)
-
-        current = self.tree.currentItem()
-        if current is None or current.isHidden():
-            self._select_first_visible_page()
-
-    def _filter_tree_item(self, item: QTreeWidgetItem, matcher: Callable[[SchemaPage], bool]) -> bool:
-        index = item.data(0, Qt.UserRole)
-        if isinstance(index, int):
-            spec = item.data(0, Qt.UserRole + 1)
-            visible = bool(spec and matcher(spec))
-            item.setHidden(not visible)
-            return visible
-
-        any_visible = False
-        for child_idx in range(item.childCount()):
-            child = item.child(child_idx)
-            any_visible = self._filter_tree_item(child, matcher) or any_visible
-
-        item.setHidden(not any_visible)
-        return any_visible
-
-    def _select_first_page(self) -> None:
-        self._select_first_visible_page()
-
-    def _select_page_by_id(self, page_id: str | None) -> bool:
-        target = str(page_id or "").strip().lower()
-        if not target:
-            return False
-
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            candidate = self._find_leaf_by_page_id(top, target)
-            if candidate is not None:
-                self.tree.setCurrentItem(candidate)
-                return True
-        return False
-
-    def _find_leaf_by_page_id(self, item: QTreeWidgetItem, target: str) -> QTreeWidgetItem | None:
-        index = item.data(0, Qt.UserRole)
-        if isinstance(index, int):
-            spec = item.data(0, Qt.UserRole + 1)
-            if isinstance(spec, SchemaPage) and spec.id.lower() == target:
-                return item
-            return None
-
-        for child_idx in range(item.childCount()):
-            child = item.child(child_idx)
-            found = self._find_leaf_by_page_id(child, target)
-            if found is not None:
-                return found
-        return None
-
-    def _select_first_visible_page(self) -> None:
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            leaf = self._first_visible_leaf(top)
-            if leaf is not None:
-                self.tree.setCurrentItem(leaf)
-                return
-
-    def _first_visible_leaf(self, item: QTreeWidgetItem) -> QTreeWidgetItem | None:
-        for i in range(item.childCount()):
-            child = item.child(i)
-            if child.isHidden():
-                continue
-            index = child.data(0, Qt.UserRole)
-            if isinstance(index, int):
-                return child
-            nested = self._first_visible_leaf(child)
-            if nested is not None:
-                return nested
-        return None
-
-    def _mark_dirty(self, scope: SettingsScope) -> None:
-        if self._ignore_changes:
-            return
-        self._dirty_scopes.add(scope)
-        self._refresh_dirty_state()
-
-    def _has_custom_pending_changes(self) -> bool:
-        for bindings in self._bindings_by_page.values():
-            for binding in bindings:
-                pending_fn = binding.has_pending_changes
-                if not callable(pending_fn):
-                    continue
-                try:
-                    if bool(pending_fn()):
-                        return True
-                except Exception:
-                    continue
-        return False
-
-    def _refresh_dirty_state(self) -> None:
-        dirty = bool(self._dirty_scopes) or self._has_custom_pending_changes()
-        self.btn_apply.setEnabled(dirty)
-        if dirty:
-            if self._dirty_scopes:
-                scope_text = ", ".join(sorted(scope.capitalize() for scope in self._dirty_scopes))
-                self.status.setText(f"Unsaved changes in scope(s): {scope_text}")
-            else:
-                self.status.setText("Unsaved changes.")
-        else:
-            self.status.setText("No unsaved changes")
-
-    def _validate_all(self) -> list[str]:
-        errors: list[str] = []
-        for bindings in self._bindings_by_page.values():
-            for binding in bindings:
-                errors.extend(binding.validate())
-        return errors
-
-    def _apply_custom_pages(self) -> list[str]:
-        errors: list[str] = []
-        for bindings in self._bindings_by_page.values():
-            for binding in bindings:
-                apply_fn = binding.apply_changes
-                if not callable(apply_fn):
-                    continue
-                try:
-                    result = apply_fn()
-                except Exception as exc:
-                    errors.append(str(exc))
-                    continue
-                if isinstance(result, list):
-                    errors.extend(str(item) for item in result if str(item).strip())
-        return errors
-
-    def _apply_internal(self) -> bool:
-        errors = self._validate_all()
-        if errors:
-            QMessageBox.warning(self, "Invalid settings", "\n".join(errors[:5]))
-            return False
-
-        values_by_scope = self._collect_all_widget_values()
-        for scope, entries in values_by_scope.items():
-            for key, value in entries:
-                self.manager.set(key, value, scope)
-
-        custom_errors = self._apply_custom_pages()
-        if custom_errors:
-            QMessageBox.warning(self, "Invalid settings", "\n".join(custom_errors[:5]))
-            return False
-
-        for scope in ("project", "ide"):
-            if self.manager.scoped_stores.store_for(scope).dirty:
-                self._dirty_scopes.add(scope)
-
-        self._dirty_scopes = {
-            scope
-            for scope in self._dirty_scopes
-            if self.manager.scoped_stores.store_for(scope).dirty
-        }
-        if self._dirty_scopes:
-            saved = self.manager.save_all(
-                scopes=set(self._dirty_scopes),
-                only_dirty=True,
-                allow_project_repair=True,
-            )
-            self._dirty_scopes -= saved
-
-        self._apply_configured_tree_font()
-        if self.on_applied is not None:
-            self.on_applied()
-
-        self._refresh_dirty_state()
-        self.status.setText("Settings applied.")
-        return True
-
-    def _on_apply(self) -> None:
-        try:
-            self._apply_internal()
-        except Exception as exc:
-            QMessageBox.critical(self, "Apply failed", f"Could not save settings.\n\n{exc}")
-
-    def _on_save(self) -> None:
-        try:
-            if self._apply_internal():
-                self.accept()
-        except Exception as exc:
-            QMessageBox.critical(self, "Save failed", f"Could not save settings.\n\n{exc}")
-
-    def _on_cancel(self) -> None:
-        if self._dirty_scopes or self._has_custom_pending_changes():
-            answer = QMessageBox.question(
-                self,
-                "Discard changes?",
-                "Discard unsaved changes in both scopes?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                return
-
-        self.manager.reload_all()
-        self.reject()
-
-    def _on_restore_scope_defaults(self) -> None:
-        spec = self._current_page_spec()
-        if spec is None:
-            return
-
-        answer = QMessageBox.question(
-            self,
-            "Restore defaults",
-            f"Restore defaults for {spec.scope.capitalize()} scope?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            return
-
-        current_page_id = spec.id
-        self.manager.restore_scope_defaults(spec.scope)
-        self._build_tree_and_pages()
-        self._load_widgets_from_store()
-        if not self._select_page_by_id(current_page_id):
-            self._select_first_page()
-
-        self._dirty_scopes.add(spec.scope)
-        self._refresh_dirty_state()
+            page.category_order = 100
+        page.order = page_order_by_id.get(str(page.id or "").strip().lower(), 100)
 
 
 def create_default_settings_schema(theme_options: list[str] | None = None) -> SettingsSchema:
     resolved_theme_options = [str(option) for option in (theme_options or []) if str(option).strip()]
-    return SettingsSchema(
+    schema = SettingsSchema(
         pages=[
             SchemaPage(
                 id="ide-keybindings",
@@ -2966,6 +1847,10 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 label="Codex Command Template",
                                 type="lineedit",
                                 scope="ide",
+                                browse_provider_id="codex_command",
+                                browse_caption="Select Codex Binary",
+                                browse_file_filter="All Files (*)",
+                                browse_button_text="Browse",
                                 description=(
                                     "Command used by the Codex Agent dock. Supports {project}. "
                                     "You can enter just 'codex' or a codex binary path; the dock adds exec mode automatically."
@@ -3047,3 +1932,5 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
             ),
         ]
     )
+    _apply_default_page_ordering(schema)
+    return schema

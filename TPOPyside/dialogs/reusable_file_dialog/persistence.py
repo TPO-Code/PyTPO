@@ -6,6 +6,8 @@ from typing import Callable, Iterable
 from PySide6.QtCore import QSettings
 
 _STARRED_PATHS_KEY = "file_dialog/starred_paths"
+_DEFAULT_SETTINGS_ORG = "TwoPintOhh"
+_DEFAULT_SETTINGS_APP = "SharedFileDialog"
 
 StarredPathsSettingsFactory = Callable[[], QSettings | None]
 
@@ -40,10 +42,15 @@ def set_default_starred_paths_settings_factory(
 
 def get_default_starred_paths_settings() -> QSettings | None:
     factory = _default_starred_paths_settings_factory
-    if factory is None:
-        return None
+    if factory is not None:
+        try:
+            settings = factory()
+        except Exception:
+            settings = None
+        if settings is not None:
+            return settings
     try:
-        return factory()
+        return QSettings(_DEFAULT_SETTINGS_ORG, _DEFAULT_SETTINGS_APP)
     except Exception:
         return None
 
