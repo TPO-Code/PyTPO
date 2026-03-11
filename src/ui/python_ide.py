@@ -84,7 +84,7 @@ from src.ui.widgets.file_system_tree import FileSystemTreeWidget
 from src.ui.widgets.image_viewer import ImageViewerWidget
 from src.ui.widgets.markdown_editor_tab import MarkdownEditorTab
 from src.ui.widgets.sound_player_editor import SoundPlayerEditorWidget
-from src.ui.widgets.terminal_widget import TerminalWidget
+from TPOPyside.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
 from src.ui.widgets.tdoc_document_widget import TDocDocumentWidget

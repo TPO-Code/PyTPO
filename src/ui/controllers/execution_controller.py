@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QToolButton
 
 from src.lang_rust.cargo_discovery import discover_workspace_root_for_file, find_nearest_cargo_project_dir
 from src.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
-from src.ui.widgets.terminal_widget import TerminalWidget
+from TPOPyside.widgets.terminal_widget import TerminalWidget
 
 _CPP_RUNNABLE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx"}
 _CPP_BUILDABLE_SUFFIXES = _CPP_RUNNABLE_SUFFIXES | {".h", ".hpp", ".hh", ".hxx"}

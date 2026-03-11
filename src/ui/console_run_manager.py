@@ -9,7 +9,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QTabWidget
 
-from src.ui.widgets.terminal_widget import TerminalWidget
+from TPOPyside.widgets.terminal_widget import TerminalWidget
 
 
 RUN_EXIT_MARKER_RE = re.compile(r"__PYTPO_RUN_EXIT__:(-?\d+)")

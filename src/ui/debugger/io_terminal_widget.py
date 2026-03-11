@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.ui.widgets.terminal_widget import TerminalWidget
+from TPOPyside.widgets.terminal_widget import TerminalWidget
 
 
 class DebuggerIoTerminalWidget(TerminalWidget):
