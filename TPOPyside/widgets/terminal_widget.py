@@ -7,6 +7,7 @@ import fcntl
 import termios
 import struct
 import signal
+import copy
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,7 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
 import pyte
-from pyte.screens import HistoryScreen
+from pyte.screens import HistoryScreen, Screen
 from pyte import modes
 
 # ============================ Colors & Utilities ============================
@@ -229,6 +230,152 @@ class CommandSpec:
     dryrun: bool = False
 
 
+class _TerminalScreenMux:
+    """Provide xterm-like alternate-screen behavior on top of pyte screens."""
+
+    def __init__(
+            self,
+            columns: int,
+            lines: int,
+            *,
+            history: int,
+            private_mode_callback: Optional[Callable[[int, bool], None]] = None,
+    ) -> None:
+        self._main = HistoryScreen(columns, lines, history=history)
+        self._alt = Screen(columns, lines)
+        self._main.set_mode(modes.DECAWM)
+        self._alt.set_mode(modes.DECAWM)
+        self._active = self._main
+        self._alt_active = False
+        self._private_mode_callback = private_mode_callback
+
+    def __getattr__(self, name: str):
+        target = getattr(self._active, name)
+        if not callable(target):
+            return target
+
+        # pyte caches listener callables for parser/feed loops, so this
+        # indirection must re-resolve against the currently active screen.
+        def _forward(*args, **kwargs):
+            current = getattr(self._active, name)
+            return current(*args, **kwargs)
+
+        return _forward
+
+    @staticmethod
+    def _coerce_private_modes(values: Sequence[int]) -> list[int]:
+        out: list[int] = []
+        for value in values:
+            try:
+                mode = int(value)
+            except Exception:
+                continue
+            if mode not in out:
+                out.append(mode)
+        return out
+
+    def _notify_private_modes(self, values: Sequence[int], *, enabled: bool) -> None:
+        callback = self._private_mode_callback
+        if callback is None:
+            return
+        for mode in values:
+            try:
+                callback(int(mode), bool(enabled))
+            except Exception:
+                continue
+
+    def _switch_to_alt(self, *, clear: bool) -> None:
+        if not self._alt_active:
+            self._active = self._alt
+            self._alt_active = True
+        if clear:
+            self._alt.erase_in_display(2)
+            self._alt.cursor_position()
+
+    def _switch_to_main(self) -> None:
+        if self._alt_active:
+            self._active = self._main
+            self._alt_active = False
+
+    def _save_cursor_main(self) -> None:
+        try:
+            self._main.save_cursor()
+        except Exception:
+            return
+
+    def _restore_cursor_main(self) -> None:
+        try:
+            self._main.restore_cursor()
+        except Exception:
+            return
+
+    def set_mode(self, *mode_values: int, **kwargs) -> None:
+        if not kwargs.get("private"):
+            self._active.set_mode(*mode_values, **kwargs)
+            return
+
+        private_modes = self._coerce_private_modes(mode_values)
+        self._notify_private_modes(private_modes, enabled=True)
+        passthrough: list[int] = []
+        for mode in private_modes:
+            if mode == 1049:
+                self._save_cursor_main()
+                self._switch_to_alt(clear=True)
+                continue
+            if mode in (47, 1047):
+                self._switch_to_alt(clear=True)
+                continue
+            if mode == 1048:
+                try:
+                    self._active.save_cursor()
+                except Exception:
+                    pass
+                continue
+            passthrough.append(mode)
+
+        if passthrough:
+            self._active.set_mode(*passthrough, private=True)
+
+    def reset_mode(self, *mode_values: int, **kwargs) -> None:
+        if not kwargs.get("private"):
+            self._active.reset_mode(*mode_values, **kwargs)
+            return
+
+        private_modes = self._coerce_private_modes(mode_values)
+        self._notify_private_modes(private_modes, enabled=False)
+        passthrough: list[int] = []
+        for mode in private_modes:
+            if mode == 1049:
+                self._switch_to_main()
+                self._restore_cursor_main()
+                continue
+            if mode in (47, 1047):
+                self._switch_to_main()
+                continue
+            if mode == 1048:
+                try:
+                    self._active.restore_cursor()
+                except Exception:
+                    pass
+                continue
+            passthrough.append(mode)
+
+        if passthrough:
+            self._active.reset_mode(*passthrough, private=True)
+
+    def resize(self, *args, **kwargs) -> None:
+        self._main.resize(*args, **kwargs)
+        self._alt.resize(*args, **kwargs)
+
+    def reset(self) -> None:
+        self._main.reset()
+        self._alt.reset()
+        self._main.set_mode(modes.DECAWM)
+        self._alt.set_mode(modes.DECAWM)
+        self._active = self._main
+        self._alt_active = False
+
+
 # ============================ Terminal Widget ============================
 
 class TerminalWidget(QtWidgets.QWidget):
@@ -244,11 +391,7 @@ class TerminalWidget(QtWidgets.QWidget):
     # Expose ANSI palette handles
     AnsiColor = AnsiColor
 
-    # Track xterm mouse + bracketed paste toggles
-    _RE_MOUSE_ENABLE = re.compile(rb"\x1b\[\?(?P<mode>1000|1002|1003|1006)h")
-    _RE_MOUSE_DISABLE = re.compile(rb"\x1b\[\?(?P<mode>1000|1002|1003|1006)l")
-    _RE_BRACKET_PASTE_ENABLE = re.compile(rb"\x1b\[\?2004h")
-    _RE_BRACKET_PASTE_DISABLE = re.compile(rb"\x1b\[\?2004l")
+    _MODE_DECCKM = 1 << 5  # DEC private mode ?1 (application cursor keys)
     _RE_PY_TRACEBACK = re.compile(r'File "([^"]+)", line (\d+)(?:, in .*)?$')
     _RE_CXX_DIAG = re.compile(
         r"^\s*(?P<path>[^:\n][^:\n]*):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?:fatal\s+error|error)\b",
@@ -339,6 +482,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._closing = False
         self._shell_exit_emitted = False
         self._history_limit = int(history_lines)
+        self._private_modes_enabled: set[int] = set()
     
         # Terminal geometry tracks viewport size.
         self._virt_cols = 200
@@ -371,8 +515,7 @@ class TerminalWidget(QtWidgets.QWidget):
         fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
     
         # Emulator + stream
-        self._screen = HistoryScreen(self._virt_cols, self._virt_rows, history=self._history_limit)
-        self._screen.set_mode(modes.DECAWM)  # wraparound while printing
+        self._screen = self._create_screen(self._virt_cols, self._virt_rows)
         self._stream = pyte.ByteStream(self._screen)
     
         # Seed child size before first paint; a deferred sync aligns to actual viewport geometry.
@@ -384,6 +527,11 @@ class TerminalWidget(QtWidgets.QWidget):
     
         # Viewport scrollback offset (0 = follow bottom)
         self._view_offset = 0
+        self._scrollbar_syncing = False
+        self._vscroll = QtWidgets.QScrollBar(Qt.Vertical, self)
+        self._vscroll.setObjectName("TerminalVScrollBar")
+        self._vscroll.hide()
+        self._vscroll.valueChanged.connect(self._on_vscroll_changed)
     
         # Cursor blink
         self._cursor_visible = True
@@ -392,7 +540,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._blink.start(600)
 
         # Coalesce expensive PTY geometry updates while dragging resize handles.
-        self._geometry_sync_delay_ms = 24
+        self._geometry_sync_delay_ms = 180
         self._geometry_sync_timer = QtCore.QTimer(self)
         self._geometry_sync_timer.setSingleShot(True)
         self._geometry_sync_timer.timeout.connect(self._flush_pending_geometry_sync)
@@ -449,9 +597,11 @@ class TerminalWidget(QtWidgets.QWidget):
         if et in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
             self._recompute_metrics()
             self._sync_terminal_geometry()
+            self._sync_scrollbar()
             self.update()
         if et == QtCore.QEvent.PaletteChange:
             self._install_palette_defaults()
+            self._sync_scrollbar()
             self.update()
         super().changeEvent(ev)
 
@@ -644,8 +794,7 @@ class TerminalWidget(QtWidgets.QWidget):
         act_clear = self._toolbar.addAction("Clear")
         def _do_clear():
             self._send(b"clear\r")
-            self._view_offset = 0
-            self.update()
+            self._set_view_offset(0, repaint=True)
         act_clear.triggered.connect(_do_clear)
 
         lay = self.layout()
@@ -688,6 +837,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._toolbar.setVisible(True)
         elif hasattr(self, "_toolbar"):
             self._toolbar.setVisible(False)
+        self._sync_scrollbar()
         self._schedule_terminal_geometry_sync(delay_ms=0)
 
     def _rebuild_run_menu(self):
@@ -848,9 +998,30 @@ class TerminalWidget(QtWidgets.QWidget):
         buf = struct.pack("HHHH", rows, cols, 0, 0)
         try:
             fcntl.ioctl(self._fd, TIOCSWINSZ, buf)
-            os.kill(self._pid, signal.SIGWINCH)
         except Exception:
             pass
+
+    def _preserve_top_rows_on_shrink(self, old_rows: int, new_rows: int) -> None:
+        """Move rows that will be clipped by pyte.resize into history first."""
+        if new_rows >= old_rows:
+            return
+        screen = getattr(self, "_screen", None)
+        if screen is None:
+            return
+        hist = getattr(screen, "history", None)
+        top = getattr(hist, "top", None)
+        if top is None:
+            return
+        buffer = getattr(screen, "buffer", {})
+        drop_count = max(0, int(old_rows) - int(new_rows))
+        for row_idx in range(drop_count):
+            row = buffer.get(row_idx)
+            if row is None:
+                continue
+            try:
+                top.append(copy.copy(row))
+            except Exception:
+                top.append(row)
 
     def _sync_terminal_geometry(self, *, force: bool = False) -> None:
         if getattr(self, "_screen", None) is None:
@@ -860,16 +1031,24 @@ class TerminalWidget(QtWidgets.QWidget):
         if not force and cols == int(self._virt_cols) and rows == int(self._virt_rows):
             return
 
+        old_rows = int(getattr(self._screen, "lines", rows))
         self._virt_cols = cols
         self._virt_rows = rows
         try:
+            self._preserve_top_rows_on_shrink(old_rows, rows)
             self._screen.resize(lines=rows, columns=cols)
+            cursor = getattr(self._screen, "cursor", None)
+            cursor_row = int(getattr(cursor, "y", 0)) if cursor is not None else 0
+            if cursor is not None:
+                if cursor_row < 0:
+                    cursor.y = 0
+                elif cursor_row >= rows:
+                    cursor.y = rows - 1
         except Exception:
             # Fallback path for environments where pyte resize behavior differs.
-            lines = self._snapshot_all_lines()
-            self._rebuild_with_lines(cols, rows, lines)
+            self._rebuild_with_lines(cols, rows, self._snapshot_all_lines())
         self._set_winsize(rows, cols)
-        self._view_offset = min(self._view_offset, self._max_view_offset())
+        self._set_view_offset(self._view_offset, repaint=False)
         self.update()
 
     def _flush_pending_geometry_sync(self) -> None:
@@ -882,9 +1061,10 @@ class TerminalWidget(QtWidgets.QWidget):
                 self._geometry_sync_timer.stop()
             self._sync_terminal_geometry()
             return
-        # Throttle (not debounce): keep periodic updates during drag-resize.
-        if not self._geometry_sync_timer.isActive():
-            self._geometry_sync_timer.start(delay)
+        # Debounce resize churn so shell redraws happen once per settled size.
+        if self._geometry_sync_timer.isActive():
+            self._geometry_sync_timer.stop()
+        self._geometry_sync_timer.start(delay)
 
     def _snapshot_all_lines(self) -> list[str]:
         """Oldest→newest: history strings + live buffer rows (trimmed)."""
@@ -894,7 +1074,8 @@ class TerminalWidget(QtWidgets.QWidget):
             out.append(self._history_entry_to_text(entry))
         cols = int(self._screen.columns)
         rows = int(self._screen.lines)
-        for r in range(rows):
+        live_rows = max(0, min(rows, self._live_rows()))
+        for r in range(live_rows):
             row = self._screen.buffer.get(r, {})
             last = -1
             chars = []
@@ -995,12 +1176,19 @@ class TerminalWidget(QtWidgets.QWidget):
             return ""
         return ""
 
+    def _create_screen(self, cols: int, rows: int) -> _TerminalScreenMux:
+        return _TerminalScreenMux(
+            cols,
+            rows,
+            history=self._history_limit,
+            private_mode_callback=self._on_private_mode_changed,
+        )
+
     def _rebuild_with_lines(self, cols: int, rows: int, lines: list[str]) -> None:
-        """Recreate HistoryScreen with (cols, rows) and replay lines safely."""
+        """Recreate terminal screen state with (cols, rows) and replay lines safely."""
         self._notifier.setEnabled(False)
         try:
-            self._screen = HistoryScreen(cols, rows, history=self._history_limit)
-            self._screen.set_mode(modes.DECAWM)
+            self._screen = self._create_screen(cols, rows)
             self._stream = pyte.ByteStream(self._screen)
             if lines:
                 payload = ("\r\n".join(lines)).encode("utf-8", errors="replace")
@@ -1022,12 +1210,61 @@ class TerminalWidget(QtWidgets.QWidget):
             return self._toolbar.height()
         return 0
 
+    def _scrollbar_extent(self) -> int:
+        hint = self.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent, None, self)
+        return max(12, int(hint))
+
+    def _viewport_width(self) -> int:
+        width = int(self.width())
+        if hasattr(self, "_vscroll") and self._vscroll.isVisible():
+            width -= self._scrollbar_extent()
+        return max(1, width)
+
     def _visible_cols(self) -> int:
-        return max(1, self.width() // self._cell_w)
+        return max(1, self._viewport_width() // self._cell_w)
 
     def _visible_rows(self) -> int:
         h = max(0, self.height() - self._top_offset())
         return max(1, h // self._cell_h)
+
+    def _sync_scrollbar(self) -> None:
+        if not hasattr(self, "_vscroll"):
+            return
+        top = self._top_offset()
+        extent = self._scrollbar_extent()
+        self._vscroll.setGeometry(max(0, self.width() - extent), top, extent, max(0, self.height() - top))
+
+        vis_rows = self._visible_rows()
+        max_offset = int(self._max_view_offset(vis_rows))
+        show = max_offset > 0
+        self._vscroll.setVisible(show)
+        if not show:
+            return
+
+        target_value = max(0, min(max_offset, max_offset - int(self._view_offset)))
+        self._scrollbar_syncing = True
+        try:
+            self._vscroll.setPageStep(max(1, vis_rows))
+            self._vscroll.setSingleStep(1)
+            self._vscroll.setRange(0, max_offset)
+            if self._vscroll.value() != target_value:
+                self._vscroll.setValue(target_value)
+        finally:
+            self._scrollbar_syncing = False
+
+    def _set_view_offset(self, offset: int, *, repaint: bool = True) -> None:
+        max_offset = int(self._max_view_offset())
+        new_offset = max(0, min(int(offset), max_offset))
+        self._view_offset = new_offset
+        self._sync_scrollbar()
+        if repaint:
+            self.update()
+
+    def _on_vscroll_changed(self, value: int) -> None:
+        if self._scrollbar_syncing:
+            return
+        max_offset = int(self._max_view_offset())
+        self._set_view_offset(max_offset - int(value), repaint=True)
 
     def _row_effective_len(self, row_dict: dict, columns: int) -> int:
         if not row_dict or columns <= 0:
@@ -1048,14 +1285,19 @@ class TerminalWidget(QtWidgets.QWidget):
         if screen is None:
             return 0
         columns = int(getattr(screen, "columns", 0))
+        lines = int(getattr(screen, "lines", 0))
         buffer = getattr(screen, "buffer", {})
         cursor = getattr(screen, "cursor", None)
-        cursor_row = getattr(cursor, "y", 0) if cursor is not None else 0
-        for row_idx in range(int(getattr(screen, "lines", 0)) - 1, -1, -1):
+        cursor_row = int(getattr(cursor, "y", 0)) if cursor is not None else 0
+        if lines > 0:
+            cursor_row = max(0, min(cursor_row, lines - 1))
+        else:
+            cursor_row = 0
+        for row_idx in range(lines - 1, -1, -1):
             row = buffer.get(row_idx, {})
             if self._row_effective_len(row, columns) > 0 or row_idx == cursor_row:
                 return row_idx + 1
-        return max(0, cursor_row + 1)
+        return max(0, min(lines, cursor_row + 1))
 
     def _max_view_offset(self, vis_rows: Optional[int] = None) -> int:
         if vis_rows is None:
@@ -1064,9 +1306,25 @@ class TerminalWidget(QtWidgets.QWidget):
         if screen is None:
             return 0
         hist_len = self._history_length()
-        live_rows = max(1, self._live_rows())
-        total_rows = hist_len + live_rows
+        screen_rows = max(1, int(getattr(screen, "lines", 0)))
+        total_rows = hist_len + screen_rows
         return max(0, total_rows - vis_rows)
+
+    def _on_private_mode_changed(self, mode: int, enabled: bool) -> None:
+        try:
+            mode_id = int(mode)
+        except Exception:
+            return
+        if enabled:
+            self._private_modes_enabled.add(mode_id)
+        else:
+            self._private_modes_enabled.discard(mode_id)
+
+        mouse_modes = {1000, 1002, 1003}
+        self._mouse_mode_btn = bool(self._private_modes_enabled.intersection(mouse_modes))
+        self._mouse_mode_any = 1003 in self._private_modes_enabled
+        self._mouse_mode_sgr = 1006 in self._private_modes_enabled
+        self._bracket_paste_enabled = 2004 in self._private_modes_enabled
 
     # -------- Async I/O --------
     def _read_ready(self):
@@ -1077,35 +1335,14 @@ class TerminalWidget(QtWidgets.QWidget):
                 self._emit_shell_exited_once(0)
                 return
 
-            # Track xterm mouse modes
-            for m in self._RE_MOUSE_ENABLE.finditer(data):
-                mode = m.group("mode")
-                if mode in (b"1000", b"1002", b"1003"):
-                    self._mouse_mode_btn = True
-                if mode == b"1003":
-                    self._mouse_mode_any = True
-                if mode == b"1006":
-                    self._mouse_mode_sgr = True
-            for m in self._RE_MOUSE_DISABLE.finditer(data):
-                mode = m.group("mode")
-                if mode in (b"1000", b"1002", b"1003"):
-                    self._mouse_mode_btn = False
-                    self._mouse_mode_any = False
-                if mode == b"1006":
-                    self._mouse_mode_sgr = False
-
-            # Track bracketed paste mode 2004
-            if self._RE_BRACKET_PASTE_ENABLE.search(data):
-                self._bracket_paste_enabled = True
-            if self._RE_BRACKET_PASTE_DISABLE.search(data):
-                self._bracket_paste_enabled = False
-
             self.outputReceived.emit(bytes(data))
             self._stream.feed(data)
 
             if self._view_offset == 0:
                 self._ensure_bottom()
-            self.update()
+            else:
+                self._sync_scrollbar()
+                self.update()
         except BlockingIOError:
             pass
         except OSError:
@@ -1180,9 +1417,11 @@ class TerminalWidget(QtWidgets.QWidget):
             p.setFont(self.font())
             top_off = self._top_offset()
             p.translate(0, top_off)
+            viewport_rect = QtCore.QRect(0, 0, int(self._viewport_width()), max(0, int(self.height() - top_off)))
+            p.fillRect(viewport_rect, self._bg_default)
             self._paint_background_image(
                 p,
-                QtCore.QRect(0, 0, int(self.width()), max(0, int(self.height() - top_off))),
+                viewport_rect,
             )
 
             emu_rows, emu_cols = self._screen.lines, self._screen.columns
@@ -1191,9 +1430,11 @@ class TerminalWidget(QtWidgets.QWidget):
 
             hist_sequences = self._history_sequences()
             hist_len = self._history_length(hist_sequences)
-            live_rows = max(1, self._live_rows())
-            total_rows = hist_len + live_rows
-            view_top = max(0, total_rows - vis_rows - self._view_offset)
+            total_rows = hist_len + max(1, int(self._screen.lines))
+            if self._view_offset == 0:
+                view_top = hist_len
+            else:
+                view_top = max(0, total_rows - vis_rows - self._view_offset)
             traceback_row_flags = self._visible_traceback_row_flags()
 
             show_cursor = self._cursor_visible and self._view_offset == 0
@@ -1240,6 +1481,20 @@ class TerminalWidget(QtWidgets.QWidget):
             def is_traceback_row(row_idx: int) -> bool:
                 return 0 <= row_idx < len(traceback_row_flags) and bool(traceback_row_flags[row_idx])
 
+            def history_entry_to_row(entry):
+                data = entry
+                if isinstance(data, tuple) and data:
+                    data = data[0]
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list):
+                    row: dict[int, object] = {}
+                    for idx, item in enumerate(data):
+                        if hasattr(item, "data"):
+                            row[idx] = item
+                    return row if row else None
+                return None
+
             y = 0
             display_row = 0
 
@@ -1250,6 +1505,71 @@ class TerminalWidget(QtWidgets.QWidget):
                 global_i = view_top + row_i
                 if global_i < hist_len:
                     entry = self._history_entry_at(global_i, hist_sequences)
+                    hist_row = history_entry_to_row(entry)
+                    if hist_row is not None:
+                        eff_len = row_effective_len(hist_row)
+                        row_display_base = display_row
+                        if eff_len == 0:
+                            paint_selection_row(row_display_base, y)
+                            p.setPen(self._link_color if is_traceback_row(row_display_base) else self._fg_default)
+                            p.drawText(0, y + self._baseline, "")
+                            y += self._cell_h
+                            display_row += 1
+                            continue
+
+                        max_vis_cols = max(1, vis_cols)
+                        wrapped_rows = max(1, (eff_len + max_vis_cols - 1) // max_vis_cols)
+
+                        for col_idx in range(eff_len):
+                            cell = hist_row.get(col_idx)
+                            if not cell:
+                                continue
+                            bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
+                            if getattr(cell, "reverse", False):
+                                fg_tmp = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
+                                bg = fg_tmp
+                            if bg != self._bg_default:
+                                wrap_row_offset = col_idx // max_vis_cols
+                                wrap_col = col_idx % max_vis_cols
+                                y_base = y + wrap_row_offset * self._cell_h
+                                p.fillRect(wrap_col * self._cell_w, y_base, self._cell_w, self._cell_h, bg)
+
+                        for wrap_row_offset in range(wrapped_rows):
+                            paint_selection_row(row_display_base + wrap_row_offset, y + wrap_row_offset * self._cell_h)
+
+                        for col_idx in range(eff_len):
+                            cell = hist_row.get(col_idx)
+                            ch = (getattr(cell, "data", None) if cell else None) or " "
+                            if ch == " " and not cell:
+                                continue
+
+                            fg = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
+                            bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
+                            if getattr(cell, "reverse", False):
+                                fg, bg = bg, fg
+
+                            if getattr(cell, "bold", False):
+                                f = QtGui.QFont(self.font())
+                                f.setBold(True)
+                                p.setFont(f)
+                            else:
+                                p.setFont(self.font())
+
+                            wrap_row_offset = col_idx // max_vis_cols
+                            wrap_col = col_idx % max_vis_cols
+                            y_base = y + wrap_row_offset * self._cell_h
+                            display_idx = row_display_base + wrap_row_offset
+                            sel_bounds = selection_bounds_for_row(display_idx)
+                            if sel_bounds and sel_bounds[0] <= wrap_col <= sel_bounds[1]:
+                                p.setPen(self._sel_fg)
+                            else:
+                                p.setPen(self._link_color if is_traceback_row(display_idx) else fg)
+                            p.drawText(wrap_col * self._cell_w, y_base + self._baseline, ch)
+
+                        y += wrapped_rows * self._cell_h
+                        display_row = row_display_base + wrapped_rows
+                        continue
+
                     text = self._history_entry_to_text(entry)
                     if not text:
                         paint_selection_row(display_row, y)
@@ -1307,7 +1627,7 @@ class TerminalWidget(QtWidgets.QWidget):
                         wrap_row_offset = col_idx // max_vis_cols
                         wrap_col = col_idx % max_vis_cols
                         y_base = y + wrap_row_offset * self._cell_h
-                        p.fillRect(wrap_col * self._cell_w, y_base, self._cell_h, self._cell_h, bg)
+                        p.fillRect(wrap_col * self._cell_w, y_base, self._cell_w, self._cell_h, bg)
 
                 for wrap_row_offset in range(wrapped_rows):
                     paint_selection_row(row_display_base + wrap_row_offset, y + wrap_row_offset * self._cell_h)
@@ -1398,11 +1718,10 @@ class TerminalWidget(QtWidgets.QWidget):
             max_offset = self._max_view_offset(vis_rows)
             new_offset = self._view_offset + steps * 3
             new_offset = max(0.0, min(new_offset, max_offset))
-            self._view_offset = int(new_offset)
-            self.update()
+            self._set_view_offset(int(new_offset), repaint=True)
 
     @staticmethod
-    def _function_key_sequence(key: int, mods: QtCore.Qt.KeyboardModifiers) -> Optional[bytes]:
+    def _xterm_modifier_param(mods: QtCore.Qt.KeyboardModifiers) -> int:
         relevant = mods & (
             QtCore.Qt.ShiftModifier
             | QtCore.Qt.ControlModifier
@@ -1416,7 +1735,24 @@ class TerminalWidget(QtWidgets.QWidget):
             mod_param += 2
         if bool(relevant & QtCore.Qt.ControlModifier):
             mod_param += 4
+        return mod_param
 
+    def _application_cursor_mode_enabled(self) -> bool:
+        screen = getattr(self, "_screen", None)
+        mode = getattr(screen, "mode", None)
+        return bool(mode and (self._MODE_DECCKM in mode))
+
+    def _cursor_key_sequence(self, suffix: str, mods: QtCore.Qt.KeyboardModifiers) -> bytes:
+        mod_param = self._xterm_modifier_param(mods)
+        if mod_param == 1:
+            if self._application_cursor_mode_enabled():
+                return f"\x1bO{suffix}".encode("ascii")
+            return f"\x1b[{suffix}".encode("ascii")
+        return f"\x1b[1;{mod_param}{suffix}".encode("ascii")
+
+    @staticmethod
+    def _function_key_sequence(key: int, mods: QtCore.Qt.KeyboardModifiers) -> Optional[bytes]:
+        mod_param = TerminalWidget._xterm_modifier_param(mods)
         if key in (QtCore.Qt.Key_F1, QtCore.Qt.Key_F2, QtCore.Qt.Key_F3, QtCore.Qt.Key_F4):
             suffix = {
                 QtCore.Qt.Key_F1: "P",
@@ -1454,15 +1790,13 @@ class TerminalWidget(QtWidgets.QWidget):
 
         # Scrollback keys
         if key == QtCore.Qt.Key_PageUp:
-            self._view_offset = min(self._view_offset + step, max_offset)
-            self.update(); return
+            self._set_view_offset(min(self._view_offset + step, max_offset), repaint=True); return
         if key == QtCore.Qt.Key_PageDown:
-            self._view_offset = max(0, self._view_offset - step)
-            self.update(); return
+            self._set_view_offset(max(0, self._view_offset - step), repaint=True); return
         if key == QtCore.Qt.Key_Home and (mods & QtCore.Qt.ControlModifier):
-            self._view_offset = max_offset; self.update(); return
+            self._set_view_offset(max_offset, repaint=True); return
         if key == QtCore.Qt.Key_End and (mods & QtCore.Qt.ControlModifier):
-            self._view_offset = 0; self.update(); return
+            self._set_view_offset(0, repaint=True); return
 
         # Paste convenience (Ctrl+Shift+V). Plain Ctrl+V remains a terminal control key.
         if (
@@ -1484,12 +1818,12 @@ class TerminalWidget(QtWidgets.QWidget):
         elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter): seq = b"\r"
         elif key == QtCore.Qt.Key_Tab: seq = b"\t"
         elif key == QtCore.Qt.Key_Escape: seq = b"\x1b"
-        elif key == QtCore.Qt.Key_Up: seq = b"\x1b[A"
-        elif key == QtCore.Qt.Key_Down: seq = b"\x1b[B"
-        elif key == QtCore.Qt.Key_Right: seq = b"\x1b[C"
-        elif key == QtCore.Qt.Key_Left: seq = b"\x1b[D"
-        elif key == QtCore.Qt.Key_Home: seq = b"\x1b[H"
-        elif key == QtCore.Qt.Key_End: seq = b"\x1b[F"
+        elif key == QtCore.Qt.Key_Up: seq = self._cursor_key_sequence("A", mods)
+        elif key == QtCore.Qt.Key_Down: seq = self._cursor_key_sequence("B", mods)
+        elif key == QtCore.Qt.Key_Right: seq = self._cursor_key_sequence("C", mods)
+        elif key == QtCore.Qt.Key_Left: seq = self._cursor_key_sequence("D", mods)
+        elif key == QtCore.Qt.Key_Home: seq = self._cursor_key_sequence("H", mods)
+        elif key == QtCore.Qt.Key_End: seq = self._cursor_key_sequence("F", mods)
         elif key == QtCore.Qt.Key_PageUp: seq = b"\x1b[5~"
         elif key == QtCore.Qt.Key_PageDown: seq = b"\x1b[6~"
         elif key == QtCore.Qt.Key_Insert: seq = b"\x1b[2~"
@@ -1511,7 +1845,8 @@ class TerminalWidget(QtWidgets.QWidget):
     # -------- Mouse & Selection --------
     def _cell_pos_from_event(self, e: QtGui.QMouseEvent):
         """Map mouse event to cell coords in viewport space, accounting for toolbar."""
-        x = max(0, min(self.width() - 1, int(e.position().x())))
+        viewport_w = self._viewport_width()
+        x = max(0, min(viewport_w - 1, int(e.position().x())))
         y = max(0, int(e.position().y()) - self._top_offset())
         y = min(self.height() - 1 - self._top_offset(), y)
         col = x // self._cell_w
@@ -1527,9 +1862,11 @@ class TerminalWidget(QtWidgets.QWidget):
         emu_rows = int(self._screen.lines)
         hist_sequences = self._history_sequences()
         hist_len = self._history_length(hist_sequences)
-        live_rows = max(1, self._live_rows())
-        total_rows = hist_len + live_rows
-        view_top = max(0, total_rows - vis_rows - self._view_offset)
+        total_rows = hist_len + max(1, emu_rows)
+        if self._view_offset == 0:
+            view_top = hist_len
+        else:
+            view_top = max(0, total_rows - vis_rows - self._view_offset)
 
         out: list[dict] = []
         for row_i in range(emu_rows):
@@ -1645,7 +1982,7 @@ class TerminalWidget(QtWidgets.QWidget):
 
         if next_offset == current:
             return False
-        self._view_offset = next_offset
+        self._set_view_offset(next_offset, repaint=False)
         return True
 
     def mousePressEvent(self, e: QtGui.QMouseEvent):
@@ -1768,9 +2105,11 @@ class TerminalWidget(QtWidgets.QWidget):
         hist_sequences = self._history_sequences()
         hist_len = self._history_length(hist_sequences)
         vis_rows = self._visible_rows()
-        live_rows = max(1, self._live_rows())
-        total_rows = hist_len + live_rows
-        view_top = max(0, total_rows - vis_rows - self._view_offset)
+        total_rows = hist_len + max(1, int(self._screen.lines))
+        if self._view_offset == 0:
+            view_top = hist_len
+        else:
+            view_top = max(0, total_rows - vis_rows - self._view_offset)
 
         lines = []
         for vr in range(r1, r2 + 1):
@@ -1795,12 +2134,11 @@ class TerminalWidget(QtWidgets.QWidget):
 
     # -------- Scrolling & Resize --------
     def _ensure_bottom(self):
-        if self._view_offset != 0:
-            self._view_offset = 0
-        self.update()
+        self._set_view_offset(0, repaint=True)
 
     def resizeEvent(self, e: QtGui.QResizeEvent):
         super().resizeEvent(e)
+        self._sync_scrollbar()
         self._schedule_terminal_geometry_sync()
 
     # -------- Cleanup --------
