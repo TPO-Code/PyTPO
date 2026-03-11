@@ -3,6 +3,7 @@ import re
 import time
 import tomllib
 import weakref
+from difflib import unified_diff
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
@@ -87,6 +88,7 @@ from src.ui.widgets.terminal_widget import TerminalWidget
 from src.ui.widgets.problems_panel import ProblemsPanel
 from src.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
 from src.ui.widgets.tdoc_document_widget import TDocDocumentWidget
+from src.ui.widgets.unified_diff_editor import UnifiedDiffEditor
 from src.ui.widgets.usages_panel import UsagesPanel
 from src.ui.widgets.welcome_screen import WelcomeScreenWidget
 from TPOPyside.widgets.tdoc_support import (
@@ -6806,6 +6808,140 @@ class PythonIDE(Window):
         tabs.add_editor(viewer)
         return viewer
 
+    @staticmethod
+    def _read_text_for_diff(path: str) -> str | None:
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                return Path(path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _build_unified_diff_text_for_file(self, cpath: str) -> tuple[str, str]:
+        base_name = os.path.basename(cpath) or "File"
+        repo_root = self._repo_root_for_path(cpath)
+        if not repo_root:
+            message = f"Cannot show Git diff for '{base_name}': file is not inside a Git repository."
+            return f"# {message}\n{cpath}", message
+
+        rel_paths = self._to_repo_rel_paths(repo_root, [cpath])
+        if not rel_paths:
+            message = f"Cannot show Git diff for '{base_name}': file is outside repository root."
+            return f"# {message}\n{cpath}", message
+        rel_path = rel_paths[0]
+
+        disk_text = self._read_text_for_diff(cpath)
+        if disk_text is None:
+            message = f"Could not read '{base_name}' as text for diff view."
+            return f"# {message}\n{cpath}", message
+
+        try:
+            tracked = bool(self.git_service.is_tracked_path(repo_root, rel_path))
+        except Exception:
+            tracked = False
+
+        head_text: str | None = None
+        if tracked:
+            try:
+                head_text = self.git_service.read_head_file_text(repo_root, rel_path)
+            except Exception:
+                head_text = None
+
+        source_text = str(head_text or "")
+        # Use logical lines (without trailing newline chars) so the viewer can
+        # join patch rows with exactly one visual line break.
+        source_lines = source_text.splitlines(keepends=False)
+        target_lines = str(disk_text).splitlines(keepends=False)
+
+        from_file = f"a/{rel_path}" if tracked and head_text is not None else "/dev/null"
+        to_file = f"b/{rel_path}"
+
+        patch_lines = list(
+            unified_diff(
+                source_lines,
+                target_lines,
+                fromfile=from_file,
+                tofile=to_file,
+                n=3,
+                lineterm="",
+            )
+        )
+
+        root_header = f"diff --git a/{rel_path} b/{rel_path}"
+        if patch_lines:
+            return "\n".join([root_header, *patch_lines]), f"Opened diff for {base_name}."
+
+        return (
+            "\n".join(
+                [
+                    root_header,
+                    f"--- {from_file}",
+                    f"+++ {to_file}",
+                    "# No changes against HEAD.",
+                ]
+            ),
+            f"No changes for {base_name}.",
+        )
+
+    def open_diff_view(self, path: str, *, show_errors: bool = True) -> QWidget | None:
+        cpath = self._canonical_path(path)
+        if os.path.isdir(cpath):
+            return None
+        if not os.path.exists(cpath):
+            if show_errors:
+                QMessageBox.warning(self, "View Diff", f"File does not exist:\n{cpath}")
+            return None
+        if not os.access(cpath, os.R_OK):
+            if show_errors:
+                QMessageBox.warning(self, "View Diff", f"File is not readable:\n{cpath}")
+            return None
+
+        try:
+            diff_text, status_text = self._build_unified_diff_text_for_file(cpath)
+            viewer = UnifiedDiffEditor(
+                source_file_path=cpath,
+                diff_text=diff_text,
+                display_name=f"Diff: {os.path.basename(cpath)}",
+                parent=self.editor_workspace,
+            )
+
+            try:
+                viewer.configure_keybindings(self._keybindings_config())
+            except Exception:
+                pass
+            try:
+                viewer.set_editor_font_preferences(
+                    family=str(self.font_family or "").strip(),
+                    point_size=int(self.font_size),
+                )
+            except Exception:
+                pass
+
+            self._apply_editor_background_to_editor(viewer)
+            self._apply_editor_indent_settings_to_editor(viewer)
+            self._apply_lint_visual_settings_to_editor(viewer)
+            self._apply_editor_overview_settings_to_editor(viewer)
+            self._apply_spellcheck_visual_settings_to_widget(viewer)
+
+            tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+            tabs.add_editor(viewer)
+            if tabs.indexOf(viewer) < 0:
+                idx = tabs.addTab(viewer, viewer.display_name())
+                tabs.setCurrentIndex(idx)
+                viewer.setFocus()
+
+            self._refresh_runtime_action_states()
+            self.spellcheck_manager.refresh_active_widget(immediate=True)
+            self.statusBar().showMessage(status_text, 2400)
+            return viewer
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "View Diff", f"Could not open diff view:\n{exc}")
+            return None
+
     def open_file(self, path: str, *, show_errors: bool = True) -> QWidget | None:
         cpath = self._canonical_path(path)
         if os.path.isdir(cpath):
@@ -7600,6 +7736,12 @@ class PythonIDE(Window):
                     clear_inline = getattr(widget, "clear_inline_suggestion", None)
                     if callable(clear_inline):
                         clear_inline()
+            elif isinstance(widget, UnifiedDiffEditor):
+                self._apply_editor_background_to_editor(widget)
+                self._apply_editor_indent_settings_to_editor(widget)
+                self._apply_lint_visual_settings_to_editor(widget)
+                self._apply_editor_overview_settings_to_editor(widget)
+                self._apply_spellcheck_visual_settings_to_widget(widget)
             elif isinstance(widget, (ImageViewerWidget, SoundPlayerEditorWidget)):
                 self._apply_image_viewer_background_to_widget(widget)
         self.spellcheck_manager.refresh_active_widget(immediate=True)

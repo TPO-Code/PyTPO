@@ -96,6 +96,16 @@ class ExplorerController:
 
         menu.exec(global_pos)
 
+    def _open_diff_view_action(self, file_path: str) -> None:
+        opener = getattr(self.ide, "open_diff_view", None)
+        if not callable(opener):
+            self._show_tree_error("View Diff", "Diff viewer is not available in this build.")
+            return
+        try:
+            opener(file_path)
+        except Exception as exc:
+            self._show_tree_error("View Diff", f"Could not open diff view:\n{exc}")
+
     def _copy_tree_selection(self):
         self._copy_tree_paths(None)
 
@@ -153,6 +163,11 @@ class ExplorerController:
 
         file_paths = [p for p in targets if os.path.isfile(p)]
         folder_paths = [p for p in targets if os.path.isdir(p)]
+
+        if len(file_paths) == 1:
+            act_view_diff = menu.addAction("View Diff")
+            act_view_diff.triggered.connect(lambda: self._open_diff_view_action(file_paths[0]))
+            menu.addSeparator()
 
         act_copy = menu.addAction(f"Copy ({len(targets)})")
         act_copy.triggered.connect(lambda: self._copy_tree_paths(targets[0]))
@@ -774,6 +789,8 @@ class ExplorerController:
         read_only = self._is_project_read_only()
         act_open = menu.addAction("Open")
         act_open.triggered.connect(lambda: self.open_file(file_path))
+        act_view_diff = menu.addAction("View Diff")
+        act_view_diff.triggered.connect(lambda: self._open_diff_view_action(file_path))
 
         new_file_menu = menu.addMenu("New File")
         self._populate_new_file_menu(new_file_menu, os.path.dirname(file_path))
