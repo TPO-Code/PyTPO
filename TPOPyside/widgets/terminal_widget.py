@@ -229,44 +229,6 @@ class CommandSpec:
     dryrun: bool = False
 
 
-# ============================ Buffer Dialog ============================
-
-class _BufferDialog(QtWidgets.QDialog):
-    def __init__(self, parent, init_cols: int, init_rows: int):
-        super().__init__(parent)
-        self.setWindowTitle("Virtual Buffer Dimensions")
-        self.setModal(True)
-
-        lab_cols = QtWidgets.QLabel("Columns:")
-        lab_rows = QtWidgets.QLabel("Rows:")
-
-        self.spin_cols = QtWidgets.QSpinBox()
-        self.spin_cols.setRange(40, 1000)
-        self.spin_cols.setValue(int(init_cols))
-        self.spin_cols.setAccelerated(True)
-
-        self.spin_rows = QtWidgets.QSpinBox()
-        self.spin_rows.setRange(50, 5000)
-        self.spin_rows.setValue(int(init_rows))
-        self.spin_rows.setAccelerated(True)
-
-        form = QtWidgets.QFormLayout()
-        form.addRow(lab_cols, self.spin_cols)
-        form.addRow(lab_rows, self.spin_rows)
-
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        lay.addLayout(form)
-        lay.addWidget(btns)
-
-    def values(self) -> tuple[int, int]:
-        return int(self.spin_cols.value()), int(self.spin_rows.value())
-
-
 # ============================ Terminal Widget ============================
 
 class TerminalWidget(QtWidgets.QWidget):
@@ -360,6 +322,10 @@ class TerminalWidget(QtWidgets.QWidget):
         # QSS/Palette-driven visuals
         self._cursor_color: QtGui.QColor = None  # set by _install_palette_defaults
         self._link_color: QtGui.QColor = None    # set by _install_palette_defaults
+        self._bg_image: Optional[QtGui.QPixmap] = None
+        self._bg_image_path: str = ""
+        self._bg_image_mode: str = "cover"
+        self._bg_image_opacity: float = 0.18
         self._install_palette_defaults()
     
         # Font metrics from current widget font (QSS friendly)
@@ -371,7 +337,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._shell_exit_emitted = False
         self._history_limit = int(history_lines)
     
-        # Fixed emulator geometry (virtual)
+        # Terminal geometry tracks viewport size.
         self._virt_cols = 200
         self._virt_rows = 200
     
@@ -406,7 +372,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._screen.set_mode(modes.DECAWM)  # wraparound while printing
         self._stream = pyte.ByteStream(self._screen)
     
-        # Inform child once (we don't chase real window resizes)
+        # Seed child size before first paint; a deferred sync aligns to actual viewport geometry.
         self._set_winsize(self._virt_rows, self._virt_cols)
     
         # Async notifier
@@ -447,6 +413,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._build_run_button()
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        QtCore.QTimer.singleShot(0, self._sync_terminal_geometry)
         
     # -------- Palette & Metrics (QSS-friendly) --------
     def _install_palette_defaults(self):
@@ -470,6 +437,7 @@ class TerminalWidget(QtWidgets.QWidget):
         et = ev.type()
         if et in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
             self._recompute_metrics()
+            self._sync_terminal_geometry()
             self.update()
         if et == QtCore.QEvent.PaletteChange:
             self._install_palette_defaults()
@@ -479,6 +447,92 @@ class TerminalWidget(QtWidgets.QWidget):
     def focusNextPrevChild(self, next: bool) -> bool:
         # Keep focus so Tab reaches the shell instead of moving to other widgets.
         return False
+
+    @staticmethod
+    def _normalize_bg_image_mode(mode: str) -> str:
+        key = str(mode or "").strip().lower()
+        if key in {"cover", "contain", "stretch", "tile", "center"}:
+            return key
+        return "cover"
+
+    def set_background_image(
+            self,
+            path: Optional[str],
+            *,
+            opacity: Optional[float] = None,
+            mode: Optional[str] = None,
+    ) -> bool:
+        image_path = str(path or "").strip()
+        if not image_path:
+            self._bg_image = None
+            self._bg_image_path = ""
+            if opacity is not None:
+                self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+            if mode is not None:
+                self._bg_image_mode = self._normalize_bg_image_mode(mode)
+            self.update()
+            return True
+
+        pix = QtGui.QPixmap(image_path)
+        if pix.isNull():
+            return False
+        self._bg_image = pix
+        self._bg_image_path = image_path
+        if opacity is not None:
+            self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+        if mode is not None:
+            self._bg_image_mode = self._normalize_bg_image_mode(mode)
+        self.update()
+        return True
+
+    def clear_background_image(self) -> None:
+        self._bg_image = None
+        self._bg_image_path = ""
+        self.update()
+
+    def set_background_image_opacity(self, opacity: float) -> None:
+        self._bg_image_opacity = max(0.0, min(1.0, float(opacity)))
+        self.update()
+
+    def set_background_image_mode(self, mode: str) -> None:
+        self._bg_image_mode = self._normalize_bg_image_mode(mode)
+        self.update()
+
+    def _paint_background_image(self, p: QtGui.QPainter, rect: QtCore.QRect) -> None:
+        pix = self._bg_image
+        if pix is None or pix.isNull() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        mode = self._normalize_bg_image_mode(self._bg_image_mode)
+        p.save()
+        p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+
+        if mode == "tile":
+            p.drawTiledPixmap(rect, pix)
+        elif mode == "stretch":
+            p.drawPixmap(rect, pix)
+        else:
+            pw, ph = pix.width(), pix.height()
+            if pw > 0 and ph > 0:
+                sx = rect.width() / float(pw)
+                sy = rect.height() / float(ph)
+                if mode == "contain":
+                    scale = min(sx, sy)
+                elif mode == "center":
+                    scale = 1.0
+                else:  # cover
+                    scale = max(sx, sy)
+                tw = max(1, int(round(pw * scale)))
+                th = max(1, int(round(ph * scale)))
+                tx = rect.x() + (rect.width() - tw) // 2
+                ty = rect.y() + (rect.height() - th) // 2
+                p.drawPixmap(QtCore.QRect(tx, ty, tw, th), pix)
+
+        alpha = int(round(max(0.0, min(1.0, float(self._bg_image_opacity))) * 255.0))
+        if alpha > 0:
+            overlay = QtGui.QColor(self._bg_default)
+            overlay.setAlpha(alpha)
+            p.fillRect(rect, overlay)
+        p.restore()
 
     # -------- UI: Toolbar, Run Button, Context Menu --------
     def _build_toolbar(self):
@@ -501,12 +555,6 @@ class TerminalWidget(QtWidgets.QWidget):
             self._view_offset = 0
             self.update()
         act_clear.triggered.connect(_do_clear)
-
-        self._toolbar.addSeparator()
-
-        act_buf = self._toolbar.addAction("Buffer…")
-        act_buf.setToolTip("Change virtual buffer (cols × rows)")
-        act_buf.triggered.connect(self._open_buffer_dialog)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -688,6 +736,26 @@ class TerminalWidget(QtWidgets.QWidget):
             os.kill(self._pid, signal.SIGWINCH)
         except Exception:
             pass
+
+    def _sync_terminal_geometry(self, *, force: bool = False) -> None:
+        if getattr(self, "_screen", None) is None:
+            return
+        cols = max(2, int(self._visible_cols()))
+        rows = max(2, int(self._visible_rows()))
+        if not force and cols == int(self._virt_cols) and rows == int(self._virt_rows):
+            return
+
+        self._virt_cols = cols
+        self._virt_rows = rows
+        try:
+            self._screen.resize(lines=rows, columns=cols)
+        except Exception:
+            # Fallback path for environments where pyte resize behavior differs.
+            lines = self._snapshot_all_lines()
+            self._rebuild_with_lines(cols, rows, lines)
+        self._set_winsize(rows, cols)
+        self._view_offset = min(self._view_offset, self._max_view_offset())
+        self.update()
 
     def _snapshot_all_lines(self) -> list[str]:
         """Oldest→newest: history strings + live buffer rows (trimmed)."""
@@ -981,6 +1049,10 @@ class TerminalWidget(QtWidgets.QWidget):
             p.setFont(self.font())
             top_off = self._top_offset()
             p.translate(0, top_off)
+            self._paint_background_image(
+                p,
+                QtCore.QRect(0, 0, int(self.width()), max(0, int(self.height() - top_off))),
+            )
 
             emu_rows, emu_cols = self._screen.lines, self._screen.columns
             vis_cols = self._visible_cols()
@@ -1162,6 +1234,16 @@ class TerminalWidget(QtWidgets.QWidget):
         if self._view_offset == 0:
             self.update()
 
+    def event(self, ev: QtCore.QEvent) -> bool:
+        # Prevent IDE-wide shortcuts (for example F2/F5/F12/Shift+F5) from
+        # stealing function keys when terminal focus is active.
+        if ev.type() == QtCore.QEvent.ShortcutOverride and isinstance(ev, QtGui.QKeyEvent):
+            key = int(ev.key())
+            if QtCore.Qt.Key_F1 <= key <= QtCore.Qt.Key_F12:
+                ev.accept()
+                return True
+        return super().event(ev)
+
     # -------- Input: Wheel/Keys --------
     def wheelEvent(self, e: QtGui.QWheelEvent):
         # Terminal-directed scroll (xterm mouse mode) with Shift
@@ -1187,6 +1269,51 @@ class TerminalWidget(QtWidgets.QWidget):
             new_offset = max(0.0, min(new_offset, max_offset))
             self._view_offset = int(new_offset)
             self.update()
+
+    @staticmethod
+    def _function_key_sequence(key: int, mods: QtCore.Qt.KeyboardModifiers) -> Optional[bytes]:
+        relevant = mods & (
+            QtCore.Qt.ShiftModifier
+            | QtCore.Qt.ControlModifier
+            | QtCore.Qt.AltModifier
+            | QtCore.Qt.MetaModifier
+        )
+        mod_param = 1
+        if bool(relevant & QtCore.Qt.ShiftModifier):
+            mod_param += 1
+        if bool(relevant & QtCore.Qt.AltModifier) or bool(relevant & QtCore.Qt.MetaModifier):
+            mod_param += 2
+        if bool(relevant & QtCore.Qt.ControlModifier):
+            mod_param += 4
+
+        if key in (QtCore.Qt.Key_F1, QtCore.Qt.Key_F2, QtCore.Qt.Key_F3, QtCore.Qt.Key_F4):
+            suffix = {
+                QtCore.Qt.Key_F1: "P",
+                QtCore.Qt.Key_F2: "Q",
+                QtCore.Qt.Key_F3: "R",
+                QtCore.Qt.Key_F4: "S",
+            }.get(key)
+            if not suffix:
+                return None
+            if mod_param == 1:
+                return f"\x1bO{suffix}".encode("ascii")
+            return f"\x1b[1;{mod_param}{suffix}".encode("ascii")
+
+        fn_csi = {
+            QtCore.Qt.Key_F5: 15,
+            QtCore.Qt.Key_F6: 17,
+            QtCore.Qt.Key_F7: 18,
+            QtCore.Qt.Key_F8: 19,
+            QtCore.Qt.Key_F9: 20,
+            QtCore.Qt.Key_F10: 21,
+            QtCore.Qt.Key_F11: 23,
+            QtCore.Qt.Key_F12: 24,
+        }.get(key)
+        if fn_csi is None:
+            return None
+        if mod_param == 1:
+            return f"\x1b[{fn_csi}~".encode("ascii")
+        return f"\x1b[{fn_csi};{mod_param}~".encode("ascii")
 
     def keyPressEvent(self, e: QtGui.QKeyEvent):
         key, mods = e.key(), e.modifiers()
@@ -1236,6 +1363,8 @@ class TerminalWidget(QtWidgets.QWidget):
         elif key == QtCore.Qt.Key_PageDown: seq = b"\x1b[6~"
         elif key == QtCore.Qt.Key_Insert: seq = b"\x1b[2~"
         elif key == QtCore.Qt.Key_Delete: seq = b"\x1b[3~"
+        elif QtCore.Qt.Key_F1 <= key <= QtCore.Qt.Key_F12:
+            seq = self._function_key_sequence(int(key), mods)
         elif (mods & QtCore.Qt.ControlModifier) and QtCore.Qt.Key_A <= key <= QtCore.Qt.Key_Z:
             seq = bytes([key - QtCore.Qt.Key_A + 1])
         if seq is not None:
@@ -1363,6 +1492,31 @@ class TerminalWidget(QtWidgets.QWidget):
         else:
             self.unsetCursor()
 
+    def _autoscroll_selection(self, mouse_y: float) -> bool:
+        top = float(self._top_offset())
+        bottom = float(self.height() - 1)
+        if bottom < top:
+            return False
+
+        max_offset = int(self._max_view_offset())
+        current = int(self._view_offset)
+        next_offset = current
+        cell = max(1.0, float(self._cell_h))
+
+        if mouse_y < top:
+            dist = top - mouse_y
+            step = max(1, int(dist / cell) + 1)
+            next_offset = min(max_offset, current + step)
+        elif mouse_y > bottom:
+            dist = mouse_y - bottom
+            step = max(1, int(dist / cell) + 1)
+            next_offset = max(0, current - step)
+
+        if next_offset == current:
+            return False
+        self._view_offset = next_offset
+        return True
+
     def mousePressEvent(self, e: QtGui.QMouseEvent):
         self._mouse_btns |= e.buttons().value
         if self._mouse_mode_btn:
@@ -1373,6 +1527,10 @@ class TerminalWidget(QtWidgets.QWidget):
                 self._sel_start = pos
                 self._sel_end = pos
                 self._selecting = True
+                try:
+                    self.grabMouse()
+                except Exception:
+                    pass
                 self.update()
 
     def mouseReleaseEvent(self, e: QtGui.QMouseEvent):
@@ -1385,6 +1543,10 @@ class TerminalWidget(QtWidgets.QWidget):
                 clicked_without_drag = self._sel_start == pos
                 self._sel_end = pos
                 self._selecting = False
+                try:
+                    self.releaseMouse()
+                except Exception:
+                    pass
                 if clicked_without_drag:
                     target = self._traceback_target_from_row(pos[1])
                     if target:
@@ -1398,9 +1560,11 @@ class TerminalWidget(QtWidgets.QWidget):
             self._report_mouse(e, motion=True)
         else:
             if self._selecting:
+                scrolled = self._autoscroll_selection(float(e.position().y()))
                 pos = self._cell_pos_from_event(e)
-                self._sel_end = pos
-                self.update()
+                if scrolled or self._sel_end != pos:
+                    self._sel_end = pos
+                    self.update()
             else:
                 _, row = self._cell_pos_from_event(e)
                 self._update_traceback_hover_cursor(row)
@@ -1505,9 +1669,8 @@ class TerminalWidget(QtWidgets.QWidget):
         self.update()
 
     def resizeEvent(self, e: QtGui.QResizeEvent):
-        # Paint-only; emulator size remains fixed.
-        self._view_offset = min(self._view_offset, self._max_view_offset())
-        self.update()
+        super().resizeEvent(e)
+        self._sync_terminal_geometry()
 
     # -------- Cleanup --------
     def closeEvent(self, e: QtGui.QCloseEvent):
@@ -1526,23 +1689,6 @@ class TerminalWidget(QtWidgets.QWidget):
         except Exception:
             pass
         super().closeEvent(e)
-
-    # -------- Buffer Dialog --------
-    def _open_buffer_dialog(self):
-        dlg = _BufferDialog(self, self._virt_cols, self._virt_rows)
-        if dlg.exec() != QtWidgets.QDialog.Accepted:
-            return
-        cols, rows = dlg.values()
-        if cols == self._virt_cols and rows == self._virt_rows:
-            return
-
-        lines = self._snapshot_all_lines()
-        self._virt_cols = int(cols)
-        self._virt_rows = int(rows)
-        self._rebuild_with_lines(self._virt_cols, self._virt_rows, lines)
-        self._set_winsize(self._virt_rows, self._virt_cols)
-        self._view_offset = 0
-        self.update()
 
     # ======================= Run Button Helpers =======================
 
