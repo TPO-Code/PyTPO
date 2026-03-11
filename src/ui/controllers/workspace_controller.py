@@ -43,10 +43,13 @@ class WorkspaceController(QObject):
         return self._external_file_watch_timer
 
     def _configure_autosave_timer(self) -> None:
-        if not bool(self._autosave_config().get("enabled", False)):
+        if self.ide.is_project_read_only() or not bool(self._autosave_config().get("enabled", False)):
             self._autosave_timer.stop()
 
     def _schedule_autosave(self) -> None:
+        if self.ide.is_project_read_only():
+            self._autosave_timer.stop()
+            return
         cfg = self._autosave_config()
         if not bool(cfg.get("enabled", False)):
             self._autosave_timer.stop()
@@ -58,6 +61,8 @@ class WorkspaceController(QObject):
         self._autosave_timer.start(delay_ms)
 
     def _autosave_dirty_editors(self) -> None:
+        if self.ide.is_project_read_only():
+            return
         if not bool(self._autosave_config().get("enabled", False)):
             return
 

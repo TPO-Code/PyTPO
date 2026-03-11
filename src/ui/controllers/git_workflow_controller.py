@@ -22,6 +22,15 @@ class GitWorkflowController:
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
 
+    def _block_write_action(self, action_label: str) -> bool:
+        blocker = getattr(self.ide, "_block_if_project_read_only", None)
+        if callable(blocker):
+            try:
+                return bool(blocker(action_label))
+            except Exception:
+                return False
+        return False
+
     def open_clone_repository_dialog(self) -> None:
         auth = GitHubAuthStore(self.ide_app_dir)
         if not auth.has_token():
@@ -56,6 +65,8 @@ class GitWorkflowController:
             self.open_project_path(cloned_path)
 
     def open_share_to_github_dialog(self) -> None:
+        if self._block_write_action("Share to GitHub"):
+            return
         token = str(self.ide._github_auth_store.get() or "").strip()
         if not token:
             answer = QMessageBox.question(
@@ -95,6 +106,8 @@ class GitWorkflowController:
         self.ide.statusBar().showMessage(msg, 4200)
 
     def open_git_commit_dialog(self, *, prefer_push_action: bool = False) -> None:
+        if self._block_write_action("Commit"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
@@ -221,6 +234,8 @@ class GitWorkflowController:
         return False
 
     def push_current_branch(self) -> None:
+        if self._block_write_action("Push"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
@@ -282,6 +297,8 @@ class GitWorkflowController:
         self.schedule_git_status_refresh(delay_ms=80, force=True)
 
     def rollback_file_changes(self, file_path: str) -> None:
+        if self._block_write_action("Rollback"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
@@ -302,6 +319,8 @@ class GitWorkflowController:
         self._submit_git_task("rollback_file", _run, context=cpath)
 
     def rollback_discard_unstaged(self) -> None:
+        if self._block_write_action("Reset"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
@@ -321,6 +340,8 @@ class GitWorkflowController:
         self._submit_git_task("rollback_repo", _run)
 
     def rollback_unstage_all(self) -> None:
+        if self._block_write_action("Reset"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return
@@ -340,6 +361,8 @@ class GitWorkflowController:
         self._submit_git_task("rollback_repo", _run)
 
     def rollback_hard_reset_head(self) -> None:
+        if self._block_write_action("Reset"):
+            return
         repo_root = self._ensure_git_repo()
         if not repo_root:
             return

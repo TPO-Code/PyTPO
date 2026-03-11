@@ -540,6 +540,10 @@ class PythonIDE(Window):
         self._window_geometry_restored = False
         self._dock_layout_restored = False
         self._panel_toggle_actions: list[QAction] = []
+        self._act_new_file: QAction | None = None
+        self._act_save: QAction | None = None
+        self._act_save_as: QAction | None = None
+        self._act_project_read_only: QAction | None = None
         self._act_build_current: QAction | None = None
         self._act_build_and_run_current: QAction | None = None
         self._act_run_current: QAction | None = None
@@ -555,6 +559,11 @@ class PythonIDE(Window):
         self._act_extract_variable: QAction | None = None
         self._act_extract_method: QAction | None = None
         self._act_toggle_markdown_preview: QAction | None = None
+        self._act_git_commit: QAction | None = None
+        self._act_git_push: QAction | None = None
+        self._act_git_commit_push: QAction | None = None
+        self._act_git_discard_unstaged: QAction | None = None
+        self._act_git_hard_reset: QAction | None = None
         self._run_python_config_menu: QMenu | None = None
         self._run_python_config_menu_action: QAction | None = None
         self._run_python_config_action_group: QActionGroup | None = None
@@ -600,6 +609,7 @@ class PythonIDE(Window):
         self._clangd_repair_active = False
         self._last_status_debug_message = ""
         self._last_status_debug_at = 0.0
+        self._status_read_only_label: QLabel | None = None
         self._status_git_branch_label: QLabel | None = None
         self._github_auth_store = GitHubAuthStore(self.ide_app_dir)
         self.git_service = GitService(
@@ -681,6 +691,7 @@ class PythonIDE(Window):
         self._setup_status_bar_widgets()
         self._bind_status_bar_debug_mirror()
         self.setup_menus()
+        self._apply_project_read_only_state(announce=False)
         self._restore_window_and_dock_layout()
         self._report_settings_load_errors(source="startup")
         self._setup_instance_server()
@@ -1293,6 +1304,7 @@ class PythonIDE(Window):
         widget = CodexAgentDockWidget(
             project_dir_provider=lambda: str(self.project_root or ""),
             tree_path_excluded_predicate=self._is_tree_path_excluded,
+            project_read_only_provider=self.is_project_read_only,
             settings_provider=self._codex_agent_settings,
             settings_saver=self._save_codex_agent_settings,
             file_opener=self._open_codex_agent_file,
@@ -1330,11 +1342,20 @@ class PythonIDE(Window):
         if not isinstance(editor, CodeEditor):
             return
         file_path = self._commit_md_file_path()
-        try:
-            ensure_commit_md_exists(self.project_root)
-            text = load_commit_md_text(self.project_root)
-        except Exception:
-            text = ""
+        path = Path(file_path)
+        text = ""
+        if self.is_project_read_only():
+            if path.exists():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except Exception:
+                    text = ""
+        else:
+            try:
+                ensure_commit_md_exists(self.project_root)
+                text = load_commit_md_text(self.project_root)
+            except Exception:
+                text = ""
         self._set_commit_md_editor_text(text, file_path=file_path)
 
     def _set_commit_md_editor_text(self, text: str, *, file_path: str) -> None:
@@ -1371,6 +1392,8 @@ class PythonIDE(Window):
         self._schedule_commit_md_dock_save()
 
     def _schedule_commit_md_dock_save(self) -> None:
+        if self.is_project_read_only():
+            return
         self._commit_md_save_timer.start()
 
     def _flush_commit_md_dock_save(self, *, report_conflict: bool = False) -> bool:
@@ -1380,6 +1403,8 @@ class PythonIDE(Window):
             return True
         if self._commit_md_syncing_editor:
             return True
+        if self.is_project_read_only():
+            return not bool(editor.document().isModified())
 
         target_path = self._canonical_path(self._commit_md_file_path())
         conflict_sig = self._external_conflict_signatures.get(target_path)
@@ -1449,15 +1474,28 @@ class PythonIDE(Window):
                 get_commit_message_from_commit_md(local_text) or "",
                 get_release_message_from_commit_md(local_text) or "",
             )
-        try:
-            text = load_commit_md_text(self.project_root)
-        except Exception:
-            return "", ""
+        if self.is_project_read_only():
+            path = Path(self._commit_md_file_path())
+            if path.exists():
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except Exception:
+                    text = ""
+            else:
+                editor = self.commit_md_editor
+                text = str(editor.toPlainText() or "") if isinstance(editor, CodeEditor) else ""
+        else:
+            try:
+                text = load_commit_md_text(self.project_root)
+            except Exception:
+                return "", ""
         commit_message = get_commit_message_from_commit_md(text) or ""
         release_message = get_release_message_from_commit_md(text) or ""
         return commit_message, release_message
 
     def update_commit_md_messages(self, *, commit_message: str, release_message: str) -> None:
+        if self._block_if_project_read_only("Update commit draft"):
+            return
         if not self._flush_commit_md_dock_save(report_conflict=True):
             return
         try:
@@ -1502,6 +1540,20 @@ class PythonIDE(Window):
         bar = self.statusBar()
         if bar is None:
             return
+        existing_read_only = getattr(self, "_status_read_only_label", None)
+        if isinstance(existing_read_only, QLabel):
+            try:
+                bar.removeWidget(existing_read_only)
+            except Exception:
+                pass
+            existing_read_only.deleteLater()
+        read_only_label = QLabel("READ ONLY", bar)
+        read_only_label.setObjectName("ProjectReadOnlyStatusLabel")
+        read_only_label.setVisible(False)
+        read_only_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        bar.addPermanentWidget(read_only_label)
+        self._status_read_only_label = read_only_label
+
         existing = getattr(self, "_status_git_branch_label", None)
         if isinstance(existing, QLabel):
             try:
@@ -1515,7 +1567,16 @@ class PythonIDE(Window):
         label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         bar.addPermanentWidget(label)
         self._status_git_branch_label = label
+        self._refresh_read_only_status_label()
         self._refresh_git_branch_status_label()
+
+    def _refresh_read_only_status_label(self) -> None:
+        label = self._status_read_only_label
+        if not isinstance(label, QLabel):
+            return
+        enabled = bool(self.is_project_read_only())
+        label.setVisible(enabled)
+        label.setToolTip("Project Read Only mode is enabled.")
 
     def _on_git_status_changed(self, _file_states: dict, _folder_states: dict, branch: str) -> None:
         self._refresh_git_branch_status_label(branch=branch)
@@ -2252,6 +2313,7 @@ class PythonIDE(Window):
                     pass
 
         project_loaded = self._has_project_loaded()
+        project_read_only = bool(self.is_project_read_only())
         active_editor = self.current_editor()
         has_active_editor = isinstance(active_editor, EditorWidget)
         has_selection = bool(has_active_editor and active_editor.textCursor().hasSelection())
@@ -2303,18 +2365,46 @@ class PythonIDE(Window):
         if self._act_close_terminal is not None:
             has_console_tabs = bool(self.console_tabs is not None and self.console_tabs.count() > 0)
             self._act_close_terminal.setEnabled(project_loaded and has_console_tabs)
+        if self._act_new_file is not None:
+            self._act_new_file.setEnabled(project_loaded and not project_read_only)
+        if self._act_save is not None:
+            self._act_save.setEnabled(project_loaded and has_active_editor and not project_read_only)
+        if self._act_save_as is not None:
+            self._act_save_as.setEnabled(project_loaded and has_active_editor and not project_read_only)
+        if self._act_project_read_only is not None:
+            self._act_project_read_only.blockSignals(True)
+            self._act_project_read_only.setChecked(project_read_only)
+            self._act_project_read_only.blockSignals(False)
         if self._act_close_project is not None:
             self._act_close_project.setEnabled(project_loaded)
         if self._act_format_file is not None:
-            self._act_format_file.setEnabled(has_active_editor)
+            self._act_format_file.setEnabled(has_active_editor and not project_read_only)
         if self._act_format_selection is not None:
-            self._act_format_selection.setEnabled(has_active_editor)
+            self._act_format_selection.setEnabled(has_active_editor and not project_read_only)
         if self._act_rename_symbol is not None:
-            self._act_rename_symbol.setEnabled(has_active_editor or self._is_project_tree_focus_context())
+            self._act_rename_symbol.setEnabled(
+                not project_read_only and (has_active_editor or self._is_project_tree_focus_context())
+            )
         if self._act_extract_variable is not None:
-            self._act_extract_variable.setEnabled(can_extract_variable)
+            self._act_extract_variable.setEnabled(can_extract_variable and not project_read_only)
         if self._act_extract_method is not None:
-            self._act_extract_method.setEnabled(can_extract_method)
+            self._act_extract_method.setEnabled(can_extract_method and not project_read_only)
+        if isinstance(getattr(self, "_act_tree_paste", None), QAction):
+            self._act_tree_paste.setEnabled(project_loaded and not project_read_only)
+        if isinstance(getattr(self, "_act_tree_rename", None), QAction):
+            self._act_tree_rename.setEnabled(project_loaded and not project_read_only)
+        if isinstance(getattr(self, "_act_tree_delete", None), QAction):
+            self._act_tree_delete.setEnabled(project_loaded and not project_read_only)
+        if self._act_git_commit is not None:
+            self._act_git_commit.setEnabled(project_loaded and not project_read_only)
+        if self._act_git_push is not None:
+            self._act_git_push.setEnabled(project_loaded and not project_read_only)
+        if self._act_git_commit_push is not None:
+            self._act_git_commit_push.setEnabled(project_loaded and not project_read_only)
+        if self._act_git_discard_unstaged is not None:
+            self._act_git_discard_unstaged.setEnabled(project_loaded and not project_read_only)
+        if self._act_git_hard_reset is not None:
+            self._act_git_hard_reset.setEnabled(project_loaded and not project_read_only)
         if self._act_toggle_markdown_preview is not None:
             markdown_tab = self._active_markdown_editor_tab()
             is_markdown_active = isinstance(markdown_tab, MarkdownEditorTab)
@@ -3088,6 +3178,7 @@ class PythonIDE(Window):
         ):
             return
 
+        read_only = bool(self.is_project_read_only())
         menu_obj.addSeparator()
         if isinstance(unresolved_diag, dict):
             symbol = self.diagnostics_controller._tdoc_unresolved_symbol_from_diagnostic(unresolved_diag)
@@ -3096,6 +3187,7 @@ class PythonIDE(Window):
                 act_add_tdoc_symbol.triggered.connect(
                     lambda _checked=False, d=dict(unresolved_diag): self._on_problem_add_tdoc_symbol_requested(d)
                 )
+                act_add_tdoc_symbol.setEnabled(not read_only)
                 menu_obj.addAction(act_add_tdoc_symbol)
 
         if isinstance(section_cap_diag, dict):
@@ -3105,6 +3197,7 @@ class PythonIDE(Window):
                 act_cap_section.triggered.connect(
                     lambda _checked=False, d=dict(section_cap_diag): self._on_problem_capitalize_tdoc_section_requested(d)
                 )
+                act_cap_section.setEnabled(not read_only)
                 menu_obj.addAction(act_cap_section)
 
         if isinstance(missing_image_diag, dict):
@@ -3116,6 +3209,7 @@ class PythonIDE(Window):
                         d
                     )
                 )
+                act_create_placeholder.setEnabled(not read_only)
                 menu_obj.addAction(act_create_placeholder)
 
         if isinstance(numbered_list_gap_diag, dict):
@@ -3125,6 +3219,7 @@ class PythonIDE(Window):
                     d
                 )
             )
+            act_renumber_numbered_list.setEnabled(not read_only)
             menu_obj.addAction(act_renumber_numbered_list)
 
     def _tdoc_diagnostics_covering_position(self, *, file_path: str, line: int, column: int) -> list[dict]:
@@ -3597,6 +3692,8 @@ class PythonIDE(Window):
         self._format_active_editor(selection_only=True)
 
     def _format_active_editor(self, *, selection_only: bool) -> None:
+        if self._block_if_project_read_only("Formatting"):
+            return
         ed = self.current_editor()
         if not isinstance(ed, EditorWidget):
             self.statusBar().showMessage("No active editor.", 1500)
@@ -3852,15 +3949,21 @@ class PythonIDE(Window):
             self.statusBar().showMessage("No symbol under cursor.", 1600)
 
     def rename_symbol(self):
+        if self._block_if_project_read_only("Rename"):
+            return
         if self._is_project_tree_focus_context():
             self._rename_tree_selection()
             return
         self.language_intelligence_controller.rename_symbol_for_current_editor()
 
     def extract_variable(self):
+        if self._block_if_project_read_only("Extract Variable"):
+            return
         self.language_intelligence_controller.extract_variable_for_current_editor()
 
     def extract_method(self):
+        if self._block_if_project_read_only("Extract Method"):
+            return
         self.language_intelligence_controller.extract_method_for_current_editor()
 
     def cancel_find_usages(self):
@@ -4381,7 +4484,12 @@ class PythonIDE(Window):
 
     def _run_config(self) -> dict:
         cfg = self.config.get("run", {})
-        return cfg if isinstance(cfg, dict) else {}
+        data = cfg if isinstance(cfg, dict) else {}
+        if not self.is_project_read_only():
+            return data
+        out = dict(data)
+        out["auto_save_before_run"] = False
+        return out
 
     def _window_config(self) -> dict:
         cfg = self.config.get("window", {})
@@ -4454,9 +4562,86 @@ class PythonIDE(Window):
         cfg = self.config.get("projects", {})
         return cfg if isinstance(cfg, dict) else {}
 
+    def is_project_read_only(self) -> bool:
+        if self.no_project_mode:
+            return False
+        return bool(self.config.get("read_only", False))
+
+    def _show_project_read_only_message(self, action_label: str) -> None:
+        text = str(action_label or "This action").strip() or "This action"
+        self.statusBar().showMessage(f"{text} is disabled while Project Read Only is enabled.", 2800)
+
+    def _block_if_project_read_only(self, action_label: str) -> bool:
+        if not self.is_project_read_only():
+            return False
+        self._show_project_read_only_message(action_label)
+        return True
+
+    def set_project_read_only_enabled(self, enabled: bool) -> None:
+        requested = bool(enabled)
+        current = bool(self.is_project_read_only())
+        if requested == current:
+            self._apply_project_read_only_state(announce=False)
+            return
+
+        self.settings_manager.set("read_only", requested, "project")
+        try:
+            self.settings_manager.save_all(scopes={"project"}, only_dirty=True, allow_project_repair=True)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not update project Read Only setting: {exc}", 3200)
+            self._apply_project_read_only_state(announce=False)
+            return
+
+        self.config = self.settings_manager.export_legacy_config()
+        self._apply_project_read_only_state(announce=True)
+
+    def _set_widget_read_only_state(self, widget: object, *, read_only: bool) -> None:
+        setter = getattr(widget, "setReadOnly", None)
+        if callable(setter):
+            try:
+                setter(bool(read_only))
+            except Exception:
+                pass
+
+    def _apply_project_read_only_to_open_documents(self) -> None:
+        read_only = bool(self.is_project_read_only())
+        for widget in self._iter_open_document_widgets():
+            self._set_widget_read_only_state(widget, read_only=read_only)
+            code_editor = self._editor_from_document_widget(widget)
+            if code_editor is not widget:
+                self._set_widget_read_only_state(code_editor, read_only=read_only)
+        self._set_widget_read_only_state(self.commit_md_editor, read_only=read_only)
+
+    def _apply_project_read_only_state(self, *, announce: bool) -> None:
+        self._refresh_read_only_status_label()
+        self._apply_project_read_only_to_open_documents()
+        self._configure_autosave_timer()
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            sync_fn = getattr(codex_widget, "sync_project_read_only", None)
+            if callable(sync_fn):
+                try:
+                    sync_fn()
+                except Exception:
+                    pass
+        self._refresh_runtime_action_states()
+        action = self._act_project_read_only
+        if isinstance(action, QAction):
+            action.blockSignals(True)
+            action.setChecked(bool(self.is_project_read_only()))
+            action.blockSignals(False)
+        if announce:
+            state = "enabled" if self.is_project_read_only() else "disabled"
+            self.statusBar().showMessage(f"Project Read Only {state}.", 2200)
+
     def _autosave_config(self) -> dict:
         cfg = self.config.get("autosave", {})
-        return cfg if isinstance(cfg, dict) else {}
+        data = cfg if isinstance(cfg, dict) else {}
+        if not self.is_project_read_only():
+            return data
+        out = dict(data)
+        out["enabled"] = False
+        return out
 
     def _recent_projects_limit(self) -> int:
         try:
@@ -5134,6 +5319,9 @@ class PythonIDE(Window):
         if not target_path:
             return
         if not os.path.exists(target_path):
+            if self.is_project_read_only():
+                self._show_project_read_only_message("Create linked TDOC file")
+                return
             answer = QMessageBox.question(
                 self,
                 "Missing TDOC File",
@@ -5285,6 +5473,8 @@ class PythonIDE(Window):
         return roots
 
     def build_open_tdoc_indexes(self) -> None:
+        if self._block_if_project_read_only("Build TDOC index"):
+            return
         roots = self._open_tdoc_roots()
         if not roots:
             self.statusBar().showMessage("No open TDOC documents.", 1800)
@@ -5331,6 +5521,26 @@ class PythonIDE(Window):
         self.statusBar().showMessage("TDOC index build failed.", 2200)
 
     def _save_dirty_tdoc_documents_for_root(self, root: str) -> bool:
+        if self.is_project_read_only():
+            root_c = self._canonical_path(root)
+            for widget in self._iter_open_document_widgets():
+                path = self._document_widget_path(widget)
+                if not path:
+                    continue
+                cpath = self._canonical_path(path)
+                if not self._path_has_prefix(cpath, root_c):
+                    continue
+                doc_getter = getattr(widget, "document", None)
+                if not callable(doc_getter):
+                    continue
+                try:
+                    if bool(doc_getter().isModified()):
+                        self._show_project_read_only_message("TDOC save")
+                        return False
+                except Exception:
+                    continue
+            return True
+
         root_c = self._canonical_path(root)
         seen: set[str] = set()
         refresh_dirs: set[str] = set()
@@ -5535,6 +5745,8 @@ class PythonIDE(Window):
                     break
 
     def _on_tdoc_rename_alias_requested(self, widget_ref, old_alias: str) -> None:
+        if self._block_if_project_read_only("Rename TDOC symbol"):
+            return
         widget = widget_ref() if callable(widget_ref) else widget_ref
         if not isinstance(widget, (TDocDocumentWidget, EditorWidget)):
             return
@@ -5607,6 +5819,8 @@ class PythonIDE(Window):
         )
 
     def _on_tdoc_normalize_symbol_requested(self, widget_ref, symbol_or_alias: str) -> None:
+        if self._block_if_project_read_only("Normalize TDOC symbol"):
+            return
         widget = widget_ref() if callable(widget_ref) else widget_ref
         if not isinstance(widget, TDocDocumentWidget):
             return
@@ -5669,6 +5883,7 @@ class PythonIDE(Window):
         cpath = self._canonical_path(file_path)
         existing = self._find_open_document_for_path(cpath)
         if isinstance(existing, TDocDocumentWidget):
+            existing.setReadOnly(self.is_project_read_only())
             self._track_widget_change_highlights(existing)
             self._focus_document_widget(existing)
             self._schedule_tdoc_validation(cpath, delay_ms=0)
@@ -5681,6 +5896,7 @@ class PythonIDE(Window):
         )
         if not widget.file_path:
             return None
+        widget.setReadOnly(self.is_project_read_only())
         self._apply_editor_background_to_editor(widget)
         self._apply_editor_indent_settings_to_editor(widget)
         self._apply_editor_overview_settings_to_editor(widget)
@@ -6003,6 +6219,7 @@ class PythonIDE(Window):
         if not ed.file_path:
             return False
         ed.file_path = cpath
+        ed.setReadOnly(self.is_project_read_only())
         try:
             ed.configure_keybindings(self._keybindings_config())
         except Exception:
@@ -6186,6 +6403,8 @@ class PythonIDE(Window):
         return self.editor_workspace.active_editor()
 
     def save_current_editor(self):
+        if self._block_if_project_read_only("Save"):
+            return
         widget = self._current_document_widget()
         if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
@@ -6220,6 +6439,8 @@ class PythonIDE(Window):
         self.schedule_git_status_refresh(delay_ms=90)
 
     def save_current_editor_as(self):
+        if self._block_if_project_read_only("Save As"):
+            return
         widget = self._current_document_widget()
         if widget is None:
             self.statusBar().showMessage("No active editor.", 1500)
@@ -6766,6 +6987,7 @@ class PythonIDE(Window):
 
     def _refresh_runtime_settings_from_manager(self):
         self.config = self.settings_manager.export_legacy_config()
+        self._refresh_read_only_status_label()
         self._refresh_syntax_highlighting_runtime()
         self._apply_application_identity()
         self._set_editor_font_size(
@@ -6801,6 +7023,7 @@ class PythonIDE(Window):
         # Ensure already-open editors stay in sync with current font settings.
         self._apply_editor_font_settings_to_all()
         self._apply_tree_font_settings_to_all()
+        self._apply_project_read_only_to_open_documents()
         self.theme_name = str(self.settings_manager.get("theme", scope_preference="ide", default="Default"))
         self.apply_selected_theme()
         self._apply_tree_font_settings_to_all()
@@ -6849,6 +7072,13 @@ class PythonIDE(Window):
                 codex_widget.reload_settings()
             except Exception:
                 pass
+            sync_fn = getattr(codex_widget, "sync_project_read_only", None)
+            if callable(sync_fn):
+                try:
+                    sync_fn()
+                except Exception:
+                    pass
+        self._refresh_runtime_action_states()
 
         for ed in self.editor_workspace.all_editors():
             self._track_widget_change_highlights(ed)

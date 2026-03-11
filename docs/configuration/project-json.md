@@ -9,6 +9,7 @@ Use `File -> Settings...` and edit `Project` pages for safest updates.
 ## What this file controls
 
 - project metadata (`project_name`)
+- project write-protection (`read_only`)
 - interpreter resolution (`interpreter`, `interpreters`)
 - indexing and explorer excludes (`indexing`, `explorer`)
 - run/build configs (`build`)
@@ -20,6 +21,7 @@ Use `File -> Settings...` and edit `Project` pages for safest updates.
 ```json
 {
   "project_name": "My Project",
+  "read_only": false,
   "interpreters": {
     "default": "python",
     "by_directory": []

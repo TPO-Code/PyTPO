@@ -199,6 +199,7 @@ class EditorSessionEntry(TypedDict, total=False):
 
 class ProjectSettings(TypedDict, total=False):
     project_name: str
+    read_only: bool
     interpreter: str  # Legacy fallback, retained for compatibility.
     interpreters: InterpretersSettings
     indexing: IndexingSettings
@@ -353,6 +354,7 @@ def default_project_settings() -> ProjectSettings:
     default_excluded_files = ["*.lock"]
     defaults: ProjectSettings = {
         "project_name": "My Python Project",
+        "read_only": False,
         "interpreter": "python",
         "interpreters": {
             "default": "python",

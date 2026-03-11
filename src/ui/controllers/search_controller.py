@@ -172,6 +172,8 @@ class SearchController(QObject):
         self.ide.statusBar().showMessage(summary, 2200)
 
     def _on_replace_in_files_requested(self, payload: object) -> None:
+        if self.ide._block_if_project_read_only("Replace in Files"):
+            return
         request = self._normalize_find_in_files_request(payload)
         if request is None:
             return

@@ -5,6 +5,7 @@ Reference for `.tide/project.json` keys.
 ## Top-level keys
 
 - `project_name`: display name for workspace UI
+- `read_only`: when `true`, IDE write operations are blocked for the project
 - `interpreter`: legacy Python fallback interpreter
 - `interpreters`: modern interpreter defaults and overrides
 - `indexing`: indexing exclusion policy

@@ -108,6 +108,12 @@ _APP_ROOT = Path(__file__).resolve().parents[3]
 _PROMPT_USER_MESSAGE_START = "<tide_user_message>"
 _PROMPT_USER_MESSAGE_END = "</tide_user_message>"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_AGENTS_FILENAME = "AGENTS.md"
+_DEFAULT_AGENTS_MD_CONTENT = (
+    "# AGENTS.md\n\n"
+    "## Project Instructions\n\n"
+    "Add project-specific instructions for Codex here.\n"
+)
 _STREAM_RATE_LIMITS_RE = re.compile(
     r"^\s*5h:\s*(\d{1,3})%\s*remaining\s*\|\s*(?:weekly|week):\s*(\d{1,3})%\s*remaining\s*$",
     re.IGNORECASE,
@@ -1403,6 +1409,7 @@ class CodexAgentDockWidget(QWidget):
         *,
         project_dir_provider: Callable[[], str],
         tree_path_excluded_predicate: Callable[[str, bool], bool] | None = None,
+        project_read_only_provider: Callable[[], bool] | None = None,
         settings_provider: Callable[[], dict[str, Any]],
         settings_saver: Callable[[dict[str, Any]], None],
         file_opener: Callable[[str], None] | None = None,
@@ -1411,6 +1418,7 @@ class CodexAgentDockWidget(QWidget):
         super().__init__(parent)
         self._project_dir_provider = project_dir_provider
         self._tree_path_excluded_predicate = tree_path_excluded_predicate
+        self._project_read_only_provider = project_read_only_provider
         self._settings_provider = settings_provider
         self._settings_saver = settings_saver
         self._file_opener = file_opener
@@ -1490,6 +1498,7 @@ class CodexAgentDockWidget(QWidget):
         self._build_ui()
         self._wire_signals()
         self._load_settings()
+        self.sync_project_read_only()
 
         self.destroyed.connect(lambda *_args: self.shutdown())
 
@@ -2327,6 +2336,10 @@ class CodexAgentDockWidget(QWidget):
             permission_mode = str(data.get("permission_mode") or "").strip().lower()
             if permission_mode not in {"default", "full_access"}:
                 permission_mode = "default"
+            if self._is_project_read_only():
+                sandbox_mode = "read-only"
+                permission_mode = "default"
+                self._sandbox_mode = sandbox_mode
             self._set_combo_data(self.permissions_combo, permission_mode)
 
             session_id = str(data.get("session_id") or "").strip()
@@ -2413,6 +2426,71 @@ class CodexAgentDockWidget(QWidget):
             return None
         return path
 
+    def _is_project_read_only(self) -> bool:
+        checker = self._project_read_only_provider
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def sync_project_read_only(self) -> None:
+        if self._is_project_read_only():
+            self._sandbox_mode = "read-only"
+            self._set_combo_data(self.permissions_combo, "default")
+        self._on_busy_changed(self._runner.busy)
+
+    @staticmethod
+    def _agents_file_path(project: Path) -> Path:
+        return project / _AGENTS_FILENAME
+
+    def _ensure_agents_file_before_send(self, project: Path) -> bool:
+        agents_path = self._agents_file_path(project)
+        if agents_path.is_file():
+            return True
+        if self._is_project_read_only():
+            self.statusMessage.emit(
+                f"Send blocked: {_AGENTS_FILENAME} is missing and cannot be created while Project Read Only is enabled."
+            )
+            return False
+        choice = QMessageBox.question(
+            self,
+            "AGENTS.md Required",
+            (
+                "Codex requires an AGENTS.md file at the project root before sending messages.\n\n"
+                f"Create {agents_path.as_posix()} now?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if choice != QMessageBox.Yes:
+            self.statusMessage.emit(
+                "Send blocked: AGENTS.md is required in the project root."
+            )
+            return False
+        try:
+            agents_path.write_text(_DEFAULT_AGENTS_MD_CONTENT, encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "AGENTS.md Creation Failed",
+                f"Could not create {agents_path.as_posix()}.\n\n{exc}",
+            )
+            self.statusMessage.emit(
+                "Send blocked: AGENTS.md could not be created."
+            )
+            return False
+        if callable(self._file_opener):
+            try:
+                self._file_opener(str(agents_path))
+            except Exception:
+                pass
+        self.statusMessage.emit(
+            f"Created {_AGENTS_FILENAME} in {project.as_posix()}."
+        )
+        return True
+
     def _settings_manager(self) -> Any | None:
         current: QWidget | None = self
         while isinstance(current, QWidget):
@@ -2481,6 +2559,9 @@ class CodexAgentDockWidget(QWidget):
         self._refresh_attachment_summary()
 
     def _on_add_files_clicked(self) -> None:
+        if self._is_project_read_only():
+            self.statusMessage.emit("Attachments are disabled while Project Read Only is enabled.")
+            return
         project = self._project_dir()
         initial_dir = str(project) if project is not None else str(Path.home())
         selected, _filter = get_open_file_names(
@@ -2532,6 +2613,8 @@ class CodexAgentDockWidget(QWidget):
         if not self._attached_source_files:
             self._clear_attachment_stage_dir()
             return [], []
+        if self._is_project_read_only():
+            return [], ["Attachment staging is disabled while Project Read Only is enabled."]
 
         session_id = self._ensure_attachment_chat_id()
         stage_dir = project / _ATTACHMENTS_SUBDIR / session_id
@@ -3056,6 +3139,13 @@ class CodexAgentDockWidget(QWidget):
     def _on_option_changed(self, *_args: Any) -> None:
         if self._updating_options:
             return
+        if self._is_project_read_only():
+            self._updating_options = True
+            try:
+                self._sandbox_mode = "read-only"
+                self._set_combo_data(self.permissions_combo, "default")
+            finally:
+                self._updating_options = False
         self._schedule_persist_settings()
 
     @staticmethod
@@ -3111,6 +3201,8 @@ class CodexAgentDockWidget(QWidget):
         return str(proc.stdout or "").strip().lower() == "true"
 
     def _resolved_sandbox_mode(self) -> str:
+        if self._is_project_read_only():
+            return "read-only"
         mode = str(self._sandbox_mode or "").strip().lower()
         if mode not in {"read-only", "workspace-write", "danger-full-access"}:
             return "workspace-write"
@@ -3251,6 +3343,8 @@ class CodexAgentDockWidget(QWidget):
             base = base[:-1]
         resume_args = self._resume_supported_args(base[2:])
         permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
+        if self._is_project_read_only():
+            permission_mode = "default"
         permission_flag = (
             "--dangerously-bypass-approvals-and-sandbox"
             if permission_mode == "full_access"
@@ -3894,6 +3988,8 @@ class CodexAgentDockWidget(QWidget):
         if project is None:
             QMessageBox.warning(self, "No Project", "Open a project before using Codex chat.")
             return
+        if not self._ensure_agents_file_before_send(project):
+            return
 
         command = str(self._command_template or "").strip()
         if not command:
@@ -4179,15 +4275,19 @@ class CodexAgentDockWidget(QWidget):
 
     def _on_busy_changed(self, busy: bool) -> None:
         running = bool(busy)
+        read_only = self._is_project_read_only()
         if running:
             self.input_edit.close_mention_popup()
+        if read_only:
+            self._sandbox_mode = "read-only"
+            self._set_combo_data(self.permissions_combo, "default")
         self.input_frame.set_shimmer_enabled(running)
         self.send_btn.setEnabled(not running)
-        self.add_file_btn.setEnabled(not running)
+        self.add_file_btn.setEnabled(not running and not read_only)
         self.clear_attachments_btn.setEnabled(not running)
         self.model_combo.setEnabled(not running)
         self.reasoning_combo.setEnabled(not running)
-        self.permissions_combo.setEnabled(not running)
+        self.permissions_combo.setEnabled(not running and not read_only)
         self.session_picker.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.new_chat_btn.setEnabled(not running)

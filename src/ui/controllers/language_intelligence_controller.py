@@ -39,6 +39,15 @@ class LanguageIntelligenceController:
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
 
+    def _block_write_action(self, action_label: str) -> bool:
+        blocker = getattr(self.ide, "_block_if_project_read_only", None)
+        if callable(blocker):
+            try:
+                return bool(blocker(action_label))
+            except Exception:
+                return False
+        return False
+
     def _editor_lookup_id(self, ed: object) -> str:
         return str(getattr(ed, "editor_id", "") or id(ed))
 
@@ -457,6 +466,8 @@ class LanguageIntelligenceController:
         self._start_rename_from_payload(ed, payload)
 
     def _start_rename_from_payload(self, ed: EditorWidget, payload: dict) -> None:
+        if self._block_write_action("Rename"):
+            return
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             self.statusBar().showMessage("No active editor.", 1500)
             return
@@ -522,6 +533,8 @@ class LanguageIntelligenceController:
         old_symbol: str,
         new_symbol: str,
     ) -> None:
+        if self._block_write_action("Rename"):
+            return
         file_path = str(ed.file_path or "").strip()
         if not file_path:
             self.statusBar().showMessage("Save the file before renaming symbols.", 2200)
@@ -727,6 +740,8 @@ class LanguageIntelligenceController:
         self._start_extract_method_from_payload(ed, payload)
 
     def _start_extract_variable_from_payload(self, ed: EditorWidget, payload: dict) -> None:
+        if self._block_write_action("Extract Variable"):
+            return
         selection = self._normalize_selection_payload(payload)
         if selection is None:
             self.statusBar().showMessage("Select text to extract a variable.", 2200)
@@ -772,6 +787,8 @@ class LanguageIntelligenceController:
         self._apply_extract_result(ed, result)
 
     def _start_extract_method_from_payload(self, ed: EditorWidget, payload: dict) -> None:
+        if self._block_write_action("Extract Method"):
+            return
         selection = self._normalize_selection_payload(payload)
         if selection is None:
             self.statusBar().showMessage("Select lines to extract a method.", 2200)
@@ -842,6 +859,8 @@ class LanguageIntelligenceController:
         return language
 
     def _apply_extract_result(self, ed: EditorWidget, result_obj: object) -> None:
+        if self._block_write_action("Apply refactor"):
+            return
         result = result_obj if hasattr(result_obj, "status") and hasattr(result_obj, "source_text") else None
         if result is None:
             self.statusBar().showMessage("Extraction failed.", 2400)
@@ -865,6 +884,8 @@ class LanguageIntelligenceController:
         self._request_quick_fixes_for_editor(ed, payload)
 
     def _request_quick_fixes_for_editor(self, ed: EditorWidget, payload: dict) -> None:
+        if self._block_write_action("Quick fix"):
+            return
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             return
         if not ed.file_path:
@@ -1102,6 +1123,8 @@ class LanguageIntelligenceController:
         *,
         operation_label: str,
     ) -> tuple[int, int, list[str]]:
+        if self._block_write_action(operation_label):
+            return 0, 0, [f"{operation_label}: disabled in Project Read Only mode."]
         edits_by_path = collect_workspace_text_edits(workspace_edit_obj)
         if not edits_by_path:
             return 0, 0, [f"{operation_label}: no text edits in workspace edit payload."]
@@ -1174,6 +1197,11 @@ class LanguageIntelligenceController:
             self.statusBar().showMessage("Canceled rename request.", 1600)
 
     def _on_rename_references_done(self, token: int, result_obj: dict) -> None:
+        if self._block_write_action("Rename"):
+            self.ide._rename_request_meta.pop(token, None)
+            if int(self.ide._active_rename_token or 0) == token:
+                self.ide._active_rename_token = 0
+            return
         meta = self.ide._rename_request_meta.pop(token, None)
         if not isinstance(meta, dict):
             return

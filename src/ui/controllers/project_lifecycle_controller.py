@@ -52,6 +52,8 @@ class ProjectLifecycleController:
         return 5.0
 
     def new_file(self):
+        if self.ide._block_if_project_read_only("Create file"):
+            return
         path, _ = get_save_file_name(
             parent=self.ide,
             manager=self.settings_manager,

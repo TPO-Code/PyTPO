@@ -26,6 +26,28 @@ class ExplorerController:
         QMessageBox.warning(self.ide, title, message)
         self.ide.statusBar().showMessage(message.replace("\n", " "), 3000)
 
+    def _is_project_read_only(self) -> bool:
+        checker = getattr(self.ide, "is_project_read_only", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return False
+
+    def _block_write_action(self, action_label: str) -> bool:
+        if not self._is_project_read_only():
+            return False
+        blocker = getattr(self.ide, "_show_project_read_only_message", None)
+        if callable(blocker):
+            blocker(action_label)
+        else:
+            self.ide.statusBar().showMessage(
+                f"{action_label} is disabled while Project Read Only is enabled.",
+                2800,
+            )
+        return True
+
     def _apply_context_shortcut(self, action: object, source_attr: str) -> None:
         src = getattr(self.ide, source_attr, None)
         if action is None or src is None:
@@ -123,6 +145,7 @@ class ExplorerController:
         return selected
 
     def _populate_multi_context_menu(self, menu: QMenu, paths: list[str]) -> None:
+        read_only = self._is_project_read_only()
         targets = self._filter_nested_paths([self._canonical_path(p) for p in paths if isinstance(p, str)])
         if not targets:
             self._populate_root_context_menu(menu)
@@ -141,6 +164,7 @@ class ExplorerController:
 
         act_delete = menu.addAction(f"Delete Selected ({len(targets)})...")
         act_delete.triggered.connect(lambda: self._delete_paths(targets))
+        act_delete.setEnabled(not read_only)
         self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         if file_paths:
@@ -223,6 +247,8 @@ class ExplorerController:
             self.ide.statusBar().showMessage(f"Cut {len(chosen)} items", 1500)
 
     def _paste_tree_paths_into(self, dest_dir: str):
+        if self._block_write_action("Paste"):
+            return
         destination = self._canonical_path(dest_dir)
         cut_mode = str(getattr(self.ide, "_tree_clipboard_mode", "copy") or "copy").strip().lower() == "cut"
         internal_sources = self._filter_nested_paths(getattr(self.ide, "_tree_clipboard_paths", []))
@@ -602,6 +628,8 @@ class ExplorerController:
         content: str = "",
         title: str = "Create File",
     ) -> str | None:
+        if self._block_write_action("Create file"):
+            return None
         base = self._canonical_path(folder_path)
         if not os.path.isdir(base):
             self._show_tree_error(title, "Target directory does not exist.")
@@ -674,11 +702,14 @@ class ExplorerController:
         )
 
     def _populate_folder_context_menu(self, menu: QMenu, folder_path: str):
+        read_only = self._is_project_read_only()
         new_file_menu = menu.addMenu("New File")
         self._populate_new_file_menu(new_file_menu, folder_path)
+        new_file_menu.setEnabled(not read_only)
 
         act_new_folder = menu.addAction("New Folder...")
         act_new_folder.triggered.connect(lambda: self._create_new_folder(folder_path))
+        act_new_folder.setEnabled(not read_only)
 
         menu.addSeparator()
 
@@ -691,7 +722,7 @@ class ExplorerController:
         self._apply_context_shortcut(act_cut, "_act_tree_cut")
 
         act_paste = menu.addAction("Paste")
-        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
+        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()) and not read_only)
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(folder_path))
         self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
@@ -699,10 +730,12 @@ class ExplorerController:
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(folder_path))
+        act_rename.setEnabled(not read_only)
         self._apply_context_shortcut(act_rename, "_act_rename_symbol")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(folder_path))
+        act_delete.setEnabled(not read_only)
         self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         menu.addSeparator()
@@ -738,11 +771,13 @@ class ExplorerController:
         act_refresh.triggered.connect(lambda: self.refresh_subtree(folder_path))
 
     def _populate_file_context_menu(self, menu: QMenu, file_path: str):
+        read_only = self._is_project_read_only()
         act_open = menu.addAction("Open")
         act_open.triggered.connect(lambda: self.open_file(file_path))
 
         new_file_menu = menu.addMenu("New File")
         self._populate_new_file_menu(new_file_menu, os.path.dirname(file_path))
+        new_file_menu.setEnabled(not read_only)
 
         menu.addSeparator()
 
@@ -755,7 +790,7 @@ class ExplorerController:
         self._apply_context_shortcut(act_cut, "_act_tree_cut")
 
         act_paste = menu.addAction("Paste Into Parent Folder")
-        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
+        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()) and not read_only)
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(os.path.dirname(file_path)))
         self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
@@ -765,10 +800,12 @@ class ExplorerController:
 
         act_rename = menu.addAction("Rename...")
         act_rename.triggered.connect(lambda: self._rename_path(file_path))
+        act_rename.setEnabled(not read_only)
         self._apply_context_shortcut(act_rename, "_act_rename_symbol")
 
         act_delete = menu.addAction("Delete...")
         act_delete.triggered.connect(lambda: self._delete_path(file_path))
+        act_delete.setEnabled(not read_only)
         self._apply_context_shortcut(act_delete, "_act_tree_delete")
 
         act_show_in_explorer = menu.addAction("Show in Explorer")
@@ -798,16 +835,19 @@ class ExplorerController:
         act_refresh.triggered.connect(lambda: self.refresh_subtree(os.path.dirname(file_path)))
 
     def _populate_root_context_menu(self, menu: QMenu):
+        read_only = self._is_project_read_only()
         new_file_menu = menu.addMenu("New File")
         self._populate_new_file_menu(new_file_menu, self.project_root)
+        new_file_menu.setEnabled(not read_only)
 
         act_new_folder = menu.addAction("New Folder...")
         act_new_folder.triggered.connect(lambda: self._create_new_folder(self.project_root))
+        act_new_folder.setEnabled(not read_only)
 
         menu.addSeparator()
 
         act_paste = menu.addAction("Paste")
-        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()))
+        act_paste.setEnabled(bool(self._resolve_tree_paste_paths()) and not read_only)
         act_paste.triggered.connect(lambda: self._paste_tree_paths_into(self.project_root))
         self._apply_context_shortcut(act_paste, "_act_tree_paste")
 
@@ -845,6 +885,8 @@ class ExplorerController:
         self.schedule_git_status_refresh(delay_ms=120)
 
     def _create_new_file(self, folder_path: str):
+        if self._block_write_action("Create file"):
+            return
         base = self._canonical_path(folder_path)
         if not os.path.isdir(base):
             self._show_tree_error("Create File", "Target directory does not exist.")
@@ -861,6 +903,8 @@ class ExplorerController:
         self._create_file_in_folder(folder_path=base, relative_name=name, content="", title="Create File")
 
     def _create_new_folder(self, folder_path: str):
+        if self._block_write_action("Create folder"):
+            return
         base = self._canonical_path(folder_path)
         if not os.path.isdir(base):
             self._show_tree_error("Create Folder", "Target directory does not exist.")
@@ -887,6 +931,8 @@ class ExplorerController:
         self.schedule_git_status_refresh(delay_ms=120)
 
     def _rename_path(self, path: str):
+        if self._block_write_action("Rename"):
+            return
         cpath = self._canonical_path(path)
         if cpath == self.project_root:
             self._show_tree_error("Rename", "Cannot rename the project root from explorer.")
@@ -923,6 +969,8 @@ class ExplorerController:
         self._delete_paths([path])
 
     def _delete_paths(self, paths: list[str]) -> None:
+        if self._block_write_action("Delete"):
+            return
         targets = self._filter_nested_paths([self._canonical_path(p) for p in paths if isinstance(p, str)])
         targets = [p for p in targets if p != self.project_root]
         if not targets:

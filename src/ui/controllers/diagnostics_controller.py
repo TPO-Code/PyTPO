@@ -58,6 +58,15 @@ class DiagnosticsController:
     def __getattr__(self, name: str):
         return getattr(self.ide, name)
 
+    def _block_write_action(self, action_label: str) -> bool:
+        blocker = getattr(self.ide, "_block_if_project_read_only", None)
+        if callable(blocker):
+            try:
+                return bool(blocker(action_label))
+            except Exception:
+                return False
+        return False
+
     def _attach_all_editor_lint_hooks(self):
         for ed in self.editor_workspace.all_editors():
             self._attach_editor_lint_hooks(ed)
@@ -390,6 +399,7 @@ class DiagnosticsController:
             name = self._unused_import_name_from_diagnostic(diag)
             action_text = f"Remove unused import '{name}'" if name else "Remove unused import"
             act = menu_obj.addAction(action_text)
+            act.setEnabled(not self.ide.is_project_read_only())
             act.triggered.connect(
                 lambda _checked=False, e=ed_ref, d=dict(diag): self._apply_remove_unused_import_from_context_menu(e, d)
             )
@@ -433,6 +443,7 @@ class DiagnosticsController:
             lambda _checked=False, e=ed_ref, t=token: self.ide._on_tdoc_marker_index_entry_requested(e, t)
         )
         action = menu_obj.addAction(f"Rename TDOC '{token}'...")
+        action.setEnabled(not self.ide.is_project_read_only())
         action.triggered.connect(
             lambda _checked=False, e=ed_ref, t=token: self.ide._on_tdoc_rename_alias_requested(e, t)
         )
@@ -485,18 +496,21 @@ class DiagnosticsController:
         symbol_text = str(symbol or "").strip()
         if not symbol_text:
             return
+        read_only = self.ide.is_project_read_only()
 
         if len(candidates) == 1:
             candidate = candidates[0]
             label = str(candidate.get("label") or "").strip()
             action_text = f"Import '{symbol_text}' ({label})" if label else f"Import '{symbol_text}'"
             act = parent_menu.addAction(action_text)
+            act.setEnabled(not read_only)
             act.triggered.connect(
                 lambda _checked=False, e=ed_ref, cand=candidate, sym=symbol_text: self._apply_import_candidate_from_context_menu(e, cand, sym)
             )
             return
 
         submenu = parent_menu.addMenu(f"Import '{symbol_text}'")
+        submenu.setEnabled(not read_only)
         for candidate in candidates:
             label = str(candidate.get("label") or "").strip()
             if not label:
@@ -605,6 +619,8 @@ class DiagnosticsController:
         self._remove_unused_import_from_editor(ed, diag or {})
 
     def _on_problem_add_tdoc_symbol_requested(self, diag_obj: object):
+        if self._block_write_action("Add TDOC symbol"):
+            return
         diag = diag_obj if isinstance(diag_obj, dict) else None
         symbol = self._tdoc_unresolved_symbol_from_diagnostic(diag)
         if not symbol:
@@ -655,6 +671,8 @@ class DiagnosticsController:
         self.ide.statusBar().showMessage(f"Added '{symbol}' to .tdocproject.", 2600)
 
     def _on_problem_capitalize_tdoc_section_requested(self, diag_obj: object):
+        if self._block_write_action("Capitalize TDOC section"):
+            return
         diag = diag_obj if isinstance(diag_obj, dict) else None
         section = self._tdoc_section_cap_warning_from_diagnostic(diag)
         if not section:
@@ -736,6 +754,8 @@ class DiagnosticsController:
         )
 
     def _on_problem_create_tdoc_missing_image_requested(self, diag_obj: object):
+        if self._block_write_action("Create missing TDOC image"):
+            return
         diag = diag_obj if isinstance(diag_obj, dict) else None
         rel_image = self._tdoc_missing_image_path_from_diagnostic(diag)
         if not rel_image:
@@ -808,6 +828,8 @@ class DiagnosticsController:
         self.ide.statusBar().showMessage(f"Created placeholder image '{shown}'.", 2600)
 
     def _on_problem_renumber_tdoc_numbered_list_requested(self, diag_obj: object):
+        if self._block_write_action("Renumber TDOC list"):
+            return
         diag = diag_obj if isinstance(diag_obj, dict) else None
         if not self._is_tdoc_numbered_list_gap_diagnostic(diag):
             self.ide.statusBar().showMessage("Selected problem is not a TDOC numbered-list sequencing warning.", 2200)
@@ -987,6 +1009,8 @@ class DiagnosticsController:
             raise OSError("unsupported image extension or image codec unavailable")
 
     def _apply_import_candidate_to_editor(self, ed: EditorWidget, candidate: dict, symbol: str) -> str:
+        if self._block_write_action("Apply import quick fix"):
+            return "error"
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             self.ide.statusBar().showMessage(f"Could not apply import fix for '{symbol}'.", 2600)
             return "error"
@@ -1007,6 +1031,8 @@ class DiagnosticsController:
         return status
 
     def _remove_unused_import_from_editor(self, ed: EditorWidget, diag_obj: object) -> str:
+        if self._block_write_action("Remove unused import"):
+            return "error"
         if not isinstance(ed, EditorWidget) or not _is_qobject_valid(ed):
             self.ide.statusBar().showMessage("Could not apply unused-import quick fix.", 2600)
             return "error"

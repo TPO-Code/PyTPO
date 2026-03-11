@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -21,12 +22,18 @@ class ProjectMaintenancePage(QWidget):
     def __init__(self, *, manager: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._manager = manager
+        self._base_read_only = self._read_only_value_from_settings()
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(12)
+
+        self.read_only_chk = QCheckBox("Read Only")
+        self.read_only_chk.setToolTip("Disable file edits and write operations for this project.")
+        self.read_only_chk.setChecked(self._base_read_only)
+        root.addWidget(self.read_only_chk)
 
         info = QLabel(
             "Project-local IDE artifacts are stored under `.tide/`.\n"
@@ -65,15 +72,40 @@ class ProjectMaintenancePage(QWidget):
             lambda: self._clear_cache_paths([self._tide_dir() / "ruff_cache"])
         )
         self.clear_all_btn.clicked.connect(self._clear_all_caches)
+        self.read_only_chk.toggled.connect(self._on_read_only_toggled)
+        self._sync_cache_buttons_enabled()
 
     def create_bindings(self, _binding_cls: Callable[..., Any], _scope: SettingsScope) -> list[Any]:
         return []
 
     def has_pending_settings_changes(self) -> bool:
-        return False
+        return bool(self.read_only_chk.isChecked()) != bool(self._base_read_only)
 
     def apply_settings_changes(self) -> list[str]:
+        requested = bool(self.read_only_chk.isChecked())
+        if requested == bool(self._base_read_only):
+            return []
+        self._manager.set("read_only", requested, "project")
+        self._base_read_only = requested
+        self._sync_cache_buttons_enabled()
+        state = "enabled" if requested else "disabled"
+        self._set_status(f"Project read-only mode {state}.", error=False)
         return []
+
+    def _read_only_value_from_settings(self) -> bool:
+        try:
+            return bool(self._manager.get("read_only", scope_preference="project", default=False))
+        except Exception:
+            return False
+
+    def _on_read_only_toggled(self, _checked: bool) -> None:
+        self._sync_cache_buttons_enabled()
+
+    def _sync_cache_buttons_enabled(self) -> None:
+        disabled = bool(self.read_only_chk.isChecked())
+        self.clear_completion_btn.setEnabled(not disabled)
+        self.clear_ruff_btn.setEnabled(not disabled)
+        self.clear_all_btn.setEnabled(not disabled)
 
     def _tide_dir(self) -> Path:
         return Path(self._manager.paths.project_ide_dir).expanduser()

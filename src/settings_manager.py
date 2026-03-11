@@ -405,6 +405,7 @@ IDE_KEY_ALIASES: dict[str, str] = {
 
 PROJECT_KEY_PREFIXES: tuple[str, ...] = (
     "project_name",
+    "read_only",
     "interpreter",
     "interpreters",
     "indexing",
@@ -768,6 +769,7 @@ class SettingsManager:
 
         if not isinstance(data.get("project_name"), str) or not str(data.get("project_name")).strip():
             data["project_name"] = "My Python Project"
+        data["read_only"] = bool(data.get("read_only", False))
 
         interpreter = data.get("interpreter")
         data["interpreter"] = str(interpreter).strip() if isinstance(interpreter, str) and interpreter.strip() else "python"

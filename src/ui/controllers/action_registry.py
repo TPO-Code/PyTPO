@@ -85,6 +85,7 @@ class ActionRegistry:
         act_new.triggered.connect(ide.new_file)
         ActionRegistry._register_shortcut_action(ide, act_new, scope="general", action_ids=("action.new_file",))
         file_menu.addAction(act_new)
+        ide._act_new_file = act_new
 
         act_open = QAction("Open File...", ide)
         act_open.triggered.connect(ide.open_file_dialog)
@@ -120,11 +121,13 @@ class ActionRegistry:
         act_save.triggered.connect(ide.save_current_editor)
         ActionRegistry._register_shortcut_action(ide, act_save, scope="general", action_ids=("action.save",))
         file_menu.addAction(act_save)
+        ide._act_save = act_save
 
         act_save_as = QAction("Save As...", ide)
         act_save_as.triggered.connect(ide.save_current_editor_as)
         ActionRegistry._register_shortcut_action(ide, act_save_as, scope="general", action_ids=("action.save_as",))
         file_menu.addAction(act_save_as)
+        ide._act_save_as = act_save_as
 
         file_menu.addSeparator()
 
@@ -141,6 +144,14 @@ class ActionRegistry:
         act_reload_ui = QAction("Reload UI", ide)
         act_reload_ui.triggered.connect(ide.reload_ui)
         file_menu.addAction(act_reload_ui)
+
+        file_menu.addSeparator()
+        act_project_read_only = QAction("Project Read Only", ide)
+        act_project_read_only.setCheckable(True)
+        act_project_read_only.setChecked(bool(ide.is_project_read_only()))
+        act_project_read_only.toggled.connect(ide.set_project_read_only_enabled)
+        file_menu.addAction(act_project_read_only)
+        ide._act_project_read_only = act_project_read_only
 
         file_menu.addSeparator()
 
@@ -341,10 +352,12 @@ class ActionRegistry:
         act_commit = QAction("Commit...", ide)
         act_commit.triggered.connect(lambda _checked=False: ide.open_git_commit_dialog())
         git_menu.addAction(act_commit)
+        ide._act_git_commit = act_commit
 
         act_push = QAction("Push...", ide)
         act_push.triggered.connect(lambda _checked=False: ide.push_current_branch())
         git_menu.addAction(act_push)
+        ide._act_git_push = act_push
 
         act_fetch = QAction("Fetch", ide)
         act_fetch.triggered.connect(lambda _checked=False: ide.fetch_remote())
@@ -361,6 +374,7 @@ class ActionRegistry:
         act_commit_push = QAction("Commit and Push...", ide)
         act_commit_push.triggered.connect(lambda _checked=False: ide.open_git_commit_dialog(prefer_push_action=True))
         git_menu.addAction(act_commit_push)
+        ide._act_git_commit_push = act_commit_push
 
         git_menu.addSeparator()
         act_branches = QAction("Branches...", ide)
@@ -374,10 +388,12 @@ class ActionRegistry:
         act_discard_unstaged = QAction("Discard Unstaged Changes...", ide)
         act_discard_unstaged.triggered.connect(lambda _checked=False: ide.rollback_discard_unstaged())
         rollback_menu.addAction(act_discard_unstaged)
+        ide._act_git_discard_unstaged = act_discard_unstaged
 
         act_hard_reset = QAction("Hard Reset to HEAD...", ide)
         act_hard_reset.triggered.connect(lambda _checked=False: ide.rollback_hard_reset_head())
         rollback_menu.addAction(act_hard_reset)
+        ide._act_git_hard_reset = act_hard_reset
 
         git_menu.addSeparator()
         act_git_refresh = QAction("Refresh Git Status", ide)
