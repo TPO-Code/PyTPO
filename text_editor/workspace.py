@@ -4,11 +4,10 @@ import uuid
 from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QDrag, QPainter, QPen
+from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
+from PySide6.QtGui import QColor, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
-    QMenu,
     QMessageBox,
     QSplitter,
     QTabBar,
@@ -34,25 +33,16 @@ class DropZone(Enum):
 class EditorView(CodeEditor):
     activated = Signal(object)
     titleChanged = Signal(object)
-    cursorStatusChanged = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.editor_id = uuid.uuid4().hex
         self.file_path: Path | None = None
-        self._line_ending = "\n"
-        self._disk_signature: tuple[bool, int, int] | None = None
-        self._externally_modified = False
         self.set_word_wrap_enabled(False)
         self.document().modificationChanged.connect(self._emit_title_changed)
-        self.cursorPositionChanged.connect(self._emit_cursor_status_changed)
-        self.selectionChanged.connect(self._emit_cursor_status_changed)
 
     def _emit_title_changed(self, _modified: bool) -> None:
         self.titleChanged.emit(self)
-
-    def _emit_cursor_status_changed(self) -> None:
-        self.cursorStatusChanged.emit(self)
 
     def focusInEvent(self, event) -> None:  # noqa: N802
         self.activated.emit(self)
@@ -62,64 +52,8 @@ class EditorView(CodeEditor):
         return self.file_path.name if self.file_path else "Untitled"
 
     def tab_title(self) -> str:
-        base = self.display_name()
-        if self._externally_modified:
-            base = f"{base} [Reload?]"
-        if self.document().isModified():
-            base = f"{base}*"
-        return base
-
-    @property
-    def line_ending(self) -> str:
-        return self._line_ending
-
-    @property
-    def externally_modified(self) -> bool:
-        return self._externally_modified
-
-    @staticmethod
-    def detect_line_ending(text: str) -> str:
-        raw = str(text or "")
-        first_crlf = raw.find("\r\n")
-        first_lf = raw.find("\n")
-        first_cr = raw.find("\r")
-        if first_crlf >= 0 and (first_lf < 0 or first_crlf <= first_lf):
-            return "\r\n"
-        if first_lf >= 0:
-            return "\n"
-        if first_cr >= 0:
-            return "\r"
-        return "\n"
-
-    @staticmethod
-    def file_signature(path: Path | None) -> tuple[bool, int, int] | None:
-        if path is None:
-            return None
-        try:
-            stat = path.stat()
-        except OSError:
-            return (False, 0, 0)
-        return (True, int(getattr(stat, "st_mtime_ns", 0)), int(stat.st_size))
-
-    @staticmethod
-    def _normalize_text_for_line_ending(text: str, line_ending: str) -> str:
-        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-        if line_ending == "\r\n":
-            return normalized.replace("\n", "\r\n")
-        if line_ending == "\r":
-            return normalized.replace("\n", "\r")
-        return normalized
-
-    def set_externally_modified(self, changed: bool) -> None:
-        requested = bool(changed)
-        if requested == self._externally_modified:
-            return
-        self._externally_modified = requested
-        self.titleChanged.emit(self)
-
-    def mark_disk_state_current(self) -> None:
-        self._disk_signature = self.file_signature(self.file_path)
-        self.set_externally_modified(False)
+        suffix = "*" if self.document().isModified() else ""
+        return f"{self.display_name()}{suffix}"
 
     def set_path(self, path: Path | None) -> None:
         self.file_path = path
@@ -128,27 +62,17 @@ class EditorView(CodeEditor):
 
     def load_from_path(self, path: Path) -> None:
         try:
-            with path.open("r", encoding="utf-8", newline="") as handle:
-                text = handle.read()
+            text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Only UTF-8 text files are supported.") from exc
-        self._line_ending = self.detect_line_ending(text)
         self.setPlainText(text)
         self.document().setModified(False)
         self.set_path(path)
-        self.mark_disk_state_current()
-        self._emit_cursor_status_changed()
 
     def save_to_path(self, path: Path) -> None:
-        path.write_text(
-            self._normalize_text_for_line_ending(self.toPlainText(), self._line_ending),
-            encoding="utf-8",
-            newline="",
-        )
+        path.write_text(self.toPlainText(), encoding="utf-8")
         self.document().setModified(False)
         self.set_path(path)
-        self.mark_disk_state_current()
-        self._emit_cursor_status_changed()
 
 
 class DropOverlay(QWidget):
@@ -253,10 +177,8 @@ class EditorTabs(QTabWidget):
         self.setDocumentMode(True)
         self.setUsesScrollButtons(True)
         self.setAcceptDrops(True)
-        self.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabCloseRequested.connect(self._on_tab_close_requested)
         self.currentChanged.connect(self._on_current_changed)
-        self.tabBar().customContextMenuRequested.connect(self._show_tab_context_menu)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -320,10 +242,6 @@ class EditorTabs(QTabWidget):
         index = self.indexOf(editor)
         if index >= 0:
             self.setTabText(index, editor.tab_title())
-            tooltip = str(editor.file_path) if editor.file_path is not None else "Unsaved file"
-            if editor.externally_modified:
-                tooltip = f"{tooltip}\nFile changed on disk."
-            self.setTabToolTip(index, tooltip)
         self.workspace.notify_state_changed()
 
     def _on_tab_close_requested(self, index: int) -> None:
@@ -337,52 +255,6 @@ class EditorTabs(QTabWidget):
             self.workspace.set_active_editor(editor)
         else:
             self.workspace.notify_state_changed()
-
-    def _show_tab_context_menu(self, pos: QPoint) -> None:
-        index = self.tabBar().tabAt(pos)
-        if index < 0:
-            return
-        editor = self.widget(index)
-        if not isinstance(editor, EditorView):
-            return
-        menu = QMenu(self)
-        act_close = QAction("Close", menu)
-        act_close_others = QAction("Close Others", menu)
-        act_close_all = QAction("Close All", menu)
-        menu.addAction(act_close)
-        menu.addAction(act_close_others)
-        menu.addAction(act_close_all)
-        if editor.file_path is not None:
-            menu.addSeparator()
-            act_reload = QAction("Reload from Disk", menu)
-            act_copy_path = QAction("Copy Path", menu)
-            act_reveal = QAction("Reveal in File Manager", menu)
-            menu.addAction(act_reload)
-            menu.addAction(act_copy_path)
-            menu.addAction(act_reveal)
-        else:
-            act_reload = None
-            act_copy_path = None
-            act_reveal = None
-        chosen = menu.exec(self.tabBar().mapToGlobal(pos))
-        if chosen is act_close:
-            self.workspace.close_editor(editor, self.window())
-            return
-        if chosen is act_close_others:
-            self.workspace.close_other_editors(editor, self.window())
-            return
-        if chosen is act_close_all:
-            self.workspace.request_close_all(self.window())
-            return
-        if chosen is act_reload:
-            self.workspace.reload_editor_from_disk(editor, self.window(), force=True)
-            return
-        if chosen is act_copy_path and editor.file_path is not None:
-            QApplication.clipboard().setText(str(editor.file_path))
-            return
-        if chosen is act_reveal and editor.file_path is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(editor.file_path.parent)))
-            return
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasFormat(MIME_EDITOR_TAB):
@@ -415,10 +287,6 @@ class EditorTabs(QTabWidget):
 
 class EditorWorkspace(QWidget):
     stateChanged = Signal()
-    activeEditorChanged = Signal(object)
-    editorOpened = Signal(object)
-    editorSaved = Signal(object)
-    externalChangeDetected = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -447,7 +315,6 @@ class EditorWorkspace(QWidget):
     def set_active_editor(self, editor: object) -> None:
         if isinstance(editor, EditorView):
             self._active_editor = editor
-            self.activeEditorChanged.emit(editor)
         self.notify_state_changed()
 
     def current_editor(self) -> EditorView | None:
@@ -510,7 +377,6 @@ class EditorWorkspace(QWidget):
         editor = EditorView()
         editor.load_from_path(path)
         self._current_tabs().add_editor(editor)
-        self.editorOpened.emit(editor)
         self.notify_state_changed()
         return editor
 
@@ -524,7 +390,6 @@ class EditorWorkspace(QWidget):
         except OSError as exc:
             QMessageBox.critical(parent or self, "Save Failed", str(exc))
             return False
-        self.editorSaved.emit(editor)
         self.notify_state_changed()
         return True
 
@@ -543,86 +408,8 @@ class EditorWorkspace(QWidget):
         except OSError as exc:
             QMessageBox.critical(parent or self, "Save Failed", str(exc))
             return False
-        self.editorSaved.emit(editor)
         self.notify_state_changed()
         return True
-
-    def reload_editor_from_disk(
-        self,
-        editor: EditorView | None,
-        parent: QWidget | None = None,
-        *,
-        force: bool = False,
-    ) -> bool:
-        if not isinstance(editor, EditorView) or editor.file_path is None:
-            return False
-        if editor.document().isModified() and not force:
-            response = QMessageBox.question(
-                parent or self,
-                "Reload From Disk",
-                f"Discard unsaved changes and reload {editor.display_name()} from disk?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if response != QMessageBox.StandardButton.Yes:
-                return False
-        try:
-            editor.load_from_path(editor.file_path)
-        except ValueError as exc:
-            QMessageBox.warning(parent or self, "Reload Failed", str(exc))
-            return False
-        except OSError as exc:
-            QMessageBox.critical(parent or self, "Reload Failed", str(exc))
-            return False
-        self.notify_state_changed()
-        return True
-
-    def maybe_prompt_reload(self, editor: EditorView | None, parent: QWidget | None = None) -> bool:
-        if not isinstance(editor, EditorView) or not editor.externally_modified or editor.file_path is None:
-            return False
-        if editor.document().isModified():
-            response = QMessageBox.question(
-                parent or self,
-                "File Changed on Disk",
-                (
-                    f"{editor.display_name()} changed on disk.\n\n"
-                    "Reload from disk and discard unsaved changes?"
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Ignore,
-                QMessageBox.StandardButton.Yes,
-            )
-            if response == QMessageBox.StandardButton.Yes:
-                return self.reload_editor_from_disk(editor, parent, force=True)
-            return False
-        response = QMessageBox.question(
-            parent or self,
-            "File Changed on Disk",
-            f"{editor.display_name()} changed on disk.\n\nReload the file now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Ignore,
-            QMessageBox.StandardButton.Yes,
-        )
-        if response == QMessageBox.StandardButton.Yes:
-            return self.reload_editor_from_disk(editor, parent, force=True)
-        return False
-
-    def check_external_file_changes(self) -> list[EditorView]:
-        changed: list[EditorView] = []
-        for editor in self.all_editors():
-            if not isinstance(editor, EditorView) or editor.file_path is None:
-                continue
-            current_signature = editor.file_signature(editor.file_path)
-            if current_signature is None:
-                continue
-            known_signature = editor._disk_signature
-            if known_signature is None:
-                editor._disk_signature = current_signature
-                continue
-            if current_signature != known_signature:
-                editor.set_externally_modified(True)
-                editor._disk_signature = current_signature
-                changed.append(editor)
-                self.externalChangeDetected.emit(editor)
-        return changed
 
     def _confirm_close_editor(self, editor: EditorView, parent: QWidget | None = None) -> bool:
         if not editor.document().isModified():
@@ -668,17 +455,6 @@ class EditorWorkspace(QWidget):
         for editor in editors:
             if not self.close_editor(editor, parent):
                 return False
-        return True
-
-    def close_other_editors(self, keep_editor: EditorView | None, parent: QWidget | None = None) -> bool:
-        if not isinstance(keep_editor, EditorView):
-            return True
-        for editor in list(self.all_editors()):
-            if editor is keep_editor:
-                continue
-            if not self.close_editor(editor, parent):
-                return False
-        self._focus_editor(keep_editor)
         return True
 
     def _split_tabs(self, target_tabs: EditorTabs, orientation: Qt.Orientation, before: bool) -> EditorTabs:

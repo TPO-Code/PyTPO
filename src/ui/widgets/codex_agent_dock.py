@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import math
 import os
@@ -253,6 +254,14 @@ class _PlanState:
     steps: list[_PlanStep]
 
 
+@dataclass(slots=True)
+class _DiffFileState:
+    path: str
+    display_path: str
+    added: int = 0
+    removed: int = 0
+
+
 class _CodexPlanPanel(QFrame):
     _STATUS_MARKERS = {
         "completed": "✓",
@@ -374,6 +383,177 @@ class _CodexPlanPanel(QFrame):
                 color: {pending_color};
                 font-size: {text_font_size};
                 background-color: transparent;
+            }}
+            """
+        )
+
+
+class _CodexDiffPanel(QFrame):
+    fileActivated = Signal(str)
+    _REMOVED_COLOR = "#f2a7a7"
+    _ADDED_COLOR = "#b5cea8"
+    _AUTO_EXPAND_FILE_LIMIT = 5
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("codexDiffPanel")
+        self._files_expanded = True
+        self._user_expanded_override: bool | None = None
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 8, 10, 8)
+        self._layout.setSpacing(4)
+
+        self._title = QLabel("Current diff")
+        self._title.setObjectName("codexDiffTitle")
+        self._layout.addWidget(self._title)
+
+        self._summary = QLabel("")
+        self._summary.setObjectName("codexDiffSummary")
+        self._summary.setTextFormat(Qt.RichText)
+        self._summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._layout.addWidget(self._summary)
+
+        self._toggle_btn = QToolButton()
+        self._toggle_btn.setObjectName("codexDiffToggle")
+        self._toggle_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._toggle_btn.clicked.connect(self._toggle_files_expanded)
+        self._layout.addWidget(self._toggle_btn, 0, Qt.AlignLeft)
+
+        self._files_host = QWidget()
+        self._files_layout = QVBoxLayout(self._files_host)
+        self._files_layout.setContentsMargins(0, 0, 0, 0)
+        self._files_layout.setSpacing(3)
+        self._layout.addWidget(self._files_host)
+
+        self.apply_theme()
+        self.setVisible(False)
+
+    def reset_turn(self) -> None:
+        self._files_expanded = True
+        self._user_expanded_override = None
+        self.clear_summary()
+
+    def clear_summary(self) -> None:
+        while self._files_layout.count():
+            item = self._files_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._summary.clear()
+        self._summary.setVisible(False)
+        self._toggle_btn.setVisible(False)
+        self._files_host.setVisible(False)
+        self.setVisible(False)
+
+    def set_summary(self, files: list[_DiffFileState]) -> None:
+        while self._files_layout.count():
+            item = self._files_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not files:
+            self._summary.clear()
+            self._summary.setVisible(False)
+            self._toggle_btn.setVisible(False)
+            self._files_host.setVisible(False)
+            self.setVisible(False)
+            return
+        total_removed = sum(max(0, int(item.removed)) for item in files)
+        total_added = sum(max(0, int(item.added)) for item in files)
+        file_count = len(files)
+        noun = "file" if file_count == 1 else "files"
+        self._summary.setText(
+            f'{self._format_count(total_removed, prefix="-")} '
+            f'{self._format_count(total_added, prefix="+")} '
+            f"({file_count} {noun})"
+        )
+        self._summary.setVisible(True)
+        self._toggle_btn.setVisible(True)
+        if self._user_expanded_override is None:
+            self._files_expanded = file_count <= self._AUTO_EXPAND_FILE_LIMIT
+        else:
+            self._files_expanded = bool(self._user_expanded_override)
+        for item in files:
+            label = QLabel(
+                f'&nbsp;&nbsp;&nbsp;&nbsp;<a href="{html.escape(item.path, quote=True)}">'
+                f"{html.escape(item.display_path)}</a>"
+                f"&nbsp;&nbsp;{self._format_count(item.removed, prefix='-')}"
+                f"&nbsp;{self._format_count(item.added, prefix='+')}"
+            )
+            label.setObjectName("codexDiffFile")
+            label.setTextFormat(Qt.RichText)
+            label.setTextInteractionFlags(
+                Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse
+            )
+            label.setOpenExternalLinks(False)
+            label.linkActivated.connect(self.fileActivated.emit)
+            self._files_layout.addWidget(label)
+        self._sync_files_visibility()
+        self.setVisible(True)
+
+    @classmethod
+    def _format_count(cls, value: int, *, prefix: str) -> str:
+        color = cls._ADDED_COLOR if prefix == "+" else cls._REMOVED_COLOR
+        safe_value = max(0, int(value))
+        return f'<span style="color: {color};">{prefix}{safe_value}</span>'
+
+    def _toggle_files_expanded(self) -> None:
+        self._files_expanded = not self._files_expanded
+        self._user_expanded_override = self._files_expanded
+        self._sync_files_visibility()
+
+    def _sync_files_visibility(self) -> None:
+        self._files_host.setVisible(self._files_expanded)
+        self._toggle_btn.setText("changed files ▼" if self._files_expanded else "changed files ▶")
+
+    def apply_theme(self) -> None:
+        theme = current_codex_agent_panel_theme()
+        border_color = str(theme.get("border_color") or "#3f4b5f")
+        background_color = str(theme.get("background_color") or "#232b38")
+        border_width = str(theme.get("border_width") or "1px")
+        radius = str(theme.get("radius") or "0px")
+        title_color = str(theme.get("title_color") or "#b7c6dc")
+        text_color = str(theme.get("text_color") or "#d7e0ec")
+        title_font_size = str(theme.get("title_font_size") or "11px")
+        text_font_size = str(theme.get("text_font_size") or "12px")
+        padding_x = max(0, int(str(theme.get("padding_x") or "10")))
+        padding_y = max(0, int(str(theme.get("padding_y") or "8")))
+        section_spacing = max(0, int(str(theme.get("section_spacing") or "4")))
+        row_spacing = max(0, int(str(theme.get("step_spacing") or "3")))
+        link_color = str(current_codex_agent_link_color() or "#8ab4f8")
+        self._layout.setContentsMargins(padding_x, padding_y, padding_x, padding_y)
+        self._layout.setSpacing(section_spacing)
+        self._files_layout.setSpacing(row_spacing)
+        self.setStyleSheet(
+            f"""
+            QFrame#codexDiffPanel {{
+                border: {border_width} solid {border_color};
+                background-color: {background_color};
+                border-radius: {radius};
+            }}
+            QLabel#codexDiffTitle {{
+                color: {title_color};
+                font-size: {title_font_size};
+                font-weight: 600;
+                background-color: transparent;
+            }}
+            QLabel#codexDiffSummary, QLabel#codexDiffFile {{
+                color: {text_color};
+                font-size: {text_font_size};
+                background-color: transparent;
+            }}
+            QToolButton#codexDiffToggle {{
+                color: {text_color};
+                font-size: {text_font_size};
+                font-weight: 600;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+            }}
+            QLabel#codexDiffFile a {{
+                color: {link_color};
+                text-decoration: none;
             }}
             """
         )
@@ -1257,6 +1437,7 @@ class CodexAgentDockWidget(QWidget):
         self._forced_bubble_role_boundary: str | None = None
         self._transcript_entries: list[_TranscriptEntry] = []
         self._transcript_bubbles: list[ChatMarkdownBubble] = []
+        self._turn_diff_start_index = 0
         self._turn_changed_files: list[str] = []
         self._turn_changed_file_set: set[str] = set()
         self._attached_source_files: list[str] = []
@@ -1374,6 +1555,9 @@ class CodexAgentDockWidget(QWidget):
 
         self.plan_panel = _CodexPlanPanel(transcript_panel)
         transcript_panel_layout.addWidget(self.plan_panel)
+        self.diff_panel = _CodexDiffPanel(transcript_panel)
+        self.diff_panel.fileActivated.connect(self._on_bubble_link_activated)
+        transcript_panel_layout.addWidget(self.diff_panel)
         self.chat_splitter.addWidget(transcript_panel)
 
         composer_container = QWidget()
@@ -1556,12 +1740,14 @@ class CodexAgentDockWidget(QWidget):
         self._transcript_entries.clear()
         self._forced_bubble_role_boundary = None
         self._pending_diff_lines.clear()
+        self._turn_diff_start_index = 0
         while self._transcript_layout.count() > 1:
             item = self._transcript_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
         self._transcript_bubbles.clear()
+        self._refresh_current_diff_summary()
 
     def _set_current_plan(self, plan: _PlanState | None) -> None:
         self._current_plan = plan
@@ -1569,6 +1755,97 @@ class CodexAgentDockWidget(QWidget):
 
     def _clear_current_plan(self) -> None:
         self._set_current_plan(None)
+
+    def _begin_diff_tracking_for_turn(self) -> None:
+        self._turn_diff_start_index = len(self._transcript_entries)
+        self.diff_panel.reset_turn()
+
+    def _refresh_current_diff_summary(self) -> None:
+        self.diff_panel.set_summary(self._collect_turn_diff_summary())
+
+    def _collect_turn_diff_summary(self) -> list[_DiffFileState]:
+        grouped: dict[str, _DiffFileState] = {}
+        start_index = max(0, min(int(self._turn_diff_start_index), len(self._transcript_entries)))
+        for entry in self._transcript_entries[start_index:]:
+            if str(entry.role or "").strip() != "diff":
+                continue
+            for item in self._extract_diff_file_states(str(entry.text or "")):
+                key = self._canonical_path_text(item.path) or item.path.casefold()
+                existing = grouped.get(key)
+                if existing is None:
+                    grouped[key] = item
+                    continue
+                existing.added += item.added
+                existing.removed += item.removed
+                if item.display_path:
+                    existing.display_path = item.display_path
+                if item.path:
+                    existing.path = item.path
+        return list(grouped.values())
+
+    def _extract_diff_file_states(self, text: str) -> list[_DiffFileState]:
+        files: list[_DiffFileState] = []
+        current_path = ""
+        added = 0
+        removed = 0
+
+        def flush_current() -> None:
+            nonlocal current_path, added, removed
+            normalized = self._normalize_changed_path(current_path)
+            if normalized:
+                files.append(
+                    _DiffFileState(
+                        path=normalized,
+                        display_path=self._display_changed_path(normalized),
+                        added=added,
+                        removed=removed,
+                    )
+                )
+            current_path = ""
+            added = 0
+            removed = 0
+
+        for raw in str(text or "").splitlines():
+            line = str(raw or "")
+            stripped = line.strip()
+            next_path = ""
+            diff_match = _DIFF_GIT_RE.match(stripped)
+            if diff_match is not None:
+                next_path = str(diff_match.group(2) or "")
+            elif stripped.startswith("*** Update File: "):
+                next_path = stripped[len("*** Update File: ") :].strip()
+            elif stripped.startswith("*** Add File: "):
+                next_path = stripped[len("*** Add File: ") :].strip()
+            elif stripped.startswith("*** Delete File: "):
+                next_path = stripped[len("*** Delete File: ") :].strip()
+            elif stripped.startswith("*** Move to: "):
+                current_path = stripped[len("*** Move to: ") :].strip()
+                continue
+            elif stripped.startswith("+++ "):
+                candidate = stripped[4:].strip()
+                if candidate != "/dev/null":
+                    next_path = candidate[2:] if candidate.startswith("b/") else candidate
+            elif self._is_status_diff_line(stripped):
+                match = _STATUS_PATH_RE.match(stripped)
+                if match is not None:
+                    next_path = str(match.group(1) or "").strip()
+            if next_path:
+                if current_path:
+                    current_key = self._canonical_path_text(self._normalize_changed_path(current_path))
+                    next_key = self._canonical_path_text(self._normalize_changed_path(next_path))
+                    if current_key and current_key == next_key:
+                        current_path = next_path
+                        continue
+                    flush_current()
+                current_path = next_path
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+        if current_path:
+            flush_current()
+        return files
 
     def _session_log_path(self, session_id: str) -> Path | None:
         normalized_id = str(session_id or "").strip()
@@ -1947,6 +2224,7 @@ class CodexAgentDockWidget(QWidget):
         for bubble in self._transcript_bubbles:
             self._apply_bubble_theme(bubble)
         self.plan_panel.apply_theme()
+        self.diff_panel.apply_theme()
         self.input_frame.apply_theme()
         self.input_edit._apply_codex_agent_theme()
         self.preamble_frame.apply_theme()
@@ -2691,6 +2969,7 @@ class CodexAgentDockWidget(QWidget):
                 "Showing the latest part of this restored session.",
                 timestamp=_timestamp(),
             )
+        self._begin_diff_tracking_for_turn()
         self._schedule_transcript_render(scroll_to_bottom=True, immediate=True)
 
     def _attach_recent_session(
@@ -3317,6 +3596,7 @@ class CodexAgentDockWidget(QWidget):
             if role == "assistant":
                 self._latest_assistant_bubble_text = str(entry.text or "")
             self._prune_replayed_transcript_tail()
+        self._refresh_current_diff_summary()
         self._rewrite_bubble_debug_log()
         self._schedule_transcript_render(
             scroll_to_bottom=follow_output,
@@ -3395,6 +3675,23 @@ class CodexAgentDockWidget(QWidget):
         except Exception:
             normalized = str(candidate)
         return normalized.strip()
+
+    def _display_changed_path(self, path_text: str) -> str:
+        display = str(path_text or "").strip()
+        if not display:
+            return ""
+        project = self._project_dir()
+        if project is None and self._session_project:
+            try:
+                project = Path(self._session_project).expanduser().resolve(strict=False)
+            except Exception:
+                project = None
+        if project is not None:
+            try:
+                return str(Path(display).resolve(strict=False).relative_to(project))
+            except Exception:
+                return display
+        return display
 
     def _remember_changed_file(self, raw_path: str) -> None:
         normalized = self._normalize_changed_path(raw_path)
@@ -3495,20 +3792,9 @@ class CodexAgentDockWidget(QWidget):
     def _append_turn_changed_files_bubble(self) -> None:
         if not self._turn_changed_files:
             return
-        project = self._project_dir()
-        if project is None and self._session_project:
-            try:
-                project = Path(self._session_project).expanduser().resolve(strict=False)
-            except Exception:
-                project = None
         lines = ["Changed files:"]
         for path_text in self._turn_changed_files:
-            display = path_text
-            if project is not None:
-                try:
-                    display = str(Path(path_text).resolve(strict=False).relative_to(project))
-                except Exception:
-                    display = path_text
+            display = self._display_changed_path(path_text)
             lines.append(f"- [{display}]({path_text})")
         self._add_bubble("meta", "\n".join(lines))
 
@@ -3706,6 +3992,7 @@ class CodexAgentDockWidget(QWidget):
                 "meta",
                 "Attached files for this turn:\n" + "\n".join(attachment_refs),
             )
+        self._begin_diff_tracking_for_turn()
         prompt = (
             self._compose_prompt(project, user_text, attachment_refs)
             if not self._session_id
