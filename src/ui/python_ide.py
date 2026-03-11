@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QFontDatabase, QIcon, QTextCursor
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QTreeView, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QTreeView, QWidget
 
 from src.ai.context_assembler import ContextAssembler
 from src.ai.inline_controller import InlineSuggestionController
@@ -69,6 +69,7 @@ from TPOPyside.widgets.custom_window import Window
 from src.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from src.ui.dialogs.file_dialog_bridge import get_save_file_name
 from src.ui.dialogs.terminal_commands_dialog import TerminalCommandsDialog
+from src.ui.dialogs.workspace_slot_name_dialog import WorkspaceSlotNameDialog
 from src.ui.settings_dialog import SettingsDialog as ScopedSettingsDialog, create_default_settings_schema
 from src.ui.syntax_highlighting_runtime import configure_syntax_highlighting_runtime
 
@@ -280,6 +281,8 @@ class PythonIDE(Window):
     THEMES_DIRNAME = "themes"
     THEME_EXTENSION = ".qss"
     THEME_EXTENSIONS = (".qsst", ".qss")
+    WORKSPACE_SLOT_COUNT = 12
+    WORKSPACE_PRESETS_CONFIG_KEY = "workspace_presets"
     PYTHON_SOURCE_SUFFIXES = (".py", ".pyw", ".pyi")
     FONT_SIZE_MIN = 6
     FONT_SIZE_MAX = 48
@@ -540,6 +543,9 @@ class PythonIDE(Window):
         self._window_geometry_restored = False
         self._dock_layout_restored = False
         self._panel_toggle_actions: list[QAction] = []
+        self._workspace_slots_menu: QMenu | None = None
+        self._workspace_slot_load_actions: dict[int, QAction] = {}
+        self._workspace_slot_save_actions: dict[int, QAction] = {}
         self._act_new_file: QAction | None = None
         self._act_save: QAction | None = None
         self._act_save_as: QAction | None = None
@@ -5692,6 +5698,489 @@ class PythonIDE(Window):
             except Exception:
                 pass
 
+    def _normalize_workspace_slot(self, slot: object) -> int:
+        try:
+            number = int(slot)
+        except Exception:
+            number = 1
+        return max(1, min(self.WORKSPACE_SLOT_COUNT, number))
+
+    def _workspace_presets_config(self) -> dict[str, dict]:
+        raw = self.config.get(self.WORKSPACE_PRESETS_CONFIG_KEY, {})
+        if isinstance(raw, dict):
+            return raw
+        clean: dict[str, dict] = {}
+        self.config[self.WORKSPACE_PRESETS_CONFIG_KEY] = clean
+        return clean
+
+    def _workspace_slot_preset(self, slot: int) -> dict | None:
+        slot_num = self._normalize_workspace_slot(slot)
+        presets = self._workspace_presets_config()
+        payload = presets.get(str(slot_num))
+        return payload if isinstance(payload, dict) else None
+
+    def _workspace_slot_name(self, slot: int) -> str:
+        slot_num = self._normalize_workspace_slot(slot)
+        preset = self._workspace_slot_preset(slot_num)
+        if isinstance(preset, dict):
+            raw = str(preset.get("name") or "").strip()
+            if raw:
+                return raw
+        return f"Workspace {slot_num}"
+
+    def _suggest_workspace_slot_name(self, slot: int) -> str:
+        widget = self._current_document_widget()
+        if isinstance(widget, QWidget):
+            display_getter = getattr(widget, "display_name", None)
+            if callable(display_getter):
+                display = str(display_getter() or "").strip()
+                if display:
+                    return display
+            path = self._document_widget_path(widget)
+            if path:
+                return os.path.basename(path)
+        return f"Workspace {self._normalize_workspace_slot(slot)}"
+
+    def _refresh_workspace_slot_menu_actions(self) -> None:
+        enabled = not bool(self.no_project_mode)
+        for slot in range(1, self.WORKSPACE_SLOT_COUNT + 1):
+            preset = self._workspace_slot_preset(slot)
+            snapshot = preset.get("snapshot") if isinstance(preset, dict) else None
+            has_snapshot = isinstance(snapshot, dict)
+            name = self._workspace_slot_name(slot)
+
+            load_action = self._workspace_slot_load_actions.get(slot)
+            if isinstance(load_action, QAction):
+                label = f"Load Slot {slot}: {name}"
+                if not has_snapshot:
+                    label += " (empty)"
+                load_action.setText(label)
+                load_action.setEnabled(enabled)
+
+            save_action = self._workspace_slot_save_actions.get(slot)
+            if isinstance(save_action, QAction):
+                save_action.setText(f"Save Slot {slot}: {name}")
+                save_action.setEnabled(enabled)
+
+    def _capture_workspace_layout_node(self, widget: QWidget | None) -> dict[str, object] | None:
+        if isinstance(widget, EditorTabs):
+            entries: list[dict[str, object]] = []
+            for idx in range(widget.count()):
+                tab_widget = widget.widget(idx)
+                path = self._document_widget_path(tab_widget)
+                if not path:
+                    continue
+                cpath = self._canonical_path(path)
+                if not cpath:
+                    continue
+                entry: dict[str, object] = {
+                    "file_path": cpath,
+                    "view_state": self._capture_document_view_state(tab_widget),
+                }
+                if bool(getattr(tab_widget, "_tab_pinned", False)):
+                    entry["pinned"] = True
+                entries.append(entry)
+            return {
+                "type": "tabs",
+                "active_index": int(widget.currentIndex()),
+                "entries": entries,
+            }
+
+        if isinstance(widget, QSplitter):
+            orientation = "vertical" if widget.orientation() == Qt.Vertical else "horizontal"
+            children: list[dict[str, object]] = []
+            for idx in range(widget.count()):
+                node = self._capture_workspace_layout_node(widget.widget(idx))
+                if isinstance(node, dict):
+                    children.append(node)
+            sizes: list[int] = []
+            try:
+                sizes = [int(value) for value in widget.sizes()]
+            except Exception:
+                sizes = []
+            return {
+                "type": "splitter",
+                "orientation": orientation,
+                "sizes": sizes,
+                "children": children,
+            }
+        return None
+
+    def _capture_workspace_preset_snapshot(self, *, name: str) -> dict[str, object]:
+        root_node = self._capture_workspace_layout_node(getattr(self.editor_workspace, "root_splitter", None))
+        if not isinstance(root_node, dict):
+            root_node = {
+                "type": "splitter",
+                "orientation": "horizontal",
+                "sizes": [],
+                "children": [{"type": "tabs", "active_index": -1, "entries": []}],
+            }
+        snapshot: dict[str, object] = {
+            "version": 1,
+            "name": str(name or "").strip(),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "editor_layout": root_node,
+            "dock_state_b64": self._qbytearray_to_b64_text(self.saveState()),
+            "dock_visibility": {
+                str(dock.objectName() or ""): bool(dock.isVisible())
+                for dock in self._dock_state_targets()
+                if str(dock.objectName() or "").strip()
+            },
+        }
+        return snapshot
+
+    @staticmethod
+    def _normalized_splitter_sizes(sizes_raw: object, count: int) -> list[int]:
+        if not isinstance(sizes_raw, list):
+            return []
+        out: list[int] = []
+        for value in sizes_raw:
+            try:
+                out.append(max(1, int(value)))
+            except Exception:
+                return []
+        if len(out) != int(count):
+            return []
+        return out
+
+    def _tabs_for_document_widget(self, widget: QWidget | None) -> EditorTabs | None:
+        if not isinstance(widget, QWidget):
+            return None
+        for tabs in self.editor_workspace.all_tabs():
+            if tabs.indexOf(widget) >= 0:
+                return tabs
+        return None
+
+    @staticmethod
+    def _focus_tabs_for_workspace_restore(tabs: EditorTabs) -> None:
+        try:
+            tabs.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
+        current = tabs.currentWidget()
+        if isinstance(current, QWidget):
+            try:
+                current.setFocus(Qt.OtherFocusReason)
+            except Exception:
+                pass
+
+    def _open_additional_workspace_view(self, cpath: str, target_tabs: EditorTabs) -> QWidget | None:
+        existing = self._find_open_document_for_path(cpath)
+        existing_editor = self._editor_from_document_widget(existing)
+        if not isinstance(existing_editor, EditorWidget):
+            return existing if isinstance(existing, QWidget) else None
+
+        self._focus_tabs_for_workspace_restore(target_tabs)
+        opened = self.editor_workspace.open_editor(
+            os.path.basename(cpath),
+            cpath,
+            font_size=self.font_size,
+            font_family=self.font_family,
+            force_new_view=True,
+            show_errors=False,
+        )
+        if not isinstance(opened, EditorWidget):
+            return existing if isinstance(existing, QWidget) else None
+        if not self._configure_opened_code_editor(opened, cpath=cpath):
+            return None
+        self._track_widget_change_highlights(opened)
+        self._apply_editor_background_to_editor(opened)
+        self._apply_editor_indent_settings_to_editor(opened)
+        self._apply_editor_overview_settings_to_editor(opened)
+        self._apply_completion_ui_settings_to_editor(opened)
+        self._apply_lint_visual_settings_to_editor(opened)
+        self._apply_spellcheck_visual_settings_to_widget(opened)
+        self._attach_editor_cpp_hooks(opened)
+        self._attach_editor_rust_hooks(opened)
+        return opened
+
+    def _open_workspace_entry_in_tabs(
+        self,
+        *,
+        file_path: str,
+        target_tabs: EditorTabs,
+        open_counts: dict[str, int],
+    ) -> tuple[QWidget | None, bool]:
+        cpath = self._canonical_path(file_path)
+        if not cpath or not os.path.exists(cpath):
+            return None, True
+
+        previous_count = int(open_counts.get(cpath, 0))
+        already_open = self._find_open_document_for_path(cpath)
+        duplicate_requested = previous_count > 0
+        if duplicate_requested:
+            opened = self._open_additional_workspace_view(cpath, target_tabs)
+        else:
+            self._focus_tabs_for_workspace_restore(target_tabs)
+            opened = self.open_file(cpath, show_errors=False)
+
+        if not isinstance(opened, QWidget):
+            return None, False
+
+        if not duplicate_requested and already_open is None and target_tabs.indexOf(opened) < 0:
+            owner_tabs = self._tabs_for_document_widget(opened)
+            if owner_tabs is not None and owner_tabs is not target_tabs:
+                idx = owner_tabs.indexOf(opened)
+                if idx >= 0:
+                    owner_tabs.removeTab(idx)
+                target_tabs.add_editor(opened)
+
+        open_counts[cpath] = previous_count + 1
+        return opened, False
+
+    def _build_workspace_layout_widget(
+        self,
+        *,
+        node: object,
+        parent: QWidget,
+        tab_nodes: list[tuple[dict, EditorTabs]],
+        pending_split_sizes: list[tuple[QSplitter, list[int]]],
+    ) -> QWidget:
+        if isinstance(node, dict) and str(node.get("type") or "").strip().lower() == "splitter":
+            orientation_raw = str(node.get("orientation") or "").strip().lower()
+            orientation = Qt.Vertical if orientation_raw == "vertical" else Qt.Horizontal
+            splitter = QSplitter(orientation, parent)
+            splitter.setChildrenCollapsible(False)
+            splitter.setHandleWidth(6)
+            children = node.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    splitter.addWidget(
+                        self._build_workspace_layout_widget(
+                            node=child,
+                            parent=splitter,
+                            tab_nodes=tab_nodes,
+                            pending_split_sizes=pending_split_sizes,
+                        )
+                    )
+            if splitter.count() == 0:
+                tabs = EditorTabs(workspace=self.editor_workspace, owner_window=None, parent=splitter)
+                splitter.addWidget(tabs)
+                tab_nodes.append(({}, tabs))
+            pending_split_sizes.append((splitter, list(node.get("sizes") if isinstance(node.get("sizes"), list) else [])))
+            return splitter
+
+        tabs = EditorTabs(workspace=self.editor_workspace, owner_window=None, parent=parent)
+        tab_nodes.append((node if isinstance(node, dict) else {}, tabs))
+        return tabs
+
+    def _replace_workspace_root_splitter(self, layout_node: object) -> list[tuple[dict, EditorTabs]]:
+        tab_nodes: list[tuple[dict, EditorTabs]] = []
+        pending_split_sizes: list[tuple[QSplitter, list[int]]] = []
+        built = self._build_workspace_layout_widget(
+            node=layout_node,
+            parent=self.editor_workspace,
+            tab_nodes=tab_nodes,
+            pending_split_sizes=pending_split_sizes,
+        )
+        if isinstance(built, QSplitter):
+            new_root = built
+        else:
+            new_root = QSplitter(Qt.Horizontal, self.editor_workspace)
+            new_root.setChildrenCollapsible(False)
+            new_root.setHandleWidth(6)
+            new_root.addWidget(built)
+
+        layout = self.editor_workspace.layout()
+        if layout is None:
+            layout = QHBoxLayout(self.editor_workspace)
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            while layout.count():
+                item = layout.takeAt(0)
+                child = item.widget()
+                if child is not None:
+                    child.setParent(None)
+
+        old_root = getattr(self.editor_workspace, "root_splitter", None)
+        if isinstance(old_root, QWidget):
+            old_root.setParent(None)
+            old_root.deleteLater()
+        self.editor_workspace.root_splitter = new_root
+        layout.addWidget(new_root)
+
+        for splitter, sizes_raw in pending_split_sizes:
+            sizes = self._normalized_splitter_sizes(sizes_raw, splitter.count())
+            if not sizes:
+                continue
+            try:
+                splitter.setSizes(sizes)
+            except Exception:
+                continue
+
+        return tab_nodes
+
+    def _apply_workspace_dock_layout_snapshot(self, snapshot: dict[str, object]) -> None:
+        state = self._qbytearray_from_b64_text(snapshot.get("dock_state_b64"))
+        if isinstance(state, QByteArray) and not state.isEmpty():
+            try:
+                self.restoreState(state)
+            except Exception:
+                pass
+
+        visibility_raw = snapshot.get("dock_visibility")
+        if not isinstance(visibility_raw, dict):
+            return
+        dock_by_name: dict[str, QDockWidget] = {}
+        for dock in self._dock_state_targets():
+            name = str(dock.objectName() or "").strip()
+            if name:
+                dock_by_name[name] = dock
+        for key, visible in visibility_raw.items():
+            dock = dock_by_name.get(str(key or "").strip())
+            if dock is None:
+                continue
+            try:
+                dock.setVisible(bool(visible))
+            except Exception:
+                continue
+
+    def _restore_workspace_snapshot(self, snapshot: dict[str, object]) -> tuple[int, int]:
+        layout_node = snapshot.get("editor_layout")
+        if not isinstance(layout_node, dict):
+            return 0, 0
+
+        # Prevent per-file open hooks from re-applying default dock sizes while restoring.
+        self._dock_layout_restored = True
+        self._close_all_editors_without_prompt()
+        QApplication.processEvents()
+        tab_nodes = self._replace_workspace_root_splitter(layout_node)
+
+        open_counts: dict[str, int] = {}
+        restored = 0
+        missing = 0
+        for node, tabs in tab_nodes:
+            entries = node.get("entries") if isinstance(node, dict) else None
+            if not isinstance(entries, list):
+                entries = []
+            restored_widgets: list[QWidget | None] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    restored_widgets.append(None)
+                    continue
+                file_path = entry.get("file_path")
+                if not isinstance(file_path, str) or not file_path.strip():
+                    restored_widgets.append(None)
+                    continue
+                opened, was_missing = self._open_workspace_entry_in_tabs(
+                    file_path=file_path,
+                    target_tabs=tabs,
+                    open_counts=open_counts,
+                )
+                if was_missing:
+                    missing += 1
+                    restored_widgets.append(None)
+                    continue
+                if isinstance(opened, QWidget):
+                    restored += 1
+                    if bool(entry.get("pinned", False)):
+                        try:
+                            tabs._set_tab_pinned(opened, True, reflow=False)
+                        except Exception:
+                            pass
+                    view_state = entry.get("view_state")
+                    if isinstance(view_state, dict):
+                        self._restore_document_view_state(opened, view_state)
+                    restored_widgets.append(opened)
+                    continue
+                restored_widgets.append(None)
+
+            try:
+                tabs._reflow_pinned_tabs()
+            except Exception:
+                pass
+
+            active_idx = -1
+            try:
+                active_idx = int(node.get("active_index", -1))
+            except Exception:
+                active_idx = -1
+            preferred: QWidget | None = None
+            if 0 <= active_idx < len(restored_widgets):
+                candidate = restored_widgets[active_idx]
+                if isinstance(candidate, QWidget):
+                    preferred = candidate
+            if preferred is None:
+                for candidate in restored_widgets:
+                    if isinstance(candidate, QWidget):
+                        preferred = candidate
+                        break
+            if isinstance(preferred, QWidget) and tabs.indexOf(preferred) >= 0:
+                tabs.setCurrentWidget(preferred)
+
+        self._apply_workspace_dock_layout_snapshot(snapshot)
+        self._attach_all_editor_lint_hooks()
+        self._seed_external_file_watch_state()
+        self._refresh_runtime_action_states()
+        self.spellcheck_manager.refresh_active_widget(immediate=True)
+        self._schedule_symbol_outline_refresh(immediate=True)
+        return restored, missing
+
+    def save_workspace_slot(self, slot: int) -> None:
+        if self.no_project_mode:
+            self.statusBar().showMessage("Workspace slots are unavailable without an open project.", 2200)
+            return
+        slot_num = self._normalize_workspace_slot(slot)
+        presets = self._workspace_presets_config()
+        existing = presets.get(str(slot_num))
+        name = ""
+        if isinstance(existing, dict):
+            raw = str(existing.get("name") or "").strip()
+            if raw:
+                name = raw
+        if not name:
+            name = self._suggest_workspace_slot_name(slot_num)
+        name_dialog = WorkspaceSlotNameDialog(
+            slot_number=slot_num,
+            current_name=name,
+            use_native_chrome=self.use_native_chrome,
+            parent=self,
+        )
+        if name_dialog.exec() != int(QDialog.DialogCode.Accepted):
+            self.statusBar().showMessage("Workspace save canceled.", 1600)
+            return
+        entered_name = str(name_dialog.workspace_name or "").strip()
+        if entered_name:
+            name = entered_name
+        snapshot = self._capture_workspace_preset_snapshot(name=name)
+        presets[str(slot_num)] = {
+            "name": name,
+            "snapshot": snapshot,
+        }
+        self.config[self.WORKSPACE_PRESETS_CONFIG_KEY] = presets
+        self.write_project_config(self.config)
+        self._refresh_workspace_slot_menu_actions()
+        self.statusBar().showMessage(f"Workspace saved to slot {slot_num}: {name}", 1800)
+
+    def load_workspace_slot(self, slot: int) -> None:
+        if self.no_project_mode:
+            self.statusBar().showMessage("Workspace slots are unavailable without an open project.", 2200)
+            return
+        slot_num = self._normalize_workspace_slot(slot)
+        preset = self._workspace_slot_preset(slot_num)
+        if not isinstance(preset, dict):
+            self.statusBar().showMessage(f"Workspace slot {slot_num} is empty.", 1800)
+            return
+        snapshot = preset.get("snapshot")
+        if not isinstance(snapshot, dict):
+            self.statusBar().showMessage(f"Workspace slot {slot_num} is empty.", 1800)
+            return
+        if not self._confirm_save_modified_editors():
+            self.statusBar().showMessage("Workspace load canceled.", 1800)
+            return
+        restored, missing = self._restore_workspace_snapshot(snapshot)
+        name = self._workspace_slot_name(slot_num)
+        if restored == 0 and missing == 0:
+            self.statusBar().showMessage(f"Loaded workspace slot {slot_num}: {name}", 1800)
+            return
+        if missing > 0:
+            self.statusBar().showMessage(
+                f"Loaded workspace slot {slot_num}: {name} ({missing} missing file(s) skipped).",
+                3000,
+            )
+            return
+        self.statusBar().showMessage(f"Loaded workspace slot {slot_num}: {name}", 1800)
+
     def _reload_open_tdoc_documents_for_root(self, root: str) -> None:
         root_c = self._canonical_path(root)
         for widget in self._iter_open_document_widgets():
@@ -7051,6 +7540,7 @@ class PythonIDE(Window):
         self.populate_cargo_run_config_menu()
         self.populate_build_config_menu()
         self._apply_runtime_keybindings()
+        self._refresh_workspace_slot_menu_actions()
 
         lint_cfg = self._lint_config()
         completion_cfg = self._completion_config()

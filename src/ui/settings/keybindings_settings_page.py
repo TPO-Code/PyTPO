@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
@@ -38,6 +39,9 @@ from src.core.keybindings import (
 )
 from src.settings_models import SettingsScope
 from src.ui.keybinding_capture_dialog import KeybindingCaptureDialog
+
+
+_WORKSPACE_SLOT_ACTION_RE = re.compile(r"^action\.workspace_slot_(\d+)_(load|save)$")
 
 
 class KeybindingsSettingsPage(QWidget):
@@ -183,6 +187,43 @@ class KeybindingsSettingsPage(QWidget):
         else:
             self.status.setText("No keybinding changes.")
 
+    @staticmethod
+    def _workspace_slot_action_meta(action_id: str) -> tuple[int, str] | None:
+        match = _WORKSPACE_SLOT_ACTION_RE.match(str(action_id or "").strip())
+        if match is None:
+            return None
+        slot = int(match.group(1))
+        mode = match.group(2)
+        if slot < 1 or slot > 12:
+            return None
+        return slot, mode
+
+    @staticmethod
+    def _workspace_slot_action_ids(slot: int) -> tuple[str, str]:
+        slot_num = max(1, min(12, int(slot)))
+        return (
+            f"action.workspace_slot_{slot_num}_load",
+            f"action.workspace_slot_{slot_num}_save",
+        )
+
+    @staticmethod
+    def _workspace_slot_sequences_from_candidate(candidate: list[str]) -> tuple[list[str], list[str]] | None:
+        normalized = normalize_sequence(candidate)
+        if not normalized:
+            return None
+        first_chord = str(normalized[0] or "").strip()
+        if not first_chord:
+            return None
+        parts = [part.strip() for part in first_chord.split("+") if part.strip()]
+        if not parts:
+            return None
+        assigned_key = parts[-1]
+        load_sequence = normalize_sequence([f"Ctrl+{assigned_key}"])
+        save_sequence = normalize_sequence([f"Ctrl+Shift+{assigned_key}"])
+        if not load_sequence or not save_sequence:
+            return None
+        return load_sequence, save_sequence
+
     def _edit_action_binding(self, *, scope: str, action_id: str, action_name: str) -> None:
         current = get_action_sequence(self._working_keybindings, scope=scope, action_id=action_id)
         dialog = KeybindingCaptureDialog(
@@ -195,6 +236,72 @@ class KeybindingsSettingsPage(QWidget):
 
         candidate = normalize_sequence(dialog.sequence())
         if not candidate:
+            return
+
+        slot_meta = self._workspace_slot_action_meta(action_id) if scope == "general" else None
+        if slot_meta is not None:
+            slot, _mode = slot_meta
+            paired = self._workspace_slot_sequences_from_candidate(candidate)
+            if paired is None:
+                QMessageBox.warning(
+                    self,
+                    "Workspace Shortcut",
+                    "Workspace slot bindings must include an assigned key (for example: Ctrl+F1 or Ctrl+1).",
+                )
+                return
+            load_sequence, save_sequence = paired
+            load_action_id, save_action_id = self._workspace_slot_action_ids(slot)
+
+            trial = set_action_sequence(
+                self._working_keybindings,
+                scope="general",
+                action_id=load_action_id,
+                sequence=load_sequence,
+            )
+            trial = set_action_sequence(
+                trial,
+                scope="general",
+                action_id=save_action_id,
+                sequence=save_sequence,
+            )
+            conflicts = [
+                *find_conflicts_for_sequence(
+                    trial,
+                    scope="general",
+                    action_id=load_action_id,
+                    sequence=load_sequence,
+                ),
+                *find_conflicts_for_sequence(
+                    trial,
+                    scope="general",
+                    action_id=save_action_id,
+                    sequence=save_sequence,
+                ),
+            ]
+            if conflicts:
+                seen: set[tuple[str, str]] = set()
+                lines: list[str] = []
+                for entry in conflicts:
+                    key = (entry.scope, entry.action_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    lines.append(f"- {entry.action_name} ({entry.scope})")
+                answer = QMessageBox.question(
+                    self,
+                    "Shortcut conflict",
+                    "This workspace slot key conflicts with existing bindings:\n\n"
+                    + "\n".join(lines[:8])
+                    + "\n\nOverride anyway?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    return
+
+            self._working_keybindings = trial
+            self._refresh_table()
+            self._notify_pending_changed()
             return
 
         conflicts = find_conflicts_for_sequence(
@@ -227,6 +334,24 @@ class KeybindingsSettingsPage(QWidget):
         self._notify_pending_changed()
 
     def _reset_action_binding(self, *, scope: str, action_id: str) -> None:
+        slot_meta = self._workspace_slot_action_meta(action_id) if scope == "general" else None
+        if slot_meta is not None:
+            slot, _mode = slot_meta
+            load_action_id, save_action_id = self._workspace_slot_action_ids(slot)
+            self._working_keybindings = reset_action_to_default(
+                self._working_keybindings,
+                scope="general",
+                action_id=load_action_id,
+            )
+            self._working_keybindings = reset_action_to_default(
+                self._working_keybindings,
+                scope="general",
+                action_id=save_action_id,
+            )
+            self._refresh_table()
+            self._notify_pending_changed()
+            return
+
         self._working_keybindings = reset_action_to_default(
             self._working_keybindings,
             scope=scope,

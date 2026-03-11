@@ -23,6 +23,7 @@ User documentation for running, configuring, and troubleshooting PyTPO.
 - [Features Index](features/README.md)
 - [Editor Basics](features/editor.md)
 - [Panels](features/panels.md)
+- [Workspace Slots](features/workspace-slots.md)
 - [Linting and Problems](features/linting.md)
 - [Find and Replace in Files](features/find-replace-in-files.md)
 - [Git Integration](features/git.md)

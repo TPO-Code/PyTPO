@@ -319,6 +319,41 @@ class ActionRegistry:
             view.addAction(act_panel_codex_agent)
 
         view.addSeparator()
+        workspace_menu = view.addMenu("Workspace Slots")
+        ide._workspace_slots_menu = workspace_menu
+        ide._workspace_slot_load_actions = {}
+        ide._workspace_slot_save_actions = {}
+        for slot in range(1, 13):
+            act_workspace_load = QAction(f"Load Workspace Slot {slot}", ide)
+            act_workspace_load.triggered.connect(
+                lambda _checked=False, slot_index=slot: ide.load_workspace_slot(slot_index)
+            )
+            ActionRegistry._register_shortcut_action(
+                ide,
+                act_workspace_load,
+                scope="general",
+                action_ids=(f"action.workspace_slot_{slot}_load",),
+            )
+            workspace_menu.addAction(act_workspace_load)
+            ide._workspace_slot_load_actions[slot] = act_workspace_load
+
+            act_workspace_save = QAction(f"Save Workspace Slot {slot}", ide)
+            act_workspace_save.triggered.connect(
+                lambda _checked=False, slot_index=slot: ide.save_workspace_slot(slot_index)
+            )
+            ActionRegistry._register_shortcut_action(
+                ide,
+                act_workspace_save,
+                scope="general",
+                action_ids=(f"action.workspace_slot_{slot}_save",),
+            )
+            workspace_menu.addAction(act_workspace_save)
+            ide._workspace_slot_save_actions[slot] = act_workspace_save
+
+        if callable(getattr(ide, "_refresh_workspace_slot_menu_actions", None)):
+            ide._refresh_workspace_slot_menu_actions()
+
+        view.addSeparator()
         act_markdown_preview = QAction("Markdown Live Preview", ide)
         act_markdown_preview.setCheckable(True)
         act_markdown_preview.setChecked(False)

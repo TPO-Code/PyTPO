@@ -208,6 +208,7 @@ class ProjectSettings(TypedDict, total=False):
     c_cpp: CppSettings
     rust: RustSettings
     open_editors: list[EditorSessionEntry]
+    workspace_presets: dict[str, dict[str, Any]]
 
 
 class IdeWindowSettings(TypedDict, total=False):
@@ -431,6 +432,7 @@ def default_project_settings() -> ProjectSettings:
             "initialization_options": {},
         },
         "open_editors": [],
+        "workspace_presets": {},
     }
     return deepcopy(defaults)
 

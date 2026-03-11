@@ -1,9 +1,10 @@
 # Features
 
-Feature guides for editing, navigation, diagnostics, Git, AI assistance, and docked coding agents.
+Feature guides for editing, navigation, diagnostics, workspace layouts, Git, AI assistance, and docked coding agents.
 
 - [Editor Basics](editor.md)
 - [Panels](panels.md)
+- [Workspace Slots](workspace-slots.md)
 - [Linting and Problems](linting.md)
 - [Find and Replace in Files](find-replace-in-files.md)
 - [Git Integration](git.md)

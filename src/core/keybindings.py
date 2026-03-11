@@ -139,6 +139,24 @@ KEYBINDING_ACTIONS: tuple[KeybindingAction, ...] = (
     KeybindingAction("general", "action.tree_cut", "Explorer Cut", ("Ctrl+X",)),
     KeybindingAction("general", "action.tree_paste", "Explorer Paste", ("Ctrl+V",)),
     KeybindingAction("general", "action.tree_delete", "Explorer Delete", ("Delete",)),
+    *tuple(
+        action
+        for slot in range(1, 13)
+        for action in (
+            KeybindingAction(
+                "general",
+                f"action.workspace_slot_{slot}_load",
+                f"Workspace Slot {slot}: Load",
+                (f"Ctrl+F{slot}",),
+            ),
+            KeybindingAction(
+                "general",
+                f"action.workspace_slot_{slot}_save",
+                f"Workspace Slot {slot}: Save",
+                (f"Ctrl+Shift+F{slot}",),
+            ),
+        )
+    ),
     KeybindingAction("python", "action.python_comment_toggle", "Toggle Comment", ("Ctrl+/",)),
     KeybindingAction("cpp", "action.cpp_comment_toggle", "Toggle Comment", ("Shift+/",)),
 )

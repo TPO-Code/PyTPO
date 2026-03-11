@@ -412,6 +412,7 @@ PROJECT_KEY_PREFIXES: tuple[str, ...] = (
     "explorer",
     "build",
     "open_editors",
+    "workspace_presets",
     "rust",
 )
 
@@ -1060,6 +1061,21 @@ class SettingsManager:
                 clean_item["modified"] = modified
             clean_editors.append(clean_item)
         data["open_editors"] = clean_editors
+
+        workspace_presets = data.get("workspace_presets")
+        if not isinstance(workspace_presets, dict):
+            workspace_presets = {}
+        clean_presets: dict[str, dict[str, Any]] = {}
+        for raw_slot, raw_payload in workspace_presets.items():
+            slot_text = str(raw_slot or "").strip()
+            if not slot_text.isdigit():
+                continue
+            slot = int(slot_text)
+            if slot < 1 or slot > 12:
+                continue
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            clean_presets[str(slot)] = payload
+        data["workspace_presets"] = clean_presets
 
         changed = data != before
         if changed:
