@@ -4978,6 +4978,7 @@ class PythonIDE(Window):
     def _apply_terminal_commands_to_terminal(self, terminal: TerminalWidget | None) -> None:
         if not isinstance(terminal, TerminalWidget):
             return
+        terminal.set_toolbar_visible(bool(self._run_config().get("show_terminal_toolbar", True)))
         cfg = self._terminal_commands_config()
         terminal.set_commands(
             quick_commands=cfg.get("quick_commands", []),

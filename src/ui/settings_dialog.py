@@ -559,6 +559,14 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 type="checkbox",
                                 scope="ide",
                             ),
+                            SchemaField(
+                                id="run-show-terminal-toolbar",
+                                key="run.show_terminal_toolbar",
+                                label="Show Terminal Toolbar",
+                                type="checkbox",
+                                scope="ide",
+                                description="Show Copy/Paste/Clear and Quick Commands in terminal tabs.",
+                            ),
                         ],
                     ),
                     SchemaSection(

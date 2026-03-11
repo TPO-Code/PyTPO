@@ -1160,7 +1160,11 @@ class ExecutionController:
         else:
             label = f"Terminal {self.ide._ad_hoc_terminal_counter}"
 
-        terminal = TerminalWidget(cwd=start_in, parent=self.console_tabs)
+        terminal = TerminalWidget(
+            cwd=start_in,
+            parent=self.console_tabs,
+            show_toolbar=bool(run_cfg.get("show_terminal_toolbar", True)),
+        )
         self._style_terminal_widget(terminal)
         terminal.setProperty("file_key", key)
         terminal.tracebackLinkActivated.connect(self._on_console_traceback_activated)

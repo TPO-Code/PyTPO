@@ -1135,6 +1135,7 @@ class SettingsManager:
             "clear_output_before_run",
             "focus_output_on_run",
             "clear_terminal_before_run",
+            "show_terminal_toolbar",
         ):
             run[bool_key] = bool(run.get(bool_key, True))
 

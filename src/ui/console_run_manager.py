@@ -74,7 +74,10 @@ class ConsoleRunManager(QObject):
                 self._sync_tab_title(session)
             return session
 
-        terminal = TerminalWidget()
+        run_cfg = self._run_config_provider()
+        run_data = run_cfg if isinstance(run_cfg, dict) else {}
+        show_toolbar = bool(run_data.get("show_terminal_toolbar", True))
+        terminal = TerminalWidget(show_toolbar=show_toolbar)
         if self._terminal_styler:
             self._terminal_styler(terminal)
         terminal.setProperty("file_key", key)

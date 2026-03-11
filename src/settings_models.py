@@ -25,6 +25,7 @@ class RunSettings(TypedDict, total=False):
     clear_output_before_run: bool
     focus_output_on_run: bool
     clear_terminal_before_run: bool
+    show_terminal_toolbar: bool
     terminal_commands: "TerminalCommandsSettings"
     cmake: dict[str, Any]
 
@@ -609,6 +610,7 @@ def default_ide_settings() -> IdeSettings:
             "clear_output_before_run": True,
             "focus_output_on_run": True,
             "clear_terminal_before_run": True,
+            "show_terminal_toolbar": True,
             "terminal_commands": {
                 "quick_commands": [],
                 "templates": [],

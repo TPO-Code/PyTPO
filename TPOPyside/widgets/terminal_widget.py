@@ -626,6 +626,8 @@ class TerminalWidget(QtWidgets.QWidget):
 
     # -------- UI: Toolbar, Run Button, Context Menu --------
     def _build_toolbar(self):
+        if hasattr(self, "_toolbar"):
+            return
         self._toolbar = QtWidgets.QToolBar(self)
         self._toolbar.setObjectName("TerminalToolbar")
         self._toolbar.setProperty("surface", "terminal-toolbar")
@@ -646,13 +648,24 @@ class TerminalWidget(QtWidgets.QWidget):
             self.update()
         act_clear.triggered.connect(_do_clear)
 
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self._toolbar)
-        lay.addStretch(1)
+        lay = self.layout()
+        if lay is None:
+            lay = QtWidgets.QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            lay.addWidget(self._toolbar)
+            lay.addStretch(1)
+        else:
+            if isinstance(lay, QtWidgets.QBoxLayout):
+                lay.insertWidget(0, self._toolbar)
+            else:
+                lay.addWidget(self._toolbar)
 
     def _build_run_button(self):
+        if hasattr(self, "_btn_run"):
+            return
+        if not hasattr(self, "_toolbar"):
+            self._build_toolbar()
         self._toolbar.addSeparator()
         self._btn_run = QtWidgets.QToolButton(self)
         self._btn_run.setObjectName("TerminalRunButton")
@@ -667,7 +680,19 @@ class TerminalWidget(QtWidgets.QWidget):
         self._toolbar.addWidget(self._btn_run)
         self._rebuild_run_menu()
 
+    def set_toolbar_visible(self, visible: bool) -> None:
+        show = bool(visible)
+        if show:
+            self._build_toolbar()
+            self._build_run_button()
+            self._toolbar.setVisible(True)
+        elif hasattr(self, "_toolbar"):
+            self._toolbar.setVisible(False)
+        self._schedule_terminal_geometry_sync(delay_ms=0)
+
     def _rebuild_run_menu(self):
+        if not hasattr(self, "_run_menu"):
+            return
         self._run_menu.clear()
         has_entries = False
         if self._quick_cmds:
@@ -993,7 +1018,9 @@ class TerminalWidget(QtWidgets.QWidget):
 
     # -------- Geometry & Viewport --------
     def _top_offset(self) -> int:
-        return self._toolbar.height() if hasattr(self, "_toolbar") else 0
+        if hasattr(self, "_toolbar") and self._toolbar.isVisible():
+            return self._toolbar.height()
+        return 0
 
     def _visible_cols(self) -> int:
         return max(1, self.width() // self._cell_w)
@@ -1864,7 +1891,8 @@ class TerminalWidget(QtWidgets.QWidget):
         self._send(sent.encode("utf-8"))
         self._ensure_bottom()
         self._last_used = spec
-        self._btn_run.setText(spec.label)
+        if hasattr(self, "_btn_run"):
+            self._btn_run.setText(spec.label)
 
     @staticmethod
     def _bash_quote(s: str) -> str:
