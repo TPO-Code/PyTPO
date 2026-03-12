@@ -89,7 +89,7 @@ Example:
 ## System Integration
 
 - `default_terminal_launcher_path` (string path)
-  - Installed launcher command used for desktop/default-terminal integration (Linux, best effort).
+  - Installed launcher command location (Linux, best effort). This is not the repository path.
 - `default_terminal_desktop_file` (string path)
   - Installed desktop entry used for integration.
 

@@ -531,6 +531,9 @@ def _build_schema() -> SettingsSchema:
                         title="Default Terminal Emulator",
                         description=(
                             "Install or remove Linux desktop integration for PyTPO Terminal. "
+                            "The launcher path below is the command location (for example ~/.local/bin), "
+                            "not the repository path. "
+                            "The installer binds to the currently running PyTPO checkout automatically. "
                             "The launcher accepts '--cwd <path>' (or a positional file/folder path) "
                             "so new tabs start in the requested location."
                         ),
@@ -538,11 +541,14 @@ def _build_schema() -> SettingsSchema:
                             SchemaField(
                                 id="default_terminal_launcher_path",
                                 key="default_terminal_launcher_path",
-                                label="Launcher path",
+                                label="Launcher command path",
                                 type="lineedit",
                                 scope=TERMINAL_SCOPE,
                                 default=defaults.default_terminal_launcher_path,
-                                description="Shell command path installed by setup script.",
+                                description=(
+                                    "Where the launcher executable is installed "
+                                    "(for example ~/.local/bin/pytpo-terminal)."
+                                ),
                             ),
                             SchemaField(
                                 id="default_terminal_desktop_file",

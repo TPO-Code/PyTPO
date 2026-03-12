@@ -103,4 +103,5 @@ fi
 
 echo "Installed launcher: ${LAUNCHER_PATH}"
 echo "Installed desktop file: ${DESKTOP_FILE}"
+echo "Bound PyTPO repo root: ${REPO_ROOT}"
 echo "Default terminal integration applied where supported."
