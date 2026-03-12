@@ -31,8 +31,7 @@ include = [
     "src*",
     "TPOPyside*",
     "Terminal*",
-    "text_editor*",
-    "DL_Manager*",
+    "text_editor*", 
     "tdock*",
 ]
 exclude = ["tests*", "test_projects*"]
