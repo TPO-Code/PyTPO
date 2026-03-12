@@ -92,6 +92,8 @@ Example:
   - Installed launcher command location (Linux, best effort). This is not the repository path.
 - `default_terminal_desktop_file` (string path)
   - Installed desktop entry used for integration.
+- Note for Pop!_OS / Ubuntu:
+  - True system default terminal uses `update-alternatives` (`x-terminal-emulator`) and requires an elevated step.
 
 ## Prompt Editor Page
 

@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT=""
 LAUNCHER_PATH="${HOME}/.local/bin/pytpo-terminal"
 DESKTOP_FILE="${HOME}/.local/share/applications/pytpo-terminal.desktop"
+SYSTEM_LAUNCHER_PATH="/usr/local/bin/pytpo-terminal"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -17,6 +18,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --desktop-file)
             DESKTOP_FILE="${2:-}"
+            shift 2
+            ;;
+        --system-launcher-path)
+            SYSTEM_LAUNCHER_PATH="${2:-}"
             shift 2
             ;;
         *)
@@ -110,4 +115,21 @@ fi
 echo "Installed launcher: ${LAUNCHER_PATH}"
 echo "Installed desktop file: ${DESKTOP_FILE}"
 echo "Bound PyTPO repo root: ${REPO_ROOT}"
-echo "Default terminal integration applied where supported."
+
+if command -v update-alternatives >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+        install -m 755 "${LAUNCHER_PATH}" "${SYSTEM_LAUNCHER_PATH}"
+        update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator "${SYSTEM_LAUNCHER_PATH}" 60 || true
+        update-alternatives --set x-terminal-emulator "${SYSTEM_LAUNCHER_PATH}" || true
+        echo "Registered x-terminal-emulator alternative: ${SYSTEM_LAUNCHER_PATH}"
+        echo "System default terminal updated through update-alternatives."
+    else
+        echo "System default terminal was not changed (requires root)."
+        echo "To set PyTPO as default terminal on Pop!/Ubuntu, run:"
+        echo "  sudo install -m 755 \"${LAUNCHER_PATH}\" \"${SYSTEM_LAUNCHER_PATH}\""
+        echo "  sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator \"${SYSTEM_LAUNCHER_PATH}\" 60"
+        echo "  sudo update-alternatives --set x-terminal-emulator \"${SYSTEM_LAUNCHER_PATH}\""
+    fi
+else
+    echo "update-alternatives was not found; skipped system default terminal registration."
+fi

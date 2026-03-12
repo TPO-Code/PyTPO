@@ -534,6 +534,8 @@ def _build_schema() -> SettingsSchema:
                             "The launcher path below is the command location (for example ~/.local/bin), "
                             "not the repository path. "
                             "The installer binds to the currently running PyTPO checkout automatically. "
+                            "On Pop!_OS/Ubuntu, changing the true default terminal uses update-alternatives "
+                            "and requires an elevated step (shown in install output). "
                             "The launcher accepts '--cwd <path>' (or a positional file/folder path) "
                             "so new tabs start in the requested location."
                         ),

@@ -3,6 +3,7 @@ set -euo pipefail
 
 LAUNCHER_PATH="${HOME}/.local/bin/pytpo-terminal"
 DESKTOP_FILE="${HOME}/.local/share/applications/pytpo-terminal.desktop"
+SYSTEM_LAUNCHER_PATH="/usr/local/bin/pytpo-terminal"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -15,6 +16,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --desktop-file)
             DESKTOP_FILE="${2:-}"
+            shift 2
+            ;;
+        --system-launcher-path)
+            SYSTEM_LAUNCHER_PATH="${2:-}"
             shift 2
             ;;
         *)
@@ -43,4 +48,18 @@ fi
 
 echo "Removed launcher: ${LAUNCHER_PATH}"
 echo "Removed desktop file: ${DESKTOP_FILE}"
-echo "Default terminal integration removed where supported."
+
+if command -v update-alternatives >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+        update-alternatives --remove x-terminal-emulator "${SYSTEM_LAUNCHER_PATH}" || true
+        rm -f "${SYSTEM_LAUNCHER_PATH}"
+        echo "Removed x-terminal-emulator alternative: ${SYSTEM_LAUNCHER_PATH}"
+    else
+        echo "System x-terminal-emulator alternative was not removed (requires root)."
+        echo "To remove PyTPO from system alternatives, run:"
+        echo "  sudo update-alternatives --remove x-terminal-emulator \"${SYSTEM_LAUNCHER_PATH}\""
+        echo "  sudo rm -f \"${SYSTEM_LAUNCHER_PATH}\""
+    fi
+else
+    echo "update-alternatives was not found; skipped system alternative removal."
+fi
