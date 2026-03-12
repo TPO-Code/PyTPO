@@ -241,10 +241,13 @@ class TerminalMainWindow(Window):
                     f"Configured startup directory does not exist:\n{resolved}\n\nUsing home directory instead.",
                 )
                 self._startup_cwd_warning_shown = True
+        process_cwd = Path.cwd()
+        if process_cwd.is_dir():
+            return str(process_cwd)
         home = Path.home()
         if home.is_dir():
             return str(home)
-        return str(Path.cwd())
+        return str(process_cwd)
 
     def _apply_window_state_from_settings(self) -> None:
         if self._settings.start_fullscreen:
