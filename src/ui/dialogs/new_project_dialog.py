@@ -22,6 +22,7 @@ from src.services.project_templates import (
     render_project_template_files,
 )
 from src.settings_manager import SettingsManager
+from src.storage_paths import ide_data_dir
 from TPOPyside.dialogs.custom_dialog import DialogWindow
 from src.ui.dialogs.file_dialog_bridge import get_existing_directory
 
@@ -117,7 +118,7 @@ class NewProjectDialog(DialogWindow):
         self.create_btn.clicked.connect(self._create_clicked)
 
     def _load_template_catalog(self) -> None:
-        result = load_project_templates(self._manager.paths.ide_app_dir)
+        result = load_project_templates(ide_data_dir())
         self._template_catalog = list(result.templates)
         self._template_by_id = {item.template_id: item for item in self._template_catalog}
         self._template_load_warnings = list(result.warnings)

@@ -15,3 +15,8 @@ dependencies = [
     "pymdown-extensions",
     "pyspellchecker",
 ]
+
+[project.scripts]
+pytpo = "main:main"
+pytpo-terminal = "Terminal.app:main"
+pytpo-text-editor = "text_editor:main"

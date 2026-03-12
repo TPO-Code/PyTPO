@@ -14,6 +14,7 @@ from pygments import lex
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Comment, Literal, Name
 
+from src.storage_paths import ide_spell_words_path
 from src.ui.editor_workspace import EditorWidget
 from TPOPyside.widgets.tdoc_support import TDocDocumentWidget
 
@@ -602,7 +603,7 @@ class SpellcheckManager(QObject):
         return set(words)
 
     def _ide_dictionary_path(self) -> Path:
-        return Path(str(self.ide.ide_app_dir)) / "spell-user-words.txt"
+        return ide_spell_words_path()
 
     def _project_dictionary_path(self) -> Path:
         return Path(str(self.ide.project_root)) / ".tide" / "spell-project-words.txt"

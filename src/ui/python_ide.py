@@ -47,6 +47,7 @@ from src.settings_manager import SettingsManager
 from src.services.document_outline_service import build_document_outline
 from src.services.file_open_classifier import FileOpenKind, classify_file_for_open
 from src.services.project_policy_service import ProjectPolicyService
+from src.storage_paths import ide_config_dir, ide_no_project_workspace_dir, migrate_legacy_ide_storage
 
 from src.ui.console_run_manager import ConsoleRunManager
 from src.ui.completion_manager import CompletionManager
@@ -275,7 +276,6 @@ class SettingsDialog(QDialog):
 class PythonIDE(Window):
     APP_NAME = "PyTPO"
     PROJECT_JSON = ".tide/project.json"
-    IDE_SETTINGS_DIRNAME = ".pytpo"
     NO_PROJECT_MODE_ENV = "PYTPO_NO_PROJECT_MODE"
     FORCE_NO_PROJECT_ARG = "--no-project"
     NO_PROJECT_DIRNAME = "no-project-workspace"
@@ -307,10 +307,11 @@ class PythonIDE(Window):
 
     def __init__(self):
         requested_root = os.path.realpath(QDir.currentPath())
+        migrate_legacy_ide_storage()
         ide_app_dir = self._default_ide_app_dir()
         self.no_project_mode = os.environ.get(self.NO_PROJECT_MODE_ENV, "").strip() == "1"
         if self.no_project_mode:
-            workspace = Path(ide_app_dir) / self.NO_PROJECT_DIRNAME
+            workspace = ide_no_project_workspace_dir()
             workspace.mkdir(parents=True, exist_ok=True)
             project_root = str(workspace)
         else:
@@ -7788,11 +7789,7 @@ class PythonIDE(Window):
 
     @classmethod
     def _default_ide_app_dir(cls) -> str:
-        override = os.environ.get("PYTPO_IDE_APP_DIR", "").strip()
-        if override:
-            return str(Path(override).expanduser())
-        app_root = Path(__file__).resolve().parents[2]
-        return str(app_root / cls.IDE_SETTINGS_DIRNAME)
+        return str(ide_config_dir())
 
     def load_or_create_project_config(self) -> dict:
         self.settings_manager.load_all()

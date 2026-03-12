@@ -13,8 +13,8 @@ class GitHubAuthStore:
     """
     Token storage abstraction for GitHub auth.
 
-    Prefers OS keyring when available. Falls back to a local file in the IDE app
-    directory with restrictive permissions when keyring is unavailable.
+    Prefers OS keyring when available. Falls back to a local file in the app
+    secrets directory with restrictive permissions when keyring is unavailable.
     """
 
     def __init__(
@@ -24,10 +24,13 @@ class GitHubAuthStore:
         service_name: str = "pytpo.github",
         account_name: str = "access_token",
     ) -> None:
-        self._ide_app_dir = Path(ide_app_dir).expanduser()
+        self._storage_dir = Path(ide_app_dir).expanduser()
         self._service_name = str(service_name)
         self._account_name = str(account_name)
-        self._fallback_file = self._ide_app_dir / "github-token.json"
+        self._legacy_fallback_file = self._storage_dir / "github-token.json"
+        self._secrets_dir = self._storage_dir / "secrets"
+        self._fallback_file = self._secrets_dir / "github-token.json"
+        self._migrate_legacy_fallback_file()
 
     def set(self, token: str) -> None:
         text = str(token or "").strip()
@@ -90,6 +93,7 @@ class GitHubAuthStore:
             return
 
     def _read_fallback_token(self) -> str | None:
+        self._migrate_legacy_fallback_file()
         path = self._fallback_file
         if not path.is_file():
             return None
@@ -104,7 +108,11 @@ class GitHubAuthStore:
         return text or None
 
     def _write_fallback_token(self, token: str) -> None:
-        self._ide_app_dir.mkdir(parents=True, exist_ok=True)
+        self._secrets_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self._secrets_dir, 0o700)
+        except Exception:
+            pass
         fd = -1
         try:
             fd = os.open(str(self._fallback_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -122,6 +130,32 @@ class GitHubAuthStore:
     def _remove_fallback_file(self) -> None:
         try:
             self._fallback_file.unlink(missing_ok=True)
+        except Exception:
+            return
+
+    def _migrate_legacy_fallback_file(self) -> None:
+        if self._fallback_file.exists():
+            return
+        if not self._legacy_fallback_file.is_file():
+            return
+        try:
+            self._secrets_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(self._secrets_dir, 0o700)
+            except Exception:
+                pass
+            fd = os.open(str(self._fallback_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                payload = self._legacy_fallback_file.read_text(encoding="utf-8")
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    fd = -1
+                    handle.write(payload)
+            finally:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
         except Exception:
             return
 

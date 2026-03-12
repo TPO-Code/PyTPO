@@ -3,21 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
+from .storage_paths import text_editor_recent_files_path
 
-APP_DIR_NAME = "pytpo-text-editor"
 RECENT_FILES_LIMIT = 15
-RECENT_FILES_FILENAME = "recent-files.json"
 
 
 def recent_files_store_path() -> Path:
-    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation).strip()
-    if location:
-        root = Path(location)
-    else:
-        root = Path.home() / ".local" / "share" / APP_DIR_NAME
-    root.mkdir(parents=True, exist_ok=True)
-    return root / RECENT_FILES_FILENAME
+    path = text_editor_recent_files_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def load_recent_files() -> list[str]:

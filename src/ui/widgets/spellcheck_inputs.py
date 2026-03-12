@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.storage_paths import ide_spell_words_path
+
 try:
     from spellchecker import SpellChecker
 except Exception:  # pragma: no cover - optional runtime dependency.
@@ -93,10 +95,10 @@ def _dictionary_path_for_widget(widget: QWidget | None) -> Path:
     ide = _resolve_ide(widget)
     if ide is not None:
         try:
-            return Path(str(ide.ide_app_dir)) / "spell-user-words.txt"
+            return ide_spell_words_path()
         except Exception:
             pass
-    return Path.home() / ".pytpo" / "spell-user-words.txt"
+    return ide_spell_words_path()
 
 
 def _read_dictionary_words(path: Path) -> set[str]:

@@ -25,6 +25,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.file_dialog_settings import configure_shared_file_dialog_defaults
+from src.storage_paths import migrate_legacy_ide_storage
 from src.ui.python_ide import PythonIDE, request_project_activation
 from src.settings_manager import SettingsManager
 
@@ -100,10 +101,7 @@ def _canonical_existing_dir(path_value: str | Path | None) -> str | None:
 def _load_startup_settings_manager(project_root: Path) -> SettingsManager | None:
     """Load startup settings using the same path/migration logic as the IDE."""
     ide_app_dir = PythonIDE._default_ide_app_dir()
-    try:
-        PythonIDE._migrate_legacy_ide_settings_file(ide_app_dir)
-    except Exception:
-        pass
+    migrate_legacy_ide_storage()
 
     manager = SettingsManager(project_root=project_root, ide_app_dir=ide_app_dir)
     try:

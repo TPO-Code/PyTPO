@@ -14,6 +14,7 @@ from .desktop_integration import APP_NAME, icon_path, is_linux_desktop, should_o
 from .desktop_integration_dialog import DesktopIntegrationDialog
 from .instance_coordinator import TextEditorInstanceServer, request_editor_activation
 from .settings_dialog import TextEditorSettingsDialog
+from .storage_paths import migrate_legacy_text_editor_storage
 from .theme_manager import TextEditorThemeManager
 from .workspace import EditorWorkspace
 
@@ -202,6 +203,7 @@ def _initial_paths_from_argv(argv: list[str]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    migrate_legacy_text_editor_storage()
     args = list(sys.argv if argv is None else argv)
     initial_paths = _initial_paths_from_argv(args)
     if request_editor_activation(initial_paths):

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from PySide6.QtGui import QColor
 
-from .paths import terminal_settings_path, terminal_state_dir
+from .paths import migrate_legacy_terminal_storage, terminal_settings_path
 
 DEFAULT_THEME_NAME = "Default"
 DEFAULT_SHELL_MODE = "bash"
@@ -345,6 +345,7 @@ def _normalize_command_env(value: object) -> dict[str, str]:
 
 class TerminalSettingsStore:
     def __init__(self, path: Path | None = None) -> None:
+        migrate_legacy_terminal_storage()
         self._path = Path(path) if path is not None else terminal_settings_path()
 
     @property
@@ -368,7 +369,7 @@ class TerminalSettingsStore:
         return settings
 
     def save(self, settings: TerminalSettings) -> None:
-        terminal_state_dir().mkdir(parents=True, exist_ok=True)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
             json.dumps(settings.to_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

@@ -186,12 +186,12 @@ def _default_project_template_payload() -> dict[str, object]:
     }
 
 
-def project_template_dir(ide_app_dir: str | Path) -> Path:
-    return Path(ide_app_dir).expanduser().resolve() / "templates"
+def project_template_dir(storage_data_root: str | Path) -> Path:
+    return Path(storage_data_root).expanduser().resolve() / "templates"
 
 
-def ensure_bootstrap_project_templates(ide_app_dir: str | Path) -> Path:
-    templates_dir = project_template_dir(ide_app_dir)
+def ensure_bootstrap_project_templates(storage_data_root: str | Path) -> Path:
+    templates_dir = project_template_dir(storage_data_root)
     templates_dir.mkdir(parents=True, exist_ok=True)
     default_file = templates_dir / _DEFAULT_TEMPLATE_FILENAME
     if default_file.exists():
@@ -255,9 +255,9 @@ def _fallback_default_templates() -> list[ProjectTemplate]:
     return out
 
 
-def load_project_templates(ide_app_dir: str | Path) -> ProjectTemplateLoadResult:
-    templates_dir = project_template_dir(ide_app_dir)
-    bootstrap_file = ensure_bootstrap_project_templates(ide_app_dir)
+def load_project_templates(storage_data_root: str | Path) -> ProjectTemplateLoadResult:
+    templates_dir = project_template_dir(storage_data_root)
+    bootstrap_file = ensure_bootstrap_project_templates(storage_data_root)
     warnings: list[str] = []
 
     templates_by_id: dict[str, ProjectTemplate] = {}

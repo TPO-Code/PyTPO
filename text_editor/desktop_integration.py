@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -10,12 +12,11 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 
 from src.services.file_type_catalog import DesktopAssociationType, desktop_association_types
+from .storage_paths import text_editor_settings
 
 APP_NAME = "PyTPO Text Editor"
 APP_ID = "pytpo-text-editor.desktop"
 WRAPPER_NAME = "pytpo-text-editor"
-SETTINGS_ORG = "TwoPintOhh"
-SETTINGS_APP = "TextEditor"
 SETTINGS_KEY_ASKED = "desktop_integration/onboarding_seen"
 SETTINGS_KEY_TYPES = "desktop_integration/selected_type_keys"
 
@@ -24,7 +25,7 @@ FILE_TYPE_ASSOCIATIONS: tuple[DesktopAssociationType, ...] = desktop_association
 
 
 def editor_settings() -> QSettings:
-    return QSettings(SETTINGS_ORG, SETTINGS_APP)
+    return text_editor_settings()
 
 
 def file_type_by_key() -> dict[str, DesktopAssociationType]:
@@ -136,14 +137,66 @@ def selected_associations(keys: list[str] | tuple[str, ...] | None) -> list[Desk
     return [available[key] for key in normalize_type_keys(keys)]
 
 
-def _render_wrapper_script() -> str:
+def _shell_join(parts: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts if str(part))
+
+
+def _resolved_path_or_none(raw_path: str) -> Path | None:
+    text = str(raw_path or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        located = shutil.which(text)
+        if located:
+            path = Path(located).expanduser()
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    return resolved if resolved.exists() else None
+
+
+def _preferred_launcher_command_parts() -> tuple[list[str], str | None]:
+    override = str(os.environ.get("PYTPO_TEXT_EDITOR_LAUNCH_CMD", "") or "").strip()
+    if override:
+        parts = [str(part).strip() for part in shlex.split(override) if str(part).strip()]
+        if parts:
+            return parts, None
+
+    wrapper_target = wrapper_script_path()
+    try:
+        wrapper_target = wrapper_target.expanduser().resolve()
+    except Exception:
+        wrapper_target = wrapper_target.expanduser()
+
+    for raw in (str(sys.argv[0] or "").strip(), "pytpo-text-editor"):
+        candidate = _resolved_path_or_none(raw)
+        if candidate is None:
+            continue
+        if not candidate.is_file():
+            continue
+        if not os.access(candidate, os.X_OK):
+            continue
+        if candidate == wrapper_target:
+            continue
+        return [str(candidate)], None
+
     root = repo_root()
-    return (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        f'cd "{root}"\n'
-        f'exec uv run python "{root / "text_editor_main.py"}" "$@"\n'
-    )
+    return ["uv", "run", "python", str(root / "text_editor_main.py")], str(root)
+
+
+def _render_wrapper_script() -> str:
+    command_parts, run_cwd = _preferred_launcher_command_parts()
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+    ]
+    if run_cwd:
+        lines.append(f"cd {shlex.quote(run_cwd)}")
+    command = _shell_join(command_parts)
+    lines.append(f'exec {command} "$@"')
+    return "\n".join(lines) + "\n"
 
 
 def _render_desktop_file(associations: list[DesktopAssociationType]) -> str:

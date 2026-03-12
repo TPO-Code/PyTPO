@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 )
 from TPOPyside.widgets.terminal_widget import TerminalWidget
 
+from .paths import terminal_prompt_editor_state_path
+
 
 # ============================================================
 # Model
@@ -229,8 +231,7 @@ ANSI_COLORS = {
 
 
 def prompt_editor_state_path() -> Path:
-    root = Path(__file__).resolve().parent.parent
-    return root / ".terminal" / "prompt-editor-state.json"
+    return terminal_prompt_editor_state_path()
 
 
 def segment_to_dict(seg: PromptSegment) -> dict:

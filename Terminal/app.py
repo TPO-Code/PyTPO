@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from .instance_coordinator import TerminalInstanceServer, request_open_tab
 from .main_window import APP_NAME, TerminalMainWindow
+from .paths import migrate_legacy_terminal_storage
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,6 +43,7 @@ def _resolve_startup_cwd_and_qt_args(argv: list[str]) -> tuple[str | None, list[
 
 
 def main(argv: list[str] | None = None) -> int:
+    migrate_legacy_terminal_storage()
     args = list(sys.argv if argv is None else argv)
     runtime_startup_cwd, qt_args = _resolve_startup_cwd_and_qt_args(args)
     requested_tab_cwd = runtime_startup_cwd
