@@ -38,6 +38,7 @@ if [[ -z "${REPO_ROOT}" ]]; then
     REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
+ICON_PATH="${REPO_ROOT}/Terminal/icon.png"
 
 mkdir -p "$(dirname "${LAUNCHER_PATH}")"
 cat > "${LAUNCHER_PATH}" <<EOF
@@ -87,6 +88,7 @@ chmod +x "${LAUNCHER_PATH}"
 mkdir -p "$(dirname "${DESKTOP_FILE}")"
 DESKTOP_ID="$(basename "${DESKTOP_FILE}")"
 ESCAPED_LAUNCHER="${LAUNCHER_PATH// /\\ }"
+ESCAPED_ICON="${ICON_PATH// /\\ }"
 cat > "${DESKTOP_FILE}" <<EOF
 [Desktop Entry]
 Type=Application
@@ -94,6 +96,7 @@ Version=1.0
 Name=PyTPO Terminal
 Comment=PyTPO multi-tab terminal
 Exec=${ESCAPED_LAUNCHER} --cwd %f
+Icon=${ESCAPED_ICON}
 Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;

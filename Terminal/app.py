@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .instance_coordinator import TerminalInstanceServer, request_open_tab
@@ -55,8 +56,17 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(qt_args)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    icon_path = (Path(__file__).resolve().parent / "icon.png").resolve()
+    if icon_path.is_file():
+        app_icon = QIcon(str(icon_path))
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+    else:
+        app_icon = QIcon()
 
     window = TerminalMainWindow(startup_cwd_override=runtime_startup_cwd)
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     instance_server = TerminalInstanceServer(app)
     if instance_server.listen():
         instance_server.openTabRequested.connect(window.open_new_tab_from_external_request)
