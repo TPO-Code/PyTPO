@@ -280,17 +280,37 @@ class TerminalMainWindow(Window):
         target_tabs = tabs_obj if isinstance(tabs_obj, WorkspaceTabs) else None
         self._open_new_tab(target_tabs)
 
-    def _open_new_tab(self, target_tabs: WorkspaceTabs | None) -> None:
+    def open_new_tab_from_external_request(self, requested_cwd: str | None) -> None:
+        self._open_new_tab(None, cwd_override=requested_cwd)
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _normalize_tab_cwd_override(self, raw: str | None) -> str | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        resolved = Path(text).expanduser()
+        if resolved.is_file():
+            resolved = resolved.parent
+        if resolved.is_dir():
+            return str(resolved)
+        return None
+
+    def _open_new_tab(self, target_tabs: WorkspaceTabs | None, cwd_override: str | None = None) -> None:
         shell_path = self._resolve_shell_path(
             self._settings.default_shell_mode,
             self._settings.custom_shell_path,
         )
+        tab_cwd = self._normalize_tab_cwd_override(cwd_override) or self._default_cwd_for_new_tab()
         session = self.workspace.create_session(
             shell_path=shell_path,
             login_shell=bool(self._settings.shell_login),
             history_lines=int(self._settings.history_lines),
             show_toolbar=bool(self._settings.show_toolbar),
-            cwd=self._default_cwd_for_new_tab(),
+            cwd=tab_cwd,
             target_tabs=target_tabs,
         )
         session.apply_settings(self._settings)

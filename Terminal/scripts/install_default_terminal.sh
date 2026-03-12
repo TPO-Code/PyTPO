@@ -71,7 +71,11 @@ elif [[ -n "\${1-}" ]]; then
     fi
 fi
 
-CMD=(uv run python "\${REPO_ROOT}/terminal_app_main.py")
+if [[ -z "\${CWD}" && -n "\${PWD-}" && -d "\${PWD}" ]]; then
+    CWD="\${PWD}"
+fi
+
+CMD=(uv run --project "\${REPO_ROOT}" python "\${REPO_ROOT}/terminal_app_main.py")
 if [[ -n "\${CWD}" ]]; then
     CMD+=(--cwd "\${CWD}")
 fi

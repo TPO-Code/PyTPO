@@ -7,7 +7,7 @@ This page documents all terminal settings persisted in `.terminal/settings.json`
 - `startup_tabs` (int, 1-20)
   - Number of tabs opened when the app launches.
 - `startup_cwd` (string path)
-  - Default working directory for new tabs. If invalid, home directory is used.
+  - Default working directory for new tabs. If invalid or empty, launch/request cwd is used when available, otherwise home.
 - `start_maximized` (bool)
   - Start the app maximized.
 - `start_fullscreen` (bool)

@@ -16,6 +16,9 @@ You can override startup/new-tab working directory from CLI:
 uv run python terminal_app_main.py --cwd /path/to/project
 ```
 
+Launching the command again while a terminal window is already open forwards the request
+to that existing window, opens a new tab there, and focuses it.
+
 ## Basic Navigation
 
 - `Ctrl+T`: New terminal tab
