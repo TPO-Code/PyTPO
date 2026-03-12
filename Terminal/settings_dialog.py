@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from TPOPyside.dialogs import FieldBinding, SchemaField, SchemaPage, SchemaSection, SchemaSettingsDialog, SettingsSchema
@@ -62,6 +63,84 @@ def _show_integration_result(
         QMessageBox.information(parent, title, message or "Command completed.")
         return
     QMessageBox.warning(parent, title, message or "Command failed.")
+
+
+def _extract_sudo_commands(output: str) -> list[str]:
+    commands: list[str] = []
+    for line in str(output or "").splitlines():
+        stripped = str(line or "").strip()
+        if stripped.startswith("sudo "):
+            commands.append(stripped)
+    return commands
+
+
+def _find_terminal_window(dialog: SchemaSettingsDialog) -> QWidget | None:
+    current = dialog.parentWidget()
+    while isinstance(current, QWidget):
+        if hasattr(current, "workspace") and hasattr(current, "open_new_tab"):
+            return current
+        current = current.parentWidget()
+    return None
+
+
+def _open_commands_in_new_terminal_tab(dialog: SchemaSettingsDialog, commands: list[str]) -> bool:
+    window = _find_terminal_window(dialog)
+    if window is None:
+        return False
+    opener = getattr(window, "open_new_tab", None)
+    workspace = getattr(window, "workspace", None)
+    if not callable(opener) or workspace is None:
+        return False
+
+    try:
+        opener()
+    except Exception:
+        return False
+
+    command_text = "\n".join(str(item or "").strip() for item in commands if str(item or "").strip())
+    if not command_text:
+        return False
+
+    def _post_to_active_session() -> None:
+        current_session_getter = getattr(workspace, "current_session", None)
+        if not callable(current_session_getter):
+            return
+        session = current_session_getter()
+        if session is None or not hasattr(session, "post"):
+            return
+        try:
+            session.post(command_text)
+        except Exception:
+            return
+
+    QTimer.singleShot(0, _post_to_active_session)
+    return True
+
+
+def _offer_sudo_commands(dialog: SchemaSettingsDialog, commands: list[str]) -> None:
+    if not commands:
+        return
+    message = (
+        "System default terminal update requires sudo.\n\n"
+        "Open these commands in a new terminal tab so you can enter your password there?"
+    )
+    response = QMessageBox.question(
+        dialog,
+        "Run Elevated Commands",
+        message,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    if response != QMessageBox.StandardButton.Yes:
+        return
+    if _open_commands_in_new_terminal_tab(dialog, commands):
+        return
+    QMessageBox.warning(
+        dialog,
+        "Could Not Open Terminal Tab",
+        "Could not open a terminal tab automatically.\n\nRun these commands manually:\n"
+        + "\n".join(commands),
+    )
 
 
 class TerminalSettingsBackend:
@@ -624,6 +703,7 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
                 desktop_file=desktop_file,
             )
             _show_integration_result(dialog, title="Install Integration", result=result)
+            _offer_sudo_commands(dialog, _extract_sudo_commands(result.stdout))
 
         def _uninstall_integration_action(_field, dialog: SchemaSettingsDialog) -> None:
             launcher_path = _resolve_integration_setting(
@@ -643,6 +723,7 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
                 desktop_file=desktop_file,
             )
             _show_integration_result(dialog, title="Uninstall Integration", result=result)
+            _offer_sudo_commands(dialog, _extract_sudo_commands(result.stdout))
 
         super().__init__(
             backend=backend,
