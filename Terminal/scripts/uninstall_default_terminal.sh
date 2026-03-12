@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+INTEGRATION_DONE_MARKER="__PYTPO_INTEGRATION_DONE__:"
+trap 'rc=$?; echo "${INTEGRATION_DONE_MARKER}${rc}"' EXIT
 
 LAUNCHER_PATH="${HOME}/.local/bin/pytpo-terminal"
 DESKTOP_FILE="${HOME}/.local/share/applications/pytpo-terminal.desktop"

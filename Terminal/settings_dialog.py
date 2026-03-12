@@ -3,16 +3,18 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 from typing import Any
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from TPOPyside.dialogs import FieldBinding, SchemaField, SchemaPage, SchemaSection, SchemaSettingsDialog, SettingsSchema
 
-from .integration import IntegrationScriptResult, install_default_terminal, uninstall_default_terminal
+from .integration import scripts_dir
+from .paths import repo_root
 from .session import TerminalSessionWidget
 from .settings import (
     DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE,
@@ -26,6 +28,7 @@ from .theme_manager import TerminalThemeManager
 TERMINAL_SCOPE = "terminal"
 _PROMPT_EDITOR_WIDGET_CLASS: type[QWidget] | None = None
 _PROMPT_EDITOR_LOAD_ERROR: str | None = None
+_INTEGRATION_DONE_MARKER = "__PYTPO_INTEGRATION_DONE__:"
 
 
 def _resolve_integration_setting(
@@ -50,31 +53,27 @@ def _resolve_integration_setting(
     return text or fallback
 
 
-def _show_integration_result(
-    parent: QWidget,
+def _build_sudo_script_command(
     *,
-    title: str,
-    result: IntegrationScriptResult,
-) -> None:
-    lines = [f"Command: {' '.join(result.command)}", f"Return code: {result.returncode}"]
-    if result.stdout:
-        lines.extend(["", "stdout:", result.stdout])
-    if result.stderr:
-        lines.extend(["", "stderr:", result.stderr])
-    message = "\n".join(lines).strip()
-    if result.ok:
-        QMessageBox.information(parent, title, message or "Command completed.")
-        return
-    QMessageBox.warning(parent, title, message or "Command failed.")
-
-
-def _extract_sudo_commands(output: str) -> list[str]:
-    commands: list[str] = []
-    for line in str(output or "").splitlines():
-        stripped = str(line or "").strip()
-        if stripped.startswith("sudo "):
-            commands.append(stripped)
-    return commands
+    script_name: str,
+    launcher_path: str,
+    desktop_file: str,
+) -> str | None:
+    script_path = (scripts_dir() / str(script_name or "").strip()).resolve()
+    if not script_path.is_file():
+        return None
+    parts = [
+        "sudo",
+        "bash",
+        str(script_path),
+        "--repo-root",
+        str(repo_root()),
+        "--launcher-path",
+        str(Path(str(launcher_path or "").strip()).expanduser()),
+        "--desktop-file",
+        str(Path(str(desktop_file or "").strip()).expanduser()),
+    ]
+    return " ".join(shlex.quote(str(part)) for part in parts if str(part or "").strip())
 
 
 def _default_shell_path() -> str:
@@ -97,11 +96,13 @@ def _default_shell_path() -> str:
 
 
 class _SudoCommandTerminalDialog(QDialog):
-    def __init__(self, commands: list[str], parent: QWidget | None = None) -> None:
+    def __init__(self, *, command: str, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Run Elevated Commands")
+        self.setWindowTitle(str(title or "Run Elevated Commands"))
         self.resize(1040, 620)
-        self._commands = [str(item or "").strip() for item in list(commands) if str(item or "").strip()]
+        self._command = str(command or "").strip()
+        self._completed = False
+        self._output_tail = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -113,6 +114,9 @@ class _SudoCommandTerminalDialog(QDialog):
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        self._status = QLabel("Running installer command...")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
 
         self._terminal = TerminalSessionWidget(
             title="Integration Setup",
@@ -124,51 +128,83 @@ class _SudoCommandTerminalDialog(QDialog):
             parent=self,
         )
         layout.addWidget(self._terminal, 1)
+        self._terminal.outputReceived.connect(self._on_output_received)
 
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
-        run_btn = QPushButton("Run Commands", self)
-        controls.addButton(run_btn, QDialogButtonBox.ButtonRole.ActionRole)
-        run_btn.clicked.connect(self.run_commands)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
 
-        QTimer.singleShot(120, self.run_commands)
+        QTimer.singleShot(120, self.run_command)
 
-    def run_commands(self) -> None:
-        if not self._commands:
+    def run_command(self) -> None:
+        if not self._command:
+            self._status.setText("No command was generated for this operation.")
             return
         try:
-            self._terminal.post("\n".join(self._commands))
+            self._terminal.post(self._command)
             self._terminal.setFocus()
         except Exception:
+            self._status.setText("Failed to start installer command.")
             return
 
+    def _on_output_received(self, payload: bytes) -> None:
+        if self._completed:
+            return
+        chunk = bytes(payload or b"").decode("utf-8", errors="ignore")
+        if not chunk:
+            return
+        self._output_tail += chunk
+        if len(self._output_tail) > 8192:
+            self._output_tail = self._output_tail[-4096:]
+        marker_index = self._output_tail.rfind(_INTEGRATION_DONE_MARKER)
+        if marker_index < 0:
+            return
+        suffix = self._output_tail[marker_index + len(_INTEGRATION_DONE_MARKER) :]
+        digits = ""
+        for ch in suffix:
+            if ch.isdigit():
+                digits += ch
+                continue
+            break
+        if not digits:
+            return
+        self._completed = True
+        return_code = int(digits)
+        if return_code == 0:
+            self._status.setText("Integration script finished successfully.")
+        else:
+            self._status.setText(f"Integration script failed (exit {return_code}).")
+        self._terminal.setEnabled(False)
 
-def _offer_sudo_commands(dialog: SchemaSettingsDialog, commands: list[str]) -> None:
-    if not commands:
-        return
-    message = (
-        "System default terminal update requires sudo.\n\n"
-        "Open these commands in an interactive terminal dialog so you can enter your password there?"
+
+def _run_sudo_script_dialog(
+    *,
+    dialog: SchemaSettingsDialog,
+    title: str,
+    script_name: str,
+    launcher_path: str,
+    desktop_file: str,
+) -> None:
+    command = _build_sudo_script_command(
+        script_name=script_name,
+        launcher_path=launcher_path,
+        desktop_file=desktop_file,
     )
-    response = QMessageBox.question(
-        dialog,
-        "Run Elevated Commands",
-        message,
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        QMessageBox.StandardButton.Yes,
-    )
-    if response != QMessageBox.StandardButton.Yes:
+    if not command:
+        QMessageBox.warning(
+            dialog,
+            "Missing Script",
+            f"Could not find integration script: {script_name}",
+        )
         return
     try:
-        runner = _SudoCommandTerminalDialog(commands, parent=dialog)
+        runner = _SudoCommandTerminalDialog(command=command, title=title, parent=dialog)
         runner.exec()
     except Exception:
         QMessageBox.warning(
             dialog,
             "Could Not Open Terminal",
-            "Could not open the elevated-commands terminal.\n\nRun these commands manually:\n"
-            + "\n".join(commands),
+            f"Could not open the installer terminal.\n\nRun manually:\n{command}",
         )
 
 
@@ -727,12 +763,13 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
                 "default_terminal_desktop_file",
                 DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE,
             )
-            result = install_default_terminal(
+            _run_sudo_script_dialog(
+                dialog=dialog,
+                title="Install Integration",
+                script_name="install_default_terminal.sh",
                 launcher_path=launcher_path,
                 desktop_file=desktop_file,
             )
-            _show_integration_result(dialog, title="Install Integration", result=result)
-            _offer_sudo_commands(dialog, _extract_sudo_commands(result.stdout))
 
         def _uninstall_integration_action(_field, dialog: SchemaSettingsDialog) -> None:
             launcher_path = _resolve_integration_setting(
@@ -747,12 +784,13 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
                 "default_terminal_desktop_file",
                 defaults.default_terminal_desktop_file,
             )
-            result = uninstall_default_terminal(
+            _run_sudo_script_dialog(
+                dialog=dialog,
+                title="Uninstall Integration",
+                script_name="uninstall_default_terminal.sh",
                 launcher_path=launcher_path,
                 desktop_file=desktop_file,
             )
-            _show_integration_result(dialog, title="Uninstall Integration", result=result)
-            _offer_sudo_commands(dialog, _extract_sudo_commands(result.stdout))
 
         super().__init__(
             backend=backend,
