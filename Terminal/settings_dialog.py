@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from TPOPyside.dialogs import FieldBinding, SchemaField, SchemaPage, SchemaSection, SchemaSettingsDialog, SettingsSchema
 
 from .integration import IntegrationScriptResult, install_default_terminal, uninstall_default_terminal
+from .session import TerminalSessionWidget
 from .settings import (
     DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE,
     DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH,
@@ -74,47 +77,71 @@ def _extract_sudo_commands(output: str) -> list[str]:
     return commands
 
 
-def _find_terminal_window(dialog: SchemaSettingsDialog) -> QWidget | None:
-    current = dialog.parentWidget()
-    while isinstance(current, QWidget):
-        if hasattr(current, "workspace") and hasattr(current, "open_new_tab"):
-            return current
-        current = current.parentWidget()
-    return None
+def _default_shell_path() -> str:
+    env_shell = str(os.environ.get("SHELL") or "").strip()
+    if " " in env_shell:
+        env_shell = env_shell.split(" ", 1)[0].strip()
+    candidates: list[str] = []
+    if env_shell:
+        candidates.append(env_shell)
+    for shell_name in ("bash", "zsh", "sh"):
+        resolved = shutil.which(shell_name)
+        if resolved:
+            candidates.append(resolved)
+    candidates.append("/bin/sh")
+    for candidate in candidates:
+        expanded = str(Path(candidate).expanduser())
+        if Path(expanded).is_file() and os.access(expanded, os.X_OK):
+            return expanded
+    return "/bin/sh"
 
 
-def _open_commands_in_new_terminal_tab(dialog: SchemaSettingsDialog, commands: list[str]) -> bool:
-    window = _find_terminal_window(dialog)
-    if window is None:
-        return False
-    opener = getattr(window, "open_new_tab", None)
-    workspace = getattr(window, "workspace", None)
-    if not callable(opener) or workspace is None:
-        return False
+class _SudoCommandTerminalDialog(QDialog):
+    def __init__(self, commands: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Run Elevated Commands")
+        self.resize(1040, 620)
+        self._commands = [str(item or "").strip() for item in list(commands) if str(item or "").strip()]
 
-    try:
-        opener()
-    except Exception:
-        return False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
-    command_text = "\n".join(str(item or "").strip() for item in commands if str(item or "").strip())
-    if not command_text:
-        return False
+        intro = QLabel(
+            "System integration needs elevated commands.\n"
+            "Use this terminal to enter your sudo password when prompted."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
-    def _post_to_active_session() -> None:
-        current_session_getter = getattr(workspace, "current_session", None)
-        if not callable(current_session_getter):
-            return
-        session = current_session_getter()
-        if session is None or not hasattr(session, "post"):
+        self._terminal = TerminalSessionWidget(
+            title="Integration Setup",
+            shell_path=_default_shell_path(),
+            login_shell=True,
+            history_lines=5000,
+            show_toolbar=True,
+            cwd=str(Path.home()),
+            parent=self,
+        )
+        layout.addWidget(self._terminal, 1)
+
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        run_btn = QPushButton("Run Commands", self)
+        controls.addButton(run_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        run_btn.clicked.connect(self.run_commands)
+        controls.rejected.connect(self.reject)
+        layout.addWidget(controls)
+
+        QTimer.singleShot(120, self.run_commands)
+
+    def run_commands(self) -> None:
+        if not self._commands:
             return
         try:
-            session.post(command_text)
+            self._terminal.post("\n".join(self._commands))
+            self._terminal.setFocus()
         except Exception:
             return
-
-    QTimer.singleShot(0, _post_to_active_session)
-    return True
 
 
 def _offer_sudo_commands(dialog: SchemaSettingsDialog, commands: list[str]) -> None:
@@ -122,7 +149,7 @@ def _offer_sudo_commands(dialog: SchemaSettingsDialog, commands: list[str]) -> N
         return
     message = (
         "System default terminal update requires sudo.\n\n"
-        "Open these commands in a new terminal tab so you can enter your password there?"
+        "Open these commands in an interactive terminal dialog so you can enter your password there?"
     )
     response = QMessageBox.question(
         dialog,
@@ -133,14 +160,16 @@ def _offer_sudo_commands(dialog: SchemaSettingsDialog, commands: list[str]) -> N
     )
     if response != QMessageBox.StandardButton.Yes:
         return
-    if _open_commands_in_new_terminal_tab(dialog, commands):
-        return
-    QMessageBox.warning(
-        dialog,
-        "Could Not Open Terminal Tab",
-        "Could not open a terminal tab automatically.\n\nRun these commands manually:\n"
-        + "\n".join(commands),
-    )
+    try:
+        runner = _SudoCommandTerminalDialog(commands, parent=dialog)
+        runner.exec()
+    except Exception:
+        QMessageBox.warning(
+            dialog,
+            "Could Not Open Terminal",
+            "Could not open the elevated-commands terminal.\n\nRun these commands manually:\n"
+            + "\n".join(commands),
+        )
 
 
 class TerminalSettingsBackend:

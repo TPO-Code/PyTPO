@@ -94,7 +94,7 @@ Example:
   - Installed desktop entry used for integration.
 - Note for Pop!_OS / Ubuntu:
   - True system default terminal uses `update-alternatives` (`x-terminal-emulator`) and requires an elevated step.
-  - Settings install/uninstall actions can offer to open the required `sudo` commands in a new terminal tab.
+  - Settings install/uninstall actions can offer to open the required `sudo` commands in an interactive terminal dialog.
 
 ## Prompt Editor Page
 
