@@ -20,3 +20,7 @@ dependencies = [
 pytpo = "main:main"
 pytpo-terminal = "Terminal.app:main"
 pytpo-text-editor = "text_editor:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
