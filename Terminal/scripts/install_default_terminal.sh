@@ -97,7 +97,7 @@ fi
 if command -v gsettings >/dev/null 2>&1; then
     if gsettings list-schemas 2>/dev/null | grep -qx "org.gnome.desktop.default-applications.terminal"; then
         gsettings set org.gnome.desktop.default-applications.terminal exec "${LAUNCHER_PATH}" >/dev/null 2>&1 || true
-        gsettings set org.gnome.desktop.default-applications.terminal exec-arg "" >/dev/null 2>&1 || true
+        gsettings set org.gnome.desktop.default-applications.terminal exec-arg "--cwd" >/dev/null 2>&1 || true
     fi
 fi
 
