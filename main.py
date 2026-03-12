@@ -131,8 +131,9 @@ def _startup_project_from_cli_or_settings(argv: list[str]) -> str | None:
     return None
 
 
-if __name__ == "__main__":
-    cli_args, force_no_project = _split_startup_args(sys.argv[1:])
+def main(argv: list[str] | None = None) -> int:
+    runtime_args = list(sys.argv[1:] if argv is None else argv)
+    cli_args, force_no_project = _split_startup_args(runtime_args)
     startup_project = None if force_no_project else _startup_project_from_cli_or_settings(cli_args)
     start_no_project_mode = startup_project is None
     if start_no_project_mode:
@@ -146,7 +147,7 @@ if __name__ == "__main__":
             pass
     target_project = startup_project or PythonIDE.no_project_instance_key()
     if request_project_activation(target_project):
-        sys.exit(0)
+        return 0
 
     app = QApplication([sys.argv[0], *cli_args])
     configure_shared_file_dialog_defaults()
@@ -178,4 +179,8 @@ if __name__ == "__main__":
         except Exception:
             pass
         os._exit(exit_code)
-    sys.exit(exit_code)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

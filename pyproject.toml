@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pytpo = "main:main"
+pytpo = "pytpo:main"
 pytpo-terminal = "Terminal.app:main"
 pytpo-text-editor = "text_editor:main"
 
