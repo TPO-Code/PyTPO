@@ -17,9 +17,25 @@ dependencies = [
 ]
 
 [project.scripts]
-pytpo = "main:main"
+pytpo = "pytpo:main"
 pytpo-terminal = "Terminal.app:main"
 pytpo-text-editor = "text_editor:main"
+
+[tool.setuptools]
+py-modules = ["main", "terminal_app_main", "text_editor_main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "pytpo*",
+    "src*",
+    "TPOPyside*",
+    "Terminal*",
+    "text_editor*",
+    "DL_Manager*",
+    "tdock*",
+]
+exclude = ["tests*", "test_projects*"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
