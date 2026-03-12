@@ -51,6 +51,14 @@ class ProjectLifecycleController:
             return 10.0
         return 5.0
 
+    def _ide_entry_script(self) -> Path:
+        root = Path(__file__).resolve().parents[3]
+        for name in ("pytpo.py", "main.py"):
+            candidate = root / name
+            if candidate.is_file():
+                return candidate
+        return root / "pytpo.py"
+
     def new_file(self):
         if self.ide._block_if_project_read_only("Create file"):
             return
@@ -212,7 +220,7 @@ class ProjectLifecycleController:
         return True
 
     def _launch_project_window(self, project_path: str) -> bool:
-        main_script = Path(__file__).resolve().parents[3] / "main.py"
+        main_script = self._ide_entry_script()
         python_bin = self._ide_python_executable()
         ok = QProcess.startDetached(
             python_bin,
@@ -225,7 +233,7 @@ class ProjectLifecycleController:
         return True
 
     def _launch_no_project_window(self) -> bool:
-        main_script = Path(__file__).resolve().parents[3] / "main.py"
+        main_script = self._ide_entry_script()
         python_bin = self._ide_python_executable()
         ok = QProcess.startDetached(
             python_bin,

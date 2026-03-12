@@ -22,7 +22,7 @@ pytpo-terminal = "Terminal.app:main"
 pytpo-text-editor = "text_editor:main"
 
 [tool.setuptools]
-py-modules = ["main", "terminal_app_main", "text_editor_main"]
+py-modules = ["main", "pytpo", "terminal_app_main", "text_editor_main"]
 
 [tool.setuptools.packages.find]
 where = ["."]
