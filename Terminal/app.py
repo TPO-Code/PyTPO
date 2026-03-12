@@ -13,6 +13,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument(
         "--cwd",
+        "--working-directory",
         dest="cwd",
         default="",
         help="Working directory to use for new terminal tabs.",

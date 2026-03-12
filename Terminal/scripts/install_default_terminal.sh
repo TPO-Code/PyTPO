@@ -40,13 +40,19 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT}"
 CWD=""
 
-if [[ "\${1-}" == "--cwd" ]]; then
+if [[ "\${1-}" == "--cwd" || "\${1-}" == "--working-directory" ]]; then
     CWD="\${2-}"
     if [[ \$# -ge 2 ]]; then
         shift 2
     else
         shift 1
     fi
+elif [[ "\${1-}" == --cwd=* ]]; then
+    CWD="\${1#*=}"
+    shift 1
+elif [[ "\${1-}" == --working-directory=* ]]; then
+    CWD="\${1#*=}"
+    shift 1
 elif [[ -n "\${1-}" ]]; then
     CANDIDATE="\$1"
     if [[ -d "\${CANDIDATE}" ]]; then
