@@ -27,7 +27,6 @@ py-modules = ["main", "terminal_app_main", "text_editor_main"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "pytpo*",
     "src*",
     "TPOPyside*",
     "Terminal*",
