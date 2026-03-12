@@ -86,6 +86,13 @@ Example:
 - `theme_name` (string)
   - Any available theme name discovered from `src/themes`.
 
+## System Integration
+
+- `default_terminal_launcher_path` (string path)
+  - Installed launcher command used for desktop/default-terminal integration (Linux, best effort).
+- `default_terminal_desktop_file` (string path)
+  - Installed desktop entry used for integration.
+
 ## Prompt Editor Page
 
 - Custom settings page embeds `Terminal/prompt-editor.py` as a widget.

@@ -10,6 +10,12 @@ uv run python terminal_app_main.py
 
 The app opens `Terminal/main_window.py` and loads settings from `.terminal/settings.json`.
 
+You can override startup/new-tab working directory from CLI:
+
+```bash
+uv run python terminal_app_main.py --cwd /path/to/project
+```
+
 ## Basic Navigation
 
 - `Ctrl+T`: New terminal tab
@@ -41,3 +47,4 @@ By default the app can warn before closing a tab that appears to have an active 
 3. Set startup directory and startup tab count.
 4. Set your preferred font and colors.
 5. Add quick commands/templates for your normal workflows.
+6. Optional: open **Settings -> System Integration** to install/remove desktop default-terminal integration.

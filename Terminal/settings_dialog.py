@@ -5,16 +5,63 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from TPOPyside.dialogs import FieldBinding, SchemaField, SchemaPage, SchemaSection, SchemaSettingsDialog, SettingsSchema
 
-from .settings import DEFAULT_THEME_NAME, TerminalSettings, TerminalSettingsStore
+from .integration import IntegrationScriptResult, install_default_terminal, uninstall_default_terminal
+from .settings import (
+    DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE,
+    DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH,
+    DEFAULT_THEME_NAME,
+    TerminalSettings,
+    TerminalSettingsStore,
+)
 from .theme_manager import TerminalThemeManager
 
 TERMINAL_SCOPE = "terminal"
 _PROMPT_EDITOR_WIDGET_CLASS: type[QWidget] | None = None
 _PROMPT_EDITOR_LOAD_ERROR: str | None = None
+
+
+def _resolve_integration_setting(
+    dialog: SchemaSettingsDialog,
+    backend: TerminalSettingsBackend,
+    key: str,
+    fallback: str,
+) -> str:
+    collector = getattr(dialog, "_collect_all_widget_values", None)
+    if callable(collector):
+        try:
+            values_by_scope = collector()
+        except Exception:
+            values_by_scope = {}
+        for item_key, value in list(values_by_scope.get(TERMINAL_SCOPE, [])):
+            if str(item_key) != str(key):
+                continue
+            text = str(value or "").strip()
+            return text or fallback
+    value = backend.get(key, scope_preference=TERMINAL_SCOPE, default=fallback)
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _show_integration_result(
+    parent: QWidget,
+    *,
+    title: str,
+    result: IntegrationScriptResult,
+) -> None:
+    lines = [f"Command: {' '.join(result.command)}", f"Return code: {result.returncode}"]
+    if result.stdout:
+        lines.extend(["", "stdout:", result.stdout])
+    if result.stderr:
+        lines.extend(["", "stderr:", result.stderr])
+    message = "\n".join(lines).strip()
+    if result.ok:
+        QMessageBox.information(parent, title, message or "Command completed.")
+        return
+    QMessageBox.warning(parent, title, message or "Command failed.")
 
 
 class TerminalSettingsBackend:
@@ -473,7 +520,63 @@ def _build_schema() -> SettingsSchema:
                         ],
                     ),
                 ],
-            )
+            ),
+            SchemaPage(
+                id="terminal.integration",
+                category="Terminal",
+                title="System Integration",
+                scope=TERMINAL_SCOPE,
+                sections=[
+                    SchemaSection(
+                        title="Default Terminal Emulator",
+                        description=(
+                            "Install or remove Linux desktop integration for PyTPO Terminal. "
+                            "The launcher accepts '--cwd <path>' (or a positional file/folder path) "
+                            "so new tabs start in the requested location."
+                        ),
+                        fields=[
+                            SchemaField(
+                                id="default_terminal_launcher_path",
+                                key="default_terminal_launcher_path",
+                                label="Launcher path",
+                                type="lineedit",
+                                scope=TERMINAL_SCOPE,
+                                default=defaults.default_terminal_launcher_path,
+                                description="Shell command path installed by setup script.",
+                            ),
+                            SchemaField(
+                                id="default_terminal_desktop_file",
+                                key="default_terminal_desktop_file",
+                                label="Desktop file path",
+                                type="lineedit",
+                                scope=TERMINAL_SCOPE,
+                                default=defaults.default_terminal_desktop_file,
+                                description="Desktop entry installed by setup script.",
+                            ),
+                            SchemaField(
+                                id="default_terminal_actions",
+                                key="default_terminal_actions",
+                                label="Integration actions",
+                                type="button_row",
+                                scope=TERMINAL_SCOPE,
+                                actions=[
+                                    {
+                                        "id": "install_default_terminal_integration",
+                                        "label": "Install",
+                                        "description": "Install launcher and desktop integration.",
+                                    },
+                                    {
+                                        "id": "uninstall_default_terminal_integration",
+                                        "label": "Uninstall",
+                                        "description": "Remove launcher and desktop integration.",
+                                    },
+                                ],
+                                default=None,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
         ]
     )
 
@@ -487,11 +590,51 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
         on_applied=None,
         parent: QWidget | None = None,
     ) -> None:
+        defaults = TerminalSettings()
+
         def _theme_options_provider(_field, _dialog):
             names = list(theme_manager.available_themes())
             if DEFAULT_THEME_NAME not in names:
                 names.insert(0, DEFAULT_THEME_NAME)
             return [{"label": name, "value": name} for name in names]
+
+        def _install_integration_action(_field, dialog: SchemaSettingsDialog) -> None:
+            launcher_path = _resolve_integration_setting(
+                dialog,
+                backend,
+                "default_terminal_launcher_path",
+                DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH,
+            )
+            desktop_file = _resolve_integration_setting(
+                dialog,
+                backend,
+                "default_terminal_desktop_file",
+                DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE,
+            )
+            result = install_default_terminal(
+                launcher_path=launcher_path,
+                desktop_file=desktop_file,
+            )
+            _show_integration_result(dialog, title="Install Integration", result=result)
+
+        def _uninstall_integration_action(_field, dialog: SchemaSettingsDialog) -> None:
+            launcher_path = _resolve_integration_setting(
+                dialog,
+                backend,
+                "default_terminal_launcher_path",
+                defaults.default_terminal_launcher_path,
+            )
+            desktop_file = _resolve_integration_setting(
+                dialog,
+                backend,
+                "default_terminal_desktop_file",
+                defaults.default_terminal_desktop_file,
+            )
+            result = uninstall_default_terminal(
+                launcher_path=launcher_path,
+                desktop_file=desktop_file,
+            )
+            _show_integration_result(dialog, title="Uninstall Integration", result=result)
 
         super().__init__(
             backend=backend,
@@ -508,6 +651,10 @@ class TerminalSettingsDialog(SchemaSettingsDialog):
             restore_button_text="Restore Defaults",
             field_factories={
                 "prompt_editor_widget": _create_prompt_editor_binding,
+            },
+            action_handlers={
+                "install_default_terminal_integration": _install_integration_action,
+                "uninstall_default_terminal_integration": _uninstall_integration_action,
             },
             options_providers={
                 "terminal_theme_options": _theme_options_provider,

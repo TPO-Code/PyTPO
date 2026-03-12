@@ -27,6 +27,7 @@ Core capabilities:
 - Embedded prompt editor page in terminal settings
 - ANSI palette overrides
 - Optional close confirmation for active jobs
+- Optional Linux desktop/default-terminal integration installer
 
 ## State and Config Files
 

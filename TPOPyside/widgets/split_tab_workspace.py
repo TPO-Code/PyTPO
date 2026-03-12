@@ -65,6 +65,16 @@ def _safe_signal_disconnect(signal_obj: Any, slot: Any) -> None:
         pass
 
 
+def _is_live_qwidget(widget: object) -> bool:
+    if not isinstance(widget, QWidget):
+        return False
+    try:
+        widget.parentWidget()
+    except RuntimeError:
+        return False
+    return True
+
+
 class DropOverlay(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -320,40 +330,57 @@ class SplitterTabWorkspace(QWidget):
     def is_editor_widget(self, widget: object) -> bool:
         return isinstance(widget, QWidget) and bool(_editor_id(widget))
 
+    def _is_workspace_editor(self, widget: object) -> bool:
+        return _is_live_qwidget(widget) and self.is_editor_widget(widget)
+
+    def _is_workspace_tabs(self, tabs: object) -> bool:
+        if not isinstance(tabs, WorkspaceTabs) or not _is_live_qwidget(tabs):
+            return False
+        try:
+            return tabs.workspace is self
+        except RuntimeError:
+            return False
+
     def notify_state_changed(self) -> None:
         self.stateChanged.emit()
 
     def all_tabs(self) -> list[WorkspaceTabs]:
-        return self.findChildren(WorkspaceTabs)
+        return [tabs for tabs in self.findChildren(WorkspaceTabs) if self._is_workspace_tabs(tabs)]
 
     def all_editors(self) -> list[QWidget]:
         editors: list[QWidget] = []
         for tabs in self.all_tabs():
             for index in range(tabs.count()):
                 editor = tabs.widget(index)
-                if self.is_editor_widget(editor):
+                if self._is_workspace_editor(editor):
                     editors.append(editor)
         return editors
 
     def _tabs_ancestor(self, widget: QWidget | None) -> WorkspaceTabs | None:
         current = widget
-        while isinstance(current, QWidget):
-            if isinstance(current, WorkspaceTabs) and current.workspace is self:
+        while _is_live_qwidget(current):
+            if self._is_workspace_tabs(current):
                 return current
-            current = current.parentWidget()
+            try:
+                current = current.parentWidget()
+            except RuntimeError:
+                return None
         return None
 
     def _editor_ancestor(self, widget: QWidget | None) -> QWidget | None:
         current = widget
-        while isinstance(current, QWidget):
-            if self.is_editor_widget(current):
+        while _is_live_qwidget(current):
+            if self._is_workspace_editor(current):
                 return current
-            current = current.parentWidget()
+            try:
+                current = current.parentWidget()
+            except RuntimeError:
+                return None
         return None
 
     def _on_app_focus_changed(self, _old: QWidget | None, new: QWidget | None) -> None:
         focused_editor = self._editor_ancestor(new)
-        if not isinstance(focused_editor, QWidget) or not self.is_editor_widget(focused_editor):
+        if not self._is_workspace_editor(focused_editor):
             return
         if not isinstance(self._tabs_for_editor(focused_editor), WorkspaceTabs):
             return
@@ -363,57 +390,75 @@ class SplitterTabWorkspace(QWidget):
         self.notify_state_changed()
 
     def set_active_editor(self, editor: object) -> None:
-        if isinstance(editor, QWidget) and self.is_editor_widget(editor):
+        if self._is_workspace_editor(editor):
             self._active_editor = editor
+        elif editor is self._active_editor:
+            self._active_editor = None
         self.notify_state_changed()
 
     def current_editor(self) -> QWidget | None:
         focus_widget = QApplication.focusWidget()
         focused_editor = self._editor_ancestor(focus_widget)
-        if isinstance(focused_editor, QWidget) and self.is_editor_widget(focused_editor):
+        if self._is_workspace_editor(focused_editor):
             self._active_editor = focused_editor
             return focused_editor
 
         focused_tabs = self._tabs_ancestor(focus_widget)
         if isinstance(focused_tabs, WorkspaceTabs):
             focused_current = focused_tabs.currentWidget()
-            if isinstance(focused_current, QWidget) and self.is_editor_widget(focused_current):
+            if self._is_workspace_editor(focused_current):
                 self._active_editor = focused_current
                 return focused_current
 
-        if isinstance(self._active_editor, QWidget) and self.is_editor_widget(self._active_editor):
+        if self._is_workspace_editor(self._active_editor):
             return self._active_editor
+        self._active_editor = None
         for tabs in self.all_tabs():
             editor = tabs.currentWidget()
-            if isinstance(editor, QWidget) and self.is_editor_widget(editor):
+            if self._is_workspace_editor(editor):
                 self._active_editor = editor
                 return editor
         return None
 
     def _tabs_for_editor(self, editor: QWidget | None) -> WorkspaceTabs | None:
-        if not isinstance(editor, QWidget) or not self.is_editor_widget(editor):
+        if not self._is_workspace_editor(editor):
+            if editor is self._active_editor:
+                self._active_editor = None
             return None
         for tabs in self.all_tabs():
-            if tabs.indexOf(editor) >= 0:
-                return tabs
+            try:
+                if tabs.indexOf(editor) >= 0:
+                    return tabs
+            except RuntimeError:
+                if editor is self._active_editor:
+                    self._active_editor = None
+                return None
         return None
 
     def _current_tabs(self) -> WorkspaceTabs:
         focused_tabs = self._tabs_ancestor(QApplication.focusWidget())
-        if isinstance(focused_tabs, WorkspaceTabs):
+        if self._is_workspace_tabs(focused_tabs):
             return focused_tabs
 
-        if isinstance(self._active_editor, QWidget) and self.is_editor_widget(self._active_editor):
+        if self._is_workspace_editor(self._active_editor):
             active_tabs = self._tabs_for_editor(self._active_editor)
-            if isinstance(active_tabs, WorkspaceTabs):
+            if self._is_workspace_tabs(active_tabs):
                 return active_tabs
+        else:
+            self._active_editor = None
 
         for tabs in self.all_tabs():
             if tabs.count() > 0:
                 return tabs
+        if self._is_workspace_tabs(self._primary_tabs):
+            return self._primary_tabs
+        self._primary_tabs = self.create_tabs(self.root_splitter)
+        self.root_splitter.addWidget(self._primary_tabs)
         return self._primary_tabs
 
     def _focus_editor(self, editor: QWidget) -> None:
+        if not self._is_workspace_editor(editor):
+            return
         tabs = self._tabs_for_editor(editor)
         if isinstance(tabs, WorkspaceTabs):
             tabs.setCurrentWidget(editor)
@@ -421,16 +466,20 @@ class SplitterTabWorkspace(QWidget):
         self.set_active_editor(editor)
 
     def add_editor(self, editor: QWidget, *, tabs: WorkspaceTabs | None = None) -> None:
-        target_tabs = tabs if isinstance(tabs, WorkspaceTabs) and tabs.workspace is self else self._current_tabs()
+        target_tabs = tabs if self._is_workspace_tabs(tabs) else self._current_tabs()
+        if not self._is_workspace_tabs(target_tabs):
+            target_tabs = self._current_tabs()
         target_tabs.add_editor(editor)
         self.notify_state_changed()
 
     def confirm_close_editor(self, editor: QWidget, parent: QWidget | None = None) -> bool:
         del parent
-        return self.is_editor_widget(editor)
+        return self._is_workspace_editor(editor)
 
     def close_editor(self, editor: QWidget | None, parent: QWidget | None = None) -> bool:
-        if not isinstance(editor, QWidget) or not self.is_editor_widget(editor):
+        if not self._is_workspace_editor(editor):
+            if editor is self._active_editor:
+                self._active_editor = None
             return True
         if not self.confirm_close_editor(editor, parent):
             return False
@@ -553,7 +602,7 @@ class SplitterTabWorkspace(QWidget):
         for tabs in self.all_tabs():
             for index in range(tabs.count()):
                 editor = tabs.widget(index)
-                if not self.is_editor_widget(editor):
+                if not self._is_workspace_editor(editor):
                     continue
                 if _editor_id(editor) == wanted:
                     return editor, tabs

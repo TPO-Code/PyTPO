@@ -33,6 +33,8 @@ DEFAULT_BACKGROUND_TINT_COLOR = "#000000"
 DEFAULT_BACKGROUND_TINT_STRENGTH = 35
 DEFAULT_BACKGROUND_ALPHA_MODE = "preserve"
 DEFAULT_BACKGROUND_SIZE_MODE = "fit"
+DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH = str(Path.home() / ".local/bin/pytpo-terminal")
+DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE = str(Path.home() / ".local/share/applications/pytpo-terminal.desktop")
 
 _ALLOWED_SHELL_MODES = {"auto", "bash", "zsh", "sh", "custom"}
 _ALLOWED_BACKGROUND_ALPHA_MODES = {"preserve", "flatten"}
@@ -83,6 +85,8 @@ class TerminalSettings:
     background_tint_strength: int = DEFAULT_BACKGROUND_TINT_STRENGTH
     background_alpha_mode: str = DEFAULT_BACKGROUND_ALPHA_MODE
     background_size_mode: str = DEFAULT_BACKGROUND_SIZE_MODE
+    default_terminal_launcher_path: str = DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH
+    default_terminal_desktop_file: str = DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE
     ansi_colors: dict[str, str] = field(default_factory=dict)
     quick_commands: list[dict[str, Any]] = field(default_factory=list)
     command_templates: list[dict[str, Any]] = field(default_factory=list)
@@ -121,6 +125,14 @@ class TerminalSettings:
             background_tint_strength=_normalize_tint_strength(data.get("background_tint_strength")),
             background_alpha_mode=_normalize_alpha_mode(data.get("background_alpha_mode")),
             background_size_mode=_normalize_background_size_mode(data.get("background_size_mode")),
+            default_terminal_launcher_path=(
+                _normalize_path_string(data.get("default_terminal_launcher_path"))
+                or DEFAULT_DEFAULT_TERMINAL_LAUNCHER_PATH
+            ),
+            default_terminal_desktop_file=(
+                _normalize_path_string(data.get("default_terminal_desktop_file"))
+                or DEFAULT_DEFAULT_TERMINAL_DESKTOP_FILE
+            ),
             ansi_colors=_normalize_ansi_colors(data.get("ansi_colors")),
             quick_commands=_normalize_command_list(data.get("quick_commands")),
             command_templates=_normalize_command_list(data.get("command_templates")),
@@ -158,6 +170,8 @@ class TerminalSettings:
             "background_tint_strength": _normalize_tint_strength(self.background_tint_strength),
             "background_alpha_mode": _normalize_alpha_mode(self.background_alpha_mode),
             "background_size_mode": _normalize_background_size_mode(self.background_size_mode),
+            "default_terminal_launcher_path": _normalize_path_string(self.default_terminal_launcher_path),
+            "default_terminal_desktop_file": _normalize_path_string(self.default_terminal_desktop_file),
             "ansi_colors": _normalize_ansi_colors(self.ansi_colors),
             "quick_commands": _normalize_command_list(self.quick_commands),
             "command_templates": _normalize_command_list(self.command_templates),

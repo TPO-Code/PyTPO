@@ -26,12 +26,14 @@ class TerminalMainWindow(Window):
         *,
         settings_store: TerminalSettingsStore | None = None,
         theme_manager: TerminalThemeManager | None = None,
+        startup_cwd_override: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(use_native_chrome=False, parent=parent)
         self._settings_store = settings_store or TerminalSettingsStore()
         self._theme_manager = theme_manager or TerminalThemeManager()
         self._settings = self._settings_store.load()
+        self._startup_cwd_override = str(startup_cwd_override or "").strip()
         self._shell_warning_shown = False
         self._startup_cwd_warning_shown = False
 
@@ -219,6 +221,14 @@ class TerminalMainWindow(Window):
         return "/bin/sh"
 
     def _default_cwd_for_new_tab(self) -> str:
+        runtime_override = str(self._startup_cwd_override or "").strip()
+        if runtime_override:
+            runtime_resolved = Path(runtime_override).expanduser()
+            if runtime_resolved.is_file():
+                runtime_resolved = runtime_resolved.parent
+            if runtime_resolved.is_dir():
+                return str(runtime_resolved)
+
         configured = str(self._settings.startup_cwd or "").strip()
         if configured:
             resolved = Path(configured).expanduser()

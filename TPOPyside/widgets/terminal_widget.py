@@ -9,6 +9,7 @@ import struct
 import signal
 import copy
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence
@@ -230,6 +231,20 @@ class CommandSpec:
     dryrun: bool = False
 
 
+class _TerminalByteStream(pyte.ByteStream):
+    """pyte byte stream with CSI S/T mapped for tmux clear semantics."""
+
+    csi = dict(pyte.Stream.csi)
+    csi.update(
+        {
+            "S": "scroll_up",
+            "T": "scroll_down",
+            # xterm private mode save (CSI ? Pm s) is not mapped by pyte.
+            "s": "save_private_mode_values",
+        }
+    )
+
+
 class _TerminalScreenMux:
     """Provide xterm-like alternate-screen behavior on top of pyte screens."""
 
@@ -248,6 +263,8 @@ class _TerminalScreenMux:
         self._active = self._main
         self._alt_active = False
         self._private_mode_callback = private_mode_callback
+        self._private_modes_state: set[int] = set()
+        self._saved_private_modes: dict[int, bool] = {}
 
     def __getattr__(self, name: str):
         target = getattr(self._active, name)
@@ -258,7 +275,21 @@ class _TerminalScreenMux:
         # indirection must re-resolve against the currently active screen.
         def _forward(*args, **kwargs):
             current = getattr(self._active, name)
-            return current(*args, **kwargs)
+            try:
+                return current(*args, **kwargs)
+            except TypeError as exc:
+                # Some pyte private CSI dispatches include private=True for
+                # handlers that do not accept it (for example set_margins).
+                # For set_margins, retry without private to preserve layout
+                # restoration done by some TUIs on exit. For unknown private
+                # variants, ignore them.
+                if "private" in kwargs and "unexpected keyword argument 'private'" in str(exc):
+                    if name == "set_margins":
+                        kwargs = dict(kwargs)
+                        kwargs.pop("private", None)
+                        return current(*args, **kwargs)
+                    return None
+                raise
 
         return _forward
 
@@ -283,6 +314,77 @@ class _TerminalScreenMux:
                 callback(int(mode), bool(enabled))
             except Exception:
                 continue
+
+    def _scroll_region(self, count: int, *, down: bool) -> None:
+        screen = self._active
+        try:
+            amount = int(count or 1)
+        except Exception:
+            amount = 1
+        amount = max(1, amount)
+        lines = max(1, int(getattr(screen, "lines", 1)))
+        columns = max(1, int(getattr(screen, "columns", 1)))
+
+        cursor = getattr(screen, "cursor", None)
+        if cursor is None:
+            return
+        saved_x = int(getattr(cursor, "x", 0))
+        saved_y = int(getattr(cursor, "y", 0))
+
+        margins = getattr(screen, "margins", None)
+        if margins is None:
+            top = 0
+        else:
+            top = int(getattr(margins, "top", 0))
+        top = max(0, min(top, lines - 1))
+
+        cursor.y = top
+        cursor.x = 0
+        if down:
+            screen.insert_lines(amount)
+        else:
+            screen.delete_lines(amount)
+        cursor.y = max(0, min(saved_y, lines - 1))
+        cursor.x = max(0, min(saved_x, columns - 1))
+
+    def scroll_up(self, count: int = 1) -> None:
+        self._scroll_region(count, down=False)
+
+    def scroll_down(self, count: int = 1) -> None:
+        self._scroll_region(count, down=True)
+
+    def save_private_mode_values(self, *mode_values: int, private: bool = False) -> None:
+        if not private:
+            try:
+                self._active.save_cursor()
+            except Exception:
+                return
+            return
+        modes = self._coerce_private_modes(mode_values)
+        if not modes:
+            modes = list(self._private_modes_state)
+        for mode in modes:
+            self._saved_private_modes[int(mode)] = int(mode) in self._private_modes_state
+
+    def set_margins(self, *margin_values: int, private: bool = False, **kwargs) -> None:
+        if private:
+            self.restore_private_mode_values(*margin_values, private=True)
+            return
+        self._active.set_margins(*margin_values, **kwargs)
+
+    def restore_private_mode_values(self, *mode_values: int, private: bool = False) -> None:
+        if not private:
+            self.set_margins(*mode_values)
+            return
+        modes = self._coerce_private_modes(mode_values)
+        if not modes:
+            modes = list(self._saved_private_modes.keys())
+        for mode in modes:
+            enabled = bool(self._saved_private_modes.get(int(mode), False))
+            if enabled:
+                self.set_mode(int(mode), private=True)
+            else:
+                self.reset_mode(int(mode), private=True)
 
     def _switch_to_alt(self, *, clear: bool) -> None:
         if not self._alt_active:
@@ -315,6 +417,7 @@ class _TerminalScreenMux:
             return
 
         private_modes = self._coerce_private_modes(mode_values)
+        self._private_modes_state.update(private_modes)
         self._notify_private_modes(private_modes, enabled=True)
         passthrough: list[int] = []
         for mode in private_modes:
@@ -342,6 +445,8 @@ class _TerminalScreenMux:
             return
 
         private_modes = self._coerce_private_modes(mode_values)
+        for mode in private_modes:
+            self._private_modes_state.discard(mode)
         self._notify_private_modes(private_modes, enabled=False)
         passthrough: list[int] = []
         for mode in private_modes:
@@ -392,6 +497,10 @@ class TerminalWidget(QtWidgets.QWidget):
     AnsiColor = AnsiColor
 
     _MODE_DECCKM = 1 << 5  # DEC private mode ?1 (application cursor keys)
+    _TRACE_ENV = "PYTPO_TERMINAL_TRACE"
+    _TRACE_FILE_ENV = "PYTPO_TERMINAL_TRACE_FILE"
+    _TRACE_DEFAULT_PATH = "/tmp/pytpo-terminal-trace.log"
+    _TRACE_MAX_BYTES = 4096
     _RE_PY_TRACEBACK = re.compile(r'File "([^"]+)", line (\d+)(?:, in .*)?$')
     _RE_CXX_DIAG = re.compile(
         r"^\s*(?P<path>[^:\n][^:\n]*):(?P<line>\d+)(?::(?P<col>\d+))?:\s*(?:fatal\s+error|error)\b",
@@ -483,6 +592,12 @@ class TerminalWidget(QtWidgets.QWidget):
         self._shell_exit_emitted = False
         self._history_limit = int(history_lines)
         self._private_modes_enabled: set[int] = set()
+        self._trace_enabled = self._env_flag(self._TRACE_ENV)
+        self._trace_file_path = (
+            str(os.environ.get(self._TRACE_FILE_ENV, self._TRACE_DEFAULT_PATH) or "").strip()
+            or self._TRACE_DEFAULT_PATH
+        )
+        self._trace_seq = 0
     
         # Terminal geometry tracks viewport size.
         self._virt_cols = 200
@@ -509,6 +624,10 @@ class TerminalWidget(QtWidgets.QWidget):
             os.execvpe(shell, exec_argv, env2)
     
         self._pid, self._fd = pid, fd
+        self._trace_event(
+            "SESSION_START",
+            detail=f"pid={self._pid} shell={shell} term={os.environ.get('TERM', '')}",
+        )
     
         # Nonblocking reads
         fl = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -516,7 +635,7 @@ class TerminalWidget(QtWidgets.QWidget):
     
         # Emulator + stream
         self._screen = self._create_screen(self._virt_cols, self._virt_rows)
-        self._stream = pyte.ByteStream(self._screen)
+        self._stream = _TerminalByteStream(self._screen)
     
         # Seed child size before first paint; a deferred sync aligns to actual viewport geometry.
         self._set_winsize(self._virt_rows, self._virt_cols)
@@ -1189,7 +1308,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._notifier.setEnabled(False)
         try:
             self._screen = self._create_screen(cols, rows)
-            self._stream = pyte.ByteStream(self._screen)
+            self._stream = _TerminalByteStream(self._screen)
             if lines:
                 payload = ("\r\n".join(lines)).encode("utf-8", errors="replace")
                 try:
@@ -1325,6 +1444,14 @@ class TerminalWidget(QtWidgets.QWidget):
         self._mouse_mode_any = 1003 in self._private_modes_enabled
         self._mouse_mode_sgr = 1006 in self._private_modes_enabled
         self._bracket_paste_enabled = 2004 in self._private_modes_enabled
+        self._trace_event(
+            "MODE",
+            detail=(
+                f"{'+' if enabled else '-'}{mode_id} "
+                f"btn={int(self._mouse_mode_btn)} any={int(self._mouse_mode_any)} "
+                f"sgr={int(self._mouse_mode_sgr)} paste={int(self._bracket_paste_enabled)}"
+            ),
+        )
 
     # -------- Async I/O --------
     def _read_ready(self):
@@ -1335,6 +1462,7 @@ class TerminalWidget(QtWidgets.QWidget):
                 self._emit_shell_exited_once(0)
                 return
 
+            self._trace_event("PTY_IN", data=data)
             self.outputReceived.emit(bytes(data))
             self._stream.feed(data)
 
@@ -1353,12 +1481,51 @@ class TerminalWidget(QtWidgets.QWidget):
         if self._shell_exit_emitted:
             return
         self._shell_exit_emitted = True
+        self._trace_event("SESSION_END", detail=f"code={int(code)}")
         self.shellExited.emit(int(code))
 
     def _send(self, b: bytes):
+        self._trace_event("PTY_OUT", data=b)
         try:
             os.write(self._fd, b)
         except OSError:
+            pass
+
+    @staticmethod
+    def _env_flag(name: str) -> bool:
+        value = str(os.environ.get(name, "") or "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _trace_ascii_preview(cls, data: bytes) -> str:
+        sample = bytes(data[: cls._TRACE_MAX_BYTES])
+        return "".join(chr(byte) if 32 <= byte <= 126 else "." for byte in sample)
+
+    @classmethod
+    def _trace_hex_preview(cls, data: bytes) -> str:
+        sample = bytes(data[: cls._TRACE_MAX_BYTES])
+        return sample.hex(" ")
+
+    def _trace_event(self, event: str, *, data: bytes | None = None, detail: str = "") -> None:
+        if not self._trace_enabled:
+            return
+        self._trace_seq += 1
+        timestamp = datetime.now().isoformat(timespec="milliseconds")
+        line = f"{timestamp} #{self._trace_seq} {str(event or '').strip() or 'EVENT'}"
+        if detail:
+            line += f" {detail}"
+        if data is not None:
+            payload = bytes(data)
+            line += f" len={len(payload)}"
+            line += f" hex={self._trace_hex_preview(payload)}"
+            line += f" ascii={self._trace_ascii_preview(payload)}"
+            if len(payload) > self._TRACE_MAX_BYTES:
+                line += f" truncated=+{len(payload) - self._TRACE_MAX_BYTES}"
+        line += "\n"
+        try:
+            with open(self._trace_file_path, "a", encoding="utf-8", errors="replace") as handle:
+                handle.write(line)
+        except Exception:
             pass
 
     def post(self, data: str | bytes):
@@ -1430,9 +1597,11 @@ class TerminalWidget(QtWidgets.QWidget):
 
             hist_sequences = self._history_sequences()
             hist_len = self._history_length(hist_sequences)
-            total_rows = hist_len + max(1, int(self._screen.lines))
+            screen_rows = max(1, int(self._screen.lines))
+            total_rows = hist_len + screen_rows
             if self._view_offset == 0:
-                view_top = hist_len
+                live_rows = max(1, self._live_rows())
+                view_top = hist_len + max(0, live_rows - vis_rows)
             else:
                 view_top = max(0, total_rows - vis_rows - self._view_offset)
             traceback_row_flags = self._visible_traceback_row_flags()
@@ -1787,12 +1956,18 @@ class TerminalWidget(QtWidgets.QWidget):
         vis_rows = self._visible_rows()
         max_offset = self._max_view_offset(vis_rows)
         step = max(1, vis_rows // 2)
+        alt_screen_active = bool(self._private_modes_enabled.intersection({47, 1047, 1049}))
+        force_scrollback = bool(mods & QtCore.Qt.ShiftModifier)
 
         # Scrollback keys
         if key == QtCore.Qt.Key_PageUp:
-            self._set_view_offset(min(self._view_offset + step, max_offset), repaint=True); return
+            if force_scrollback or not alt_screen_active:
+                self._set_view_offset(min(self._view_offset + step, max_offset), repaint=True)
+                return
         if key == QtCore.Qt.Key_PageDown:
-            self._set_view_offset(max(0, self._view_offset - step), repaint=True); return
+            if force_scrollback or not alt_screen_active:
+                self._set_view_offset(max(0, self._view_offset - step), repaint=True)
+                return
         if key == QtCore.Qt.Key_Home and (mods & QtCore.Qt.ControlModifier):
             self._set_view_offset(max_offset, repaint=True); return
         if key == QtCore.Qt.Key_End and (mods & QtCore.Qt.ControlModifier):
@@ -1864,7 +2039,8 @@ class TerminalWidget(QtWidgets.QWidget):
         hist_len = self._history_length(hist_sequences)
         total_rows = hist_len + max(1, emu_rows)
         if self._view_offset == 0:
-            view_top = hist_len
+            live_rows = max(1, self._live_rows())
+            view_top = hist_len + max(0, live_rows - vis_rows)
         else:
             view_top = max(0, total_rows - vis_rows - self._view_offset)
 
@@ -2024,7 +2200,7 @@ class TerminalWidget(QtWidgets.QWidget):
                 self.update()
 
     def mouseMoveEvent(self, e: QtGui.QMouseEvent):
-        if (self._mouse_mode_any or (self._mouse_mode_btn and self._mouse_btns != Qt.MouseButton.NoButton)) and self._mouse_mode_btn:
+        if (self._mouse_mode_any or (self._mouse_mode_btn and self._mouse_btns != 0)) and self._mouse_mode_btn:
             self._report_mouse(e, motion=True)
         else:
             if self._selecting:
@@ -2045,11 +2221,17 @@ class TerminalWidget(QtWidgets.QWidget):
         col, row = self._cell_pos_from_event(e)
         col1, row1 = col + 1, row + 1
         btn_code = 0
+        left_mask = int(Qt.MouseButton.LeftButton.value)
+        middle_mask = int(Qt.MouseButton.MiddleButton.value)
+        right_mask = int(Qt.MouseButton.RightButton.value)
         if motion:
             btn_code = 32
-            if self._mouse_btns & Qt.MouseButton.LeftButton:   btn_code |= 0
-            elif self._mouse_btns & Qt.MouseButton.MiddleButton: btn_code |= 1
-            elif self._mouse_btns & Qt.MouseButton.RightButton:  btn_code |= 2
+            if self._mouse_btns & left_mask:
+                btn_code |= 0
+            elif self._mouse_btns & middle_mask:
+                btn_code |= 1
+            elif self._mouse_btns & right_mask:
+                btn_code |= 2
         else:
             if pressed is True:
                 if e.button() == Qt.MouseButton.LeftButton: btn_code = 0
@@ -2107,7 +2289,8 @@ class TerminalWidget(QtWidgets.QWidget):
         vis_rows = self._visible_rows()
         total_rows = hist_len + max(1, int(self._screen.lines))
         if self._view_offset == 0:
-            view_top = hist_len
+            live_rows = max(1, self._live_rows())
+            view_top = hist_len + max(0, live_rows - vis_rows)
         else:
             view_top = max(0, total_rows - vis_rows - self._view_offset)
 
