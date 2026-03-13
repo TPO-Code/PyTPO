@@ -34,6 +34,11 @@ from pytpo.instance_coordinator import ProjectInstanceServer, request_project_ac
 from pytpo.lang_cpp import CppLanguagePack
 from pytpo.lang_cpp.clangd_repair import missing_std_header_from_diagnostic, repair_clangd_includes
 from pytpo.lang_rust import RustLanguagePack
+from pytpo.services.asset_paths import (
+    preferred_shared_asset_dir,
+    preferred_shared_asset_path,
+    shared_asset_search_dirs,
+)
 from pytpo.services.commit_md import (
     commit_md_path_for_project,
     ensure_commit_md_exists,
@@ -303,7 +308,7 @@ class PythonIDE(Window):
 
     @classmethod
     def app_icon_path(cls) -> Path:
-        return Path(__file__).resolve().parents[1] / "icons" / "app_icon.png"
+        return preferred_shared_asset_path("icons/app_icon.png")
 
     def __init__(self):
         requested_root = os.path.realpath(QDir.currentPath())
@@ -1715,12 +1720,24 @@ class PythonIDE(Window):
 
     def _toolbar_icon_roots(self) -> list[Path]:
         base = Path(__file__).resolve().parents[1]
-        return [
-            base / "icons",
+        roots = [
+            *shared_asset_search_dirs("icons"),
             base / "assets" / "icons",
             base / "ui" / "icons",
             base / "resources" / "icons",
         ]
+        seen: set[str] = set()
+        out: list[Path] = []
+        for root in roots:
+            try:
+                key = str(root.resolve()).lower()
+            except Exception:
+                key = str(root).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(root)
+        return out
 
     def _load_toolbar_icon(self, icon_key: str) -> QIcon:
         key = str(icon_key or "").strip()
@@ -7818,7 +7835,7 @@ class PythonIDE(Window):
         return self._shared_themes_dir()
 
     def _shared_themes_dir(self) -> Path:
-        return Path(__file__).resolve().parents[1] / self.THEMES_DIRNAME
+        return preferred_shared_asset_dir("themes")
 
     def _theme_search_dirs(self) -> list[Path]:
         return self.theme_controller._theme_search_dirs()

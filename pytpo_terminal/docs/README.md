@@ -21,7 +21,7 @@ Core capabilities:
 
 - Multi-tab terminal sessions
 - Persistent terminal settings stored in `.terminal/settings.json`
-- Theme integration with shared project themes (`pytpo/themes`)
+- Theme integration with shared themes (`themes/`)
 - Background image/tint controls
 - Quick command and template runner
 - Embedded prompt editor page in terminal settings

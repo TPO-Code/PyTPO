@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
+from pytpo.services.asset_paths import preferred_shared_asset_path
 from pytpo.services.file_type_catalog import DesktopAssociationType, desktop_association_types
 from .storage_paths import text_editor_settings
 
@@ -77,10 +78,10 @@ def repo_root() -> Path:
 
 
 def icon_path() -> Path:
-    candidate = repo_root() / "pytpo" / "icons" / "txt.png"
+    candidate = preferred_shared_asset_path("icons/txt.png")
     if candidate.is_file():
         return candidate
-    return repo_root() / "pytpo" / "icons" / "app_icon.png"
+    return preferred_shared_asset_path("icons/app_icon.png")
 
 
 def xdg_data_home() -> Path:

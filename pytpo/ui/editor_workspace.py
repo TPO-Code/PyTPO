@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pytpo.services.asset_paths import shared_asset_search_dirs
 from pytpo.ui.widgets.code_editor import CodeEditor
 
 
@@ -624,12 +625,24 @@ class EditorTabs(QTabWidget):
                     return out
             host = host.parentWidget()
         base = Path(__file__).resolve().parents[1]
-        return [
-            base / "icons",
+        roots = [
+            *shared_asset_search_dirs("icons"),
             base / "assets" / "icons",
             base / "ui" / "icons",
             base / "resources" / "icons",
         ]
+        seen: set[str] = set()
+        out: list[Path] = []
+        for root in roots:
+            try:
+                key = str(root.resolve()).lower()
+            except Exception:
+                key = str(root).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(root)
+        return out
 
     def _report_missing_pin_icon(self, *, icon_key: str, checked_candidates: list[str]) -> None:
         key = str(icon_key or "").strip()

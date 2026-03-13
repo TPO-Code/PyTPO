@@ -34,6 +34,15 @@ include = [
 ]
 exclude = ["tests*", "test_projects*"]
 
+[tool.setuptools.data-files]
+"share/pytpo/icons" = [
+    "icons/*.png",
+]
+"share/pytpo/themes" = [
+    "themes/*.qss",
+    "themes/*.qsst",
+]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

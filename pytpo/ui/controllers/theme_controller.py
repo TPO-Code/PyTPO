@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from pytpo.services.asset_paths import shared_asset_search_dirs
 from pytpo.services.theme_compiler import (
     CompiledStructuredTheme,
     STRUCTURED_THEME_EXTENSION,
@@ -64,10 +65,7 @@ class ThemeController:
         return getattr(self.ide, name)
 
     def _theme_search_dirs(self) -> list[Path]:
-        theme_dir = self._shared_themes_dir()
-        if theme_dir.exists() and theme_dir.is_dir():
-            return [theme_dir]
-        return []
+        return shared_asset_search_dirs("themes")
 
     def _theme_candidates(self) -> list[tuple[str, Path]]:
         supported = self._supported_theme_extensions()

@@ -2,7 +2,7 @@
 
 ## Theme Layer
 
-`theme_name` applies project themes from `pytpo/themes` through `TerminalThemeManager`.
+`theme_name` applies shared themes from `themes/` through `TerminalThemeManager`.
 
 ## Terminal Palette Layer
 

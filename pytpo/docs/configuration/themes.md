@@ -11,14 +11,14 @@ Both formats are supported. Existing `.qss` themes continue to work.
 
 Themes are discovered from:
 
-- `pytpo/themes/`
+- `themes/`
 
 Examples in this repository:
 
-- `pytpo/themes/Midnight Forge.qsst`
-- `pytpo/themes/Deep Night.qsst`
-- `pytpo/themes/_Midnight Forge.qss` (legacy backup/reference)
-- `pytpo/themes/_Deep Night.qss` (legacy backup/reference)
+- `themes/Midnight Forge.qsst`
+- `themes/Deep Night.qsst`
+- `themes/Crimson Core.qss`
+- `themes/Nordic Sage.qss`
 
 ## Discovery and Priority Rules
 

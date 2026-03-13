@@ -84,7 +84,7 @@ Example:
 ## Theme
 
 - `theme_name` (string)
-  - Any available theme name discovered from `pytpo/themes`.
+  - Any available theme name discovered from `themes/`.
 
 ## System Integration
 

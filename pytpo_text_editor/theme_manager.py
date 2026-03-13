@@ -6,6 +6,7 @@ from typing import Any
 
 from PySide6.QtWidgets import QApplication
 
+from pytpo.services.asset_paths import preferred_shared_asset_dir, shared_asset_search_dirs
 from pytpo.services.theme_compiler import STRUCTURED_THEME_EXTENSION, ThemeCompileError, compile_qsst_file_with_tokens
 from pytpo.ui.theme_runtime import (
     DEFAULT_EDITOR_OVERVIEW_GAP,
@@ -19,7 +20,7 @@ from pytpo.ui.theme_runtime import (
     set_editor_viewport_spacing,
     set_settings_color_swatch_size,
 )
-from .desktop_integration import editor_settings, repo_root
+from .desktop_integration import editor_settings
 
 THEME_KEY = "appearance/theme"
 THEME_EXTENSIONS = (".qsst", ".qss")
@@ -34,7 +35,7 @@ class ThemeApplyResult:
 
 class TextEditorThemeManager:
     def themes_dir(self) -> Path:
-        return repo_root() / "pytpo" / "themes"
+        return preferred_shared_asset_dir("themes")
 
     def available_themes(self) -> list[str]:
         return [name for name, _path in self._theme_candidates()]
@@ -87,24 +88,25 @@ class TextEditorThemeManager:
         return None
 
     def _theme_candidates(self) -> list[tuple[str, Path]]:
-        theme_dir = self.themes_dir()
-        if not theme_dir.is_dir():
+        theme_dirs = shared_asset_search_dirs("themes")
+        if not theme_dirs:
             return []
 
         extension_priority = {ext: idx for idx, ext in enumerate(THEME_EXTENSIONS)}
         chosen: dict[str, tuple[int, str, Path]] = {}
-        for item in sorted(theme_dir.iterdir(), key=lambda path: path.name.lower()):
-            if not item.is_file():
-                continue
-            suffix = item.suffix.lower()
-            if suffix not in extension_priority:
-                continue
-            key = item.stem.lower()
-            priority = extension_priority[suffix]
-            current = chosen.get(key)
-            if current is not None and priority >= current[0]:
-                continue
-            chosen[key] = (priority, item.stem, item)
+        for theme_dir in theme_dirs:
+            for item in sorted(theme_dir.iterdir(), key=lambda path: path.name.lower()):
+                if not item.is_file():
+                    continue
+                suffix = item.suffix.lower()
+                if suffix not in extension_priority:
+                    continue
+                key = item.stem.lower()
+                priority = extension_priority[suffix]
+                current = chosen.get(key)
+                if current is not None and priority >= current[0]:
+                    continue
+                chosen[key] = (priority, item.stem, item)
         candidates = sorted(chosen.values(), key=lambda entry: entry[1].lower())
         return [(name, path) for _priority, name, path in candidates]
 

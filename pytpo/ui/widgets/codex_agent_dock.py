@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from pytpo.services.asset_paths import preferred_shared_asset_path
 from pytpo.ui.codex_session_store import (
     CodexSessionRecord,
     canonical_path_text,
@@ -1725,7 +1726,7 @@ class CodexAgentDockWidget(QWidget):
         )
 
     def _load_settings_icon(self) -> QIcon:
-        icon_path = _APP_ROOT / "pytpo" / "icons" / "settings.png"
+        icon_path = preferred_shared_asset_path("icons/settings.png")
         if icon_path.is_file():
             icon = QIcon(str(icon_path))
             if not icon.isNull():

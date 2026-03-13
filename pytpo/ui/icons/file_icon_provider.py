@@ -5,6 +5,8 @@ from pathlib import Path
 
 from PySide6.QtGui import QIcon
 
+from pytpo.services.asset_paths import preferred_shared_asset_dir
+
 
 class FileIconProvider:
     _EXTENSION_ICON_CACHE: dict[str, QIcon] = {}
@@ -46,7 +48,7 @@ class FileIconProvider:
 
     @staticmethod
     def _icons_dir() -> Path:
-        return Path(__file__).resolve().parents[2] / "icons"
+        return preferred_shared_asset_dir("icons")
 
     @staticmethod
     def _file_extension_key(name: str) -> str:

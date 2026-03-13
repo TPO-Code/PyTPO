@@ -7,6 +7,8 @@ import sys
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from pytpo.services.asset_paths import preferred_shared_asset_path
+
 from .instance_coordinator import TerminalInstanceServer, request_open_tab
 from .main_window import APP_NAME, TerminalMainWindow
 from .paths import migrate_legacy_terminal_storage
@@ -58,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(qt_args)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
-    icon_path = (Path(__file__).resolve().parent / "icon.png").resolve()
+    icon_path = preferred_shared_asset_path("icons/terminal.png")
     if icon_path.is_file():
         app_icon = QIcon(str(icon_path))
         if not app_icon.isNull():
