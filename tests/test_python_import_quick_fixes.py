@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 
-from src.services.ast_query import common_symbol_imports
+from pytpo.services.ast_query import common_symbol_imports
 
 
 def _load_diagnostics_controller_class():
@@ -25,7 +25,7 @@ def _load_diagnostics_controller_class():
     pyside6.QtGui = qtgui
     pyside6.QtWidgets = qtwidgets
 
-    editor_workspace = types.ModuleType("src.ui.editor_workspace")
+    editor_workspace = types.ModuleType("pytpo.ui.editor_workspace")
     editor_workspace.EditorWidget = type("EditorWidget", (), {})
 
     tdoc_support = types.ModuleType("TPOPyside.widgets.tdoc_support")
@@ -40,7 +40,7 @@ def _load_diagnostics_controller_class():
         "PySide6.QtCore": qtcore,
         "PySide6.QtGui": qtgui,
         "PySide6.QtWidgets": qtwidgets,
-        "src.ui.editor_workspace": editor_workspace,
+        "pytpo.ui.editor_workspace": editor_workspace,
         "TPOPyside.widgets.tdoc_support": tdoc_support,
     }.items():
         saved[name] = sys.modules.get(name)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
+from pytpo.ui.widgets.chat_markdown_bubble import ChatMarkdownBubble
 
 
 class ChatMarkdownBubbleMarkdownTests(unittest.TestCase):

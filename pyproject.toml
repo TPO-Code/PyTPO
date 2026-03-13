@@ -17,20 +17,19 @@ dependencies = [
 ]
 
 [project.scripts]
-pytpo = "pytpo:main"
-pytpo-terminal = "Terminal.app:main"
-pytpo-text-editor = "text_editor:main"
-
-[tool.setuptools]
-py-modules = ["main", "pytpo", "terminal_app_main", "text_editor_main"]
+pytpo = "pytpo.app:main"
+pytpo-terminal = "pytpo_terminal.app:main"
+pytpo-text-editor = "pytpo_text_editor.app:main"
+pytpo-dock = "pytpo_dock.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "src*",
+    "pytpo*",
     "TPOPyside*",
-    "Terminal*",
-    "text_editor*", 
+    "pytpo_terminal*",
+    "pytpo_text_editor*",
+    "pytpo_dock*",
     "tdock*",
 ]
 exclude = ["tests*", "test_projects*"]

@@ -1,0 +1,2039 @@
+import os
+import json
+import uuid
+import weakref
+import warnings
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable
+
+from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer, Signal
+from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor, QIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextDocumentLayout,
+    #QPlainTextEdit,
+    QSizePolicy,
+    QSplitter,
+    QTabBar,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from pytpo.ui.widgets.code_editor import CodeEditor
+
+
+class DropZone(Enum):
+    NONE = 0
+    CENTER = 1
+    LEFT = 2
+    RIGHT = 3
+    TOP = 4
+    BOTTOM = 5
+
+MIME_EDITOR_TAB = "application/x-pytpo-editor-tab-id"
+
+
+@dataclass
+class DocumentRecord:
+    key: str
+    document: QTextDocument
+    file_path: str | None = None
+    reduced_capability_mode: bool = False
+    large_file_analysis: "LargeFileAnalysis | None" = None
+    views: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+
+
+@dataclass(frozen=True)
+class LargeFileAnalysis:
+    path: str
+    size_bytes: int
+    line_count: int | None = None
+
+
+LARGE_FILE_WARNING_SIZE_BYTES = 1024 * 1024
+LARGE_FILE_WARNING_LINE_THRESHOLD = 20000
+_LARGE_FILE_LINE_SCAN_CHUNK_BYTES = 256 * 1024
+
+
+def _format_byte_count(size_bytes: int) -> str:
+    value = max(0, int(size_bytes))
+    units = ("B", "KB", "MB", "GB")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            break
+        size /= 1024.0
+    if unit == "B":
+        return f"{int(size)} {unit}"
+    return f"{size:.1f} {unit}"
+
+
+def analyze_large_text_file(path: str) -> LargeFileAnalysis | None:
+    cpath = str(path or "").strip()
+    if not cpath or not os.path.exists(cpath):
+        return None
+    try:
+        size_bytes = int(os.path.getsize(cpath))
+    except Exception:
+        return None
+
+    warn_for_size = size_bytes >= LARGE_FILE_WARNING_SIZE_BYTES
+    line_count: int | None = None
+    if not warn_for_size:
+        try:
+            count = 0
+            with open(cpath, "rb") as handle:
+                while True:
+                    chunk = handle.read(_LARGE_FILE_LINE_SCAN_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    count += int(chunk.count(b"\n"))
+                    if count > LARGE_FILE_WARNING_LINE_THRESHOLD:
+                        line_count = count + 1
+                        break
+            if line_count is None and count > LARGE_FILE_WARNING_LINE_THRESHOLD:
+                line_count = count + 1
+        except Exception:
+            line_count = None
+
+    if not warn_for_size and (line_count is None or line_count <= LARGE_FILE_WARNING_LINE_THRESHOLD):
+        return None
+    return LargeFileAnalysis(path=cpath, size_bytes=size_bytes, line_count=line_count)
+
+
+def prompt_large_file_open(parent: QWidget | None, analysis: LargeFileAnalysis) -> tuple[bool, bool]:
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle("Large File")
+    msg.setText("This file is large and may make the editor unresponsive.")
+    details = [
+        f"File: {os.path.basename(analysis.path)}",
+        f"Size: {_format_byte_count(analysis.size_bytes)}",
+    ]
+    if analysis.line_count is not None:
+        details.append(f"Lines: {int(analysis.line_count):,}+")
+    msg.setInformativeText(
+        "\n".join(details)
+        + "\n\nReduced capability mode disables the heaviest editor features to improve responsiveness."
+    )
+    reduced_button = msg.addButton("Open Reduced Mode", QMessageBox.AcceptRole)
+    full_button = msg.addButton("Open Full", QMessageBox.DestructiveRole)
+    cancel_button = msg.addButton(QMessageBox.Cancel)
+    msg.setDefaultButton(reduced_button)
+    msg.setEscapeButton(cancel_button)
+    msg.exec()
+    clicked = msg.clickedButton()
+    if clicked is cancel_button:
+        return False, False
+    return True, bool(clicked is reduced_button)
+
+
+def _is_workspace_document_widget(widget: object) -> bool:
+    if not isinstance(widget, QWidget):
+        return False
+    return callable(getattr(widget, "display_name", None))
+
+
+def _widget_file_path(widget: object) -> str:
+    return str(getattr(widget, "file_path", "") or "").strip()
+
+
+def _widget_document(widget: object) -> QTextDocument | None:
+    getter = getattr(widget, "document", None)
+    if not callable(getter):
+        return None
+    try:
+        doc = getter()
+    except Exception:
+        return None
+    return doc if isinstance(doc, QTextDocument) else None
+
+
+def _widget_modified(widget: object) -> bool:
+    doc = _widget_document(widget)
+    if doc is None:
+        return False
+    try:
+        return bool(doc.isModified())
+    except Exception:
+        return False
+
+
+def _widget_display_name(widget: object) -> str:
+    displayer = getattr(widget, "display_name", None)
+    if callable(displayer):
+        try:
+            return str(displayer())
+        except Exception:
+            pass
+    path = _widget_file_path(widget)
+    if path:
+        return os.path.basename(path)
+    return "File"
+
+
+def _widget_save_file(widget: object) -> bool:
+    saver = getattr(widget, "save_file", None)
+    if not callable(saver):
+        return False
+    try:
+        return bool(saver())
+    except Exception:
+        return False
+
+
+def _widget_text_cursor(widget: object) -> QTextCursor | None:
+    getter = getattr(widget, "textCursor", None)
+    if not callable(getter):
+        return None
+    try:
+        cursor = getter()
+    except Exception:
+        return None
+    return cursor if isinstance(cursor, QTextCursor) else None
+
+
+def _encode_editor_drag_payload(editor_id: str, file_path: str | None = None) -> bytes:
+    payload: dict[str, str] = {"editor_id": str(editor_id or "")}
+    if isinstance(file_path, str) and file_path.strip():
+        payload["file_path"] = file_path
+    return json.dumps(payload).encode("utf-8")
+
+
+def _decode_editor_drag_payload(raw: bytes) -> tuple[str, str | None]:
+    if not raw:
+        return "", None
+    text = bytes(raw).decode("utf-8", errors="ignore").strip()
+    if not text:
+        return "", None
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            editor_id = str(obj.get("editor_id") or "").strip()
+            file_path_raw = obj.get("file_path")
+            file_path = str(file_path_raw).strip() if isinstance(file_path_raw, str) and file_path_raw.strip() else None
+            return editor_id, file_path
+    except Exception:
+        pass
+    # Backward compatibility: old payload was raw editor_id.
+    return text, None
+
+class DropOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._zone = DropZone.NONE
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.hide()
+
+    def set_zone(self, zone: DropZone):
+        if self._zone != zone:
+            self._zone = zone
+            self.update()
+
+    def zone(self) -> DropZone:
+        return self._zone
+
+    def paintEvent(self, _event):
+        if self._zone == DropZone.NONE:
+            return
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        # base dim
+        p.fillRect(self.rect(), QColor(20, 20, 20, 60))
+
+        r = self.rect()
+        target = self._zone_rect(r, self._zone)
+
+        p.setPen(QPen(QColor(120, 180, 255, 220), 2))
+        p.setBrush(QBrush(QColor(120, 180, 255, 70)))
+        p.drawRoundedRect(target, 8, 8)
+
+    def _zone_rect(self, r: QRect, zone: DropZone) -> QRect:
+        w = r.width()
+        h = r.height()
+        if zone == DropZone.CENTER:
+            return QRect(int(w * 0.25), int(h * 0.2), int(w * 0.5), int(h * 0.6))
+        if zone == DropZone.LEFT:
+            return QRect(0, 0, int(w * 0.45), h)
+        if zone == DropZone.RIGHT:
+            return QRect(int(w * 0.55), 0, int(w * 0.45), h)
+        if zone == DropZone.TOP:
+            return QRect(0, 0, w, int(h * 0.45))
+        if zone == DropZone.BOTTOM:
+            return QRect(0, int(h * 0.55), w, int(h * 0.45))
+        return QRect()
+
+class EditorWidget(CodeEditor):
+    FONT_FALLBACKS = (
+        "Cascadia Code",
+        "Consolas",
+        "JetBrains Mono",
+        "Fira Code",
+        "Courier New",
+        "Monospace",
+    )
+
+    def __init__(
+            self,
+            file_path: str | None = None,
+            font_size: int = 10,
+            font_family: str | None = None,
+            parent=None,
+            workspace: "EditorWorkspace | None" = None,
+    ):
+        super().__init__(parent)
+        self._workspace = workspace
+        self._doc_record: DocumentRecord | None = None
+        self._file_path_local: str | None = None
+        self._reduced_capability_mode = False
+        self._large_file_analysis: LargeFileAnalysis | None = None
+        self._saved_overview_cfg_for_reduced_mode: dict | None = None
+        self._saved_spellcheck_cfg_for_reduced_mode: dict | None = None
+        self.editor_id = str(uuid.uuid4())
+
+        self.setLineWrapMode(CodeEditor.LineWrapMode.NoWrap)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        resolved_family = self._resolve_font_family(font_family)
+        self.set_editor_font_preferences(family=resolved_family, point_size=font_size)
+
+        if file_path:
+            self.load_file(file_path)
+
+    @classmethod
+    def _resolve_font_family(cls, preferred: str | None) -> str:
+        text = str(preferred or "").strip()
+        families = set(QFontDatabase.families())
+        if text and text in families:
+            return text
+        for candidate in cls.FONT_FALLBACKS:
+            if candidate in families:
+                return candidate
+        return text or "Monospace"
+
+    @property
+    def file_path(self) -> str | None:
+        if self._doc_record is not None:
+            return self._doc_record.file_path
+        return self._file_path_local
+
+    @file_path.setter
+    def file_path(self, path: str | None):
+        clean = str(path) if path else None
+        self._file_path_local = clean
+        if self._doc_record is not None:
+            self._doc_record.file_path = clean
+            if self._workspace is not None:
+                self._workspace.sync_document_record_key(self._doc_record)
+        self.set_file_path(clean)
+
+    @property
+    def doc_key(self) -> str:
+        if self._doc_record is not None:
+            return self._doc_record.key
+        if self.file_path:
+            try:
+                return str(Path(self.file_path).resolve())
+            except Exception:
+                return str(self.file_path)
+        return f"__editor__/{self.editor_id}"
+
+    def document_record(self) -> DocumentRecord | None:
+        return self._doc_record
+
+    def is_reduced_capability_mode(self) -> bool:
+        return bool(self._reduced_capability_mode)
+
+    def large_file_analysis(self) -> LargeFileAnalysis | None:
+        return self._large_file_analysis
+
+    def apply_reduced_capability_mode(
+        self,
+        enabled: bool,
+        *,
+        analysis: LargeFileAnalysis | None = None,
+    ) -> None:
+        requested = bool(enabled)
+        self._large_file_analysis = analysis if requested else None
+        if requested == self._reduced_capability_mode:
+            if self._doc_record is not None:
+                self._doc_record.reduced_capability_mode = requested
+                self._doc_record.large_file_analysis = self._large_file_analysis
+            return
+
+        self._reduced_capability_mode = requested
+        if requested:
+            self._saved_overview_cfg_for_reduced_mode = dict(getattr(self, "_overview_cfg", {}))
+            self._saved_spellcheck_cfg_for_reduced_mode = dict(getattr(self, "_spellcheck_visual_cfg", {}))
+            self.set_occurrence_highlighting_enabled(False)
+            self.set_code_folding_enabled(False)
+            self.set_syntax_highlighting_enabled(False)
+            self.update_overview_marker_settings(
+                dict(self._saved_overview_cfg_for_reduced_mode, enabled=False)
+            )
+            self.update_spellcheck_visual_settings(
+                dict(self._saved_spellcheck_cfg_for_reduced_mode, enabled=False)
+            )
+        else:
+            self.set_syntax_highlighting_enabled(True)
+            self.set_code_folding_enabled(True)
+            self.set_occurrence_highlighting_enabled(True)
+            if isinstance(self._saved_overview_cfg_for_reduced_mode, dict):
+                self.update_overview_marker_settings(self._saved_overview_cfg_for_reduced_mode)
+            if isinstance(self._saved_spellcheck_cfg_for_reduced_mode, dict):
+                self.update_spellcheck_visual_settings(self._saved_spellcheck_cfg_for_reduced_mode)
+
+        if self._doc_record is not None:
+            self._doc_record.reduced_capability_mode = requested
+            self._doc_record.large_file_analysis = self._large_file_analysis
+
+    def attach_document_record(self, record: DocumentRecord, *, adopt_current_document: bool = False):
+        if not isinstance(record, DocumentRecord):
+            return
+        if self._doc_record is record:
+            return
+
+        if self._doc_record is not None:
+            try:
+                self._doc_record.views.discard(self)
+            except Exception:
+                pass
+
+        self._doc_record = record
+        record.views.add(self)
+        self._file_path_local = record.file_path
+        self.apply_reduced_capability_mode(
+            bool(record.reduced_capability_mode),
+            analysis=record.large_file_analysis,
+        )
+
+        if adopt_current_document:
+            record.document = self.document()
+            if self._workspace is not None:
+                self._workspace._adopt_record_document(record, fallback_editor=self)
+        elif self.document() is not record.document:
+            if self._workspace is not None:
+                self._workspace._adopt_record_document(record, fallback_editor=self)
+            self.setDocument(record.document)
+
+        self.set_file_path(record.file_path)
+
+    def detach_document_record(self):
+        if self._doc_record is None:
+            return
+        try:
+            self._doc_record.views.discard(self)
+        except Exception:
+            pass
+        self._doc_record = None
+
+    def display_name(self) -> str:
+        return os.path.basename(self.file_path) if self.file_path else "File"
+
+    def load_file(
+        self,
+        path: str,
+        *,
+        show_errors: bool = True,
+        reduced_capability_mode: bool = False,
+        large_file_analysis: LargeFileAnalysis | None = None,
+    ) -> bool:
+        if not os.path.exists(path):
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"File does not exist:\n{path}")
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.setPlainText(f.read())
+            self.apply_reduced_capability_mode(
+                reduced_capability_mode,
+                analysis=large_file_analysis,
+            )
+            self.file_path = path
+            self.document().setModified(False)
+            return True
+        except Exception as e:
+            if show_errors:
+                QMessageBox.warning(self, "Open Error", f"Could not read file:\n{e}")
+            return False
+
+    def save_file(self) -> bool:
+        if not self.file_path:
+            return False
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                f.write(self.toPlainText())
+            self.document().setModified(False)
+            self.set_file_path(self.file_path)
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Could not save file:\n{e}")
+            return False
+
+
+def _as_editor_widget(widget: object) -> EditorWidget | None:
+    if isinstance(widget, EditorWidget):
+        return widget
+    getter = getattr(widget, "editor_widget", None)
+    if not callable(getter):
+        return None
+    try:
+        resolved = getter()
+    except Exception:
+        return None
+    return resolved if isinstance(resolved, EditorWidget) else None
+
+
+class DraggableTabBar(QTabBar):
+    def __init__(self, tabs_widget: "EditorTabs", parent=None):
+        super().__init__(parent)
+        self.tabs_widget = tabs_widget
+        self._drag_start_pos = QPoint()
+        self.setMovable(True)
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+
+        if (event.position().toPoint() - self._drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+
+        idx = self.tabAt(self._drag_start_pos)
+        if idx < 0:
+            super().mouseMoveEvent(event)
+            return
+
+        ed = self.tabs_widget.widget(idx)
+        if not _is_workspace_document_widget(ed):
+            super().mouseMoveEvent(event)
+            return
+        editor_id = str(getattr(ed, "editor_id", "") or "").strip()
+        if not editor_id:
+            super().mouseMoveEvent(event)
+            return
+
+        transferable_path = self.tabs_widget.workspace.prepare_editor_for_cross_instance_transfer(ed)
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(MIME_EDITOR_TAB, _encode_editor_drag_payload(editor_id, transferable_path))
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+
+    def mouseDoubleClickEvent(self, event):
+        idx = self.tabAt(event.position().toPoint())
+        if idx >= 0:
+            self.tabs_widget.tear_out_index(idx)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    # Accept drops directly on tab bar
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            super().dropEvent(event)
+            return
+        editor_id, file_path = _decode_editor_drag_payload(bytes(event.mimeData().data(MIME_EDITOR_TAB)))
+        # tabbar drop is effectively center/tab insertion
+        p_in_tabs = self.tabs_widget.mapFromGlobal(event.globalPosition().toPoint())
+        self.tabs_widget._handle_drop_with_zone(editor_id, DropZone.CENTER, p_in_tabs, file_path=file_path)
+        event.acceptProposedAction()
+
+    def contextMenuEvent(self, event):
+        idx = self.tabAt(event.pos())
+        self.tabs_widget.show_tab_context_menu(idx, event.globalPos())
+        event.accept()
+
+
+class EditorTabs(QTabWidget):
+    _missing_icon_warning_keys: set[str] = set()
+
+    def __init__(self, workspace: "EditorWorkspace", owner_window: QMainWindow | None = None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("EditorTabs")
+
+        self._overlay = DropOverlay(self)
+        self._overlay.setGeometry(self.rect())
+        self._overlay.raise_()
+
+        self.workspace = workspace
+        self.owner_window = owner_window
+        self._tab_reorder_guard = False
+        self._pin_icon_checked = False
+        self._pin_icon_available = False
+        self._pin_icon = QIcon()
+
+        self._tabbar = DraggableTabBar(self, self)
+        self._tabbar.setObjectName("EditorTabBar")
+        self.setTabBar(self._tabbar)
+        self._tabbar.setDrawBase(False)
+
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.setUsesScrollButtons(True)
+
+        # Keep both on to be safe across WM/Qt combos
+        self.setAcceptDrops(True)
+        self.tabBar().setAcceptDrops(True)
+
+        self.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.currentChanged.connect(self._on_current_changed)
+        self.tabBar().tabMoved.connect(self._on_tab_bar_moved)
+
+    def _icon_search_roots(self) -> list[Path]:
+        host = self.workspace.parentWidget()
+        while host is not None:
+            roots_getter = getattr(host, "_toolbar_icon_roots", None)
+            if callable(roots_getter):
+                try:
+                    roots = roots_getter()
+                except Exception:
+                    roots = []
+                out = [Path(p) for p in roots if isinstance(p, (str, Path))]
+                if out:
+                    return out
+            host = host.parentWidget()
+        base = Path(__file__).resolve().parents[1]
+        return [
+            base / "icons",
+            base / "assets" / "icons",
+            base / "ui" / "icons",
+            base / "resources" / "icons",
+        ]
+
+    def _report_missing_pin_icon(self, *, icon_key: str, checked_candidates: list[str]) -> None:
+        key = str(icon_key or "").strip()
+        if not key:
+            return
+
+        host = self.workspace.parentWidget()
+        owner_key_set: set[str] | None = None
+        appender: Callable[..., Any] | None = None
+        while host is not None:
+            maybe_set = getattr(host, "_toolbar_missing_icon_keys", None)
+            if isinstance(maybe_set, set):
+                owner_key_set = maybe_set
+            maybe_append = getattr(host, "_append_debug_output_lines", None)
+            if callable(maybe_append):
+                appender = maybe_append
+            if owner_key_set is not None and appender is not None:
+                break
+            host = host.parentWidget()
+
+        if owner_key_set is not None:
+            if key in owner_key_set:
+                return
+            owner_key_set.add(key)
+        else:
+            if key in self._missing_icon_warning_keys:
+                return
+            self._missing_icon_warning_keys.add(key)
+
+        print(f"[PyTPO] Missing tab icon '{key}'. Falling back to '[pin]' text.")
+        if callable(appender):
+            appender(
+                [
+                    f"[Tabs] Missing icon '{key}'. Falling back to [pin] text.",
+                    "[Tabs] Checked files:",
+                    *[f"  - {path}" for path in checked_candidates],
+                ],
+                reveal=False,
+            )
+
+    def _ensure_pin_icon_loaded(self) -> bool:
+        if self._pin_icon_checked:
+            return bool(self._pin_icon_available) and not self._pin_icon.isNull()
+
+        self._pin_icon_checked = True
+        key = "pin"
+        extensions = (".svg", ".png", ".ico", ".jpg", ".jpeg")
+        checked: list[str] = []
+        for root in self._icon_search_roots():
+            for ext in extensions:
+                candidate = root / f"{key}{ext}"
+                checked.append(str(candidate))
+                if not candidate.is_file():
+                    continue
+                icon = QIcon(str(candidate))
+                if icon.isNull():
+                    continue
+                self._pin_icon = icon
+                self._pin_icon_available = True
+                return True
+
+        self._pin_icon_available = False
+        self._pin_icon = QIcon()
+        self._report_missing_pin_icon(icon_key=key, checked_candidates=checked)
+        return False
+
+    def _desired_tab_order_with_pins(self) -> list[QWidget]:
+        pinned: list[QWidget] = []
+        others: list[QWidget] = []
+        for i in range(self.count()):
+            widget = self.widget(i)
+            if _is_workspace_document_widget(widget) and self._is_tab_pinned(widget):
+                pinned.append(widget)
+            else:
+                others.append(widget)
+        return pinned + others
+
+    def _reflow_pinned_tabs(self) -> None:
+        if self._tab_reorder_guard or self.count() < 2:
+            return
+        desired = self._desired_tab_order_with_pins()
+        if len(desired) != self.count():
+            return
+        if all(self.widget(i) is desired[i] for i in range(self.count())):
+            return
+
+        current = self.currentWidget()
+        self._tab_reorder_guard = True
+        try:
+            for target_idx, widget in enumerate(desired):
+                src_idx = self.indexOf(widget)
+                if src_idx < 0 or src_idx == target_idx:
+                    continue
+                self.tabBar().moveTab(src_idx, target_idx)
+        finally:
+            self._tab_reorder_guard = False
+
+        if current is not None and self.indexOf(current) >= 0:
+            self.setCurrentWidget(current)
+
+    def _on_tab_bar_moved(self, _from: int, _to: int) -> None:
+        if self._tab_reorder_guard:
+            return
+        self._reflow_pinned_tabs()
+
+    def _compute_zone(self, pos_widget):
+        # pos_widget is QPoint in EditorTabs coords
+        r = self.rect()
+        if not r.contains(pos_widget):
+            return DropZone.NONE
+
+        # margins that define side-zones
+        mx = max(48, int(r.width() * 0.22))
+        my = max(38, int(r.height() * 0.22))
+
+        x = pos_widget.x()
+        y = pos_widget.y()
+
+        if x < mx:
+            return DropZone.LEFT
+        if x > r.width() - mx:
+            return DropZone.RIGHT
+        if y < my:
+            return DropZone.TOP
+        if y > r.height() - my:
+            return DropZone.BOTTOM
+        return DropZone.CENTER
+
+    def _show_overlay(self, zone: DropZone):
+        self._overlay.set_zone(zone)
+        if zone == DropZone.NONE:
+            self._overlay.hide()
+        else:
+            self._overlay.show()
+            self._overlay.raise_()
+
+    def _hide_overlay(self):
+        self._overlay.set_zone(DropZone.NONE)
+        self._overlay.hide()
+
+
+    def _handle_external_drop(self, editor_id: str, pos_in_tabbar: QPoint):
+        ed, src_tabs, src_idx = self.workspace.find_editor_by_id(editor_id)
+        if ed is None or src_tabs is None or src_idx < 0:
+            return
+
+        # Remove from source
+        src_tabs.removeTab(src_idx)
+
+        # Insert into this tabs at pointer position
+        target_idx = self.tabBar().tabAt(pos_in_tabbar)
+        if target_idx < 0 or target_idx > self.count():
+            self.addTab(ed, "")
+            new_idx = self.indexOf(ed)
+        else:
+            self.insertTab(target_idx, ed, "")
+            new_idx = target_idx
+        self._connect_widget_document_signal(ed)
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+
+        self._refresh_tab_title(ed)
+        self._reflow_pinned_tabs()
+        new_idx = self.indexOf(ed)
+        self.setCurrentIndex(new_idx)
+        ed.setFocus()
+
+        self.workspace.request_cleanup_empty_panes()
+
+        # auto-close empty tearout source
+        if src_tabs.count() == 0 and isinstance(src_tabs.owner_window, EditorTearOutWindow):
+            src_tabs.owner_window.close()
+
+
+    def add_editor(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
+        idx = self.addTab(ed, _widget_display_name(ed))
+        self.setCurrentIndex(idx)
+        ed.setFocus()
+        self._connect_widget_document_signal(ed)
+        self._refresh_tab_title(ed)
+        self._reflow_pinned_tabs()
+        if self.indexOf(ed) >= 0:
+            self.setCurrentWidget(ed)
+            ed.setFocus()
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+
+    def _connect_widget_document_signal(self, widget: QWidget | None) -> None:
+        if not _is_workspace_document_widget(widget):
+            return
+        doc = _widget_document(widget)
+        if doc is None:
+            return
+        self._disconnect_document_modification_signal(doc)
+        try:
+            doc.modificationChanged.connect(self._on_document_modification_changed)
+        except Exception:
+            return
+
+    def _disconnect_widget_document_signal(self, widget: QWidget | None) -> None:
+        if not _is_workspace_document_widget(widget):
+            return
+        doc = _widget_document(widget)
+        if doc is None:
+            return
+        self._disconnect_document_modification_signal(doc)
+
+    def _disconnect_document_modification_signal(self, doc: QTextDocument) -> None:
+        try:
+            # Qt may emit a RuntimeWarning when disconnecting a non-connected slot.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                doc.modificationChanged.disconnect(self._on_document_modification_changed)
+        except Exception:
+            pass
+
+    def removeTab(self, index: int) -> None:
+        widget = self.widget(index)
+        self._disconnect_widget_document_signal(widget)
+        super().removeTab(index)
+        notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+
+    def _refresh_tab_title(self, ed: QWidget):
+        idx = self.indexOf(ed)
+        if idx < 0:
+            return
+        dirty = "*" if _widget_modified(ed) else ""
+        pin_prefix = ""
+        if self._is_tab_pinned(ed):
+            if self._ensure_pin_icon_loaded():
+                self.setTabIcon(idx, self._pin_icon)
+            else:
+                self.setTabIcon(idx, QIcon())
+                pin_prefix = "[pin] "
+        else:
+            self.setTabIcon(idx, QIcon())
+        self.setTabText(idx, f"{pin_prefix}{_widget_display_name(ed)}{dirty}")
+
+    def _on_document_modification_changed(self, _modified: bool):
+        # Refresh only document widgets currently hosted by this tab widget.
+        for i in range(self.count()):
+            ed = self.widget(i)
+            if _is_workspace_document_widget(ed):
+                self._refresh_tab_title(ed)
+        try:
+            self.workspace.documentModificationStateChanged.emit()
+        except Exception:
+            pass
+
+    def _on_current_changed(self, _index: int):
+        ed = self.currentWidget()
+        if _is_workspace_document_widget(ed):
+            ed.setFocus()
+
+    @staticmethod
+    def _is_tab_pinned(ed: QWidget | None) -> bool:
+        return bool(getattr(ed, "_tab_pinned", False))
+
+    def _set_tab_pinned(self, ed: QWidget | None, pinned: bool, *, reflow: bool = True) -> None:
+        if not _is_workspace_document_widget(ed):
+            return
+        try:
+            setattr(ed, "_tab_pinned", bool(pinned))
+        except Exception:
+            return
+        self._refresh_tab_title(ed)
+        if reflow:
+            self._reflow_pinned_tabs()
+            if self.indexOf(ed) >= 0:
+                self.setCurrentWidget(ed)
+
+    def _unpin_all_tabs(self) -> None:
+        changed = False
+        for i in range(self.count()):
+            ed = self.widget(i)
+            if not _is_workspace_document_widget(ed):
+                continue
+            if not self._is_tab_pinned(ed):
+                continue
+            self._set_tab_pinned(ed, False, reflow=False)
+            changed = True
+        if changed:
+            self._reflow_pinned_tabs()
+
+    def _confirm_close_editor(self, ed: QWidget) -> bool:
+        if not _is_workspace_document_widget(ed):
+            return False
+        if not _widget_modified(ed):
+            return True
+        editor_obj = _as_editor_widget(ed)
+        if isinstance(editor_obj, EditorWidget) and not self.workspace.is_last_view_for_document(editor_obj):
+            return True
+
+        ans = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f"Save changes to '{_widget_display_name(ed)}'?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+            )
+        if ans == QMessageBox.Cancel:
+            return False
+        if ans == QMessageBox.Yes:
+            if not _widget_save_file(ed):
+                return False
+        return True
+
+    def _on_tab_close_requested(self, index: int):
+        ed = self.widget(index)
+        if not _is_workspace_document_widget(ed):
+            return
+        if self._is_tab_pinned(ed):
+            return
+        if not self._confirm_close_editor(ed):
+            return
+
+        self.removeTab(index)
+        ed.hide()
+        editor_obj = _as_editor_widget(ed)
+        if isinstance(editor_obj, EditorWidget):
+            self.workspace.release_document_view(editor_obj, editor_obj.doc_key)
+        ed.deleteLater()
+        self.workspace.request_cleanup_empty_panes()
+
+        # If this tabs belongs to tearout and became empty, close tearout window
+        if self.count() == 0 and isinstance(self.owner_window, EditorTearOutWindow):
+            self.owner_window.close()
+
+    def _close_tab_indices(self, indices: list[int]) -> bool:
+        closed_any = False
+        for idx in sorted({int(i) for i in indices}, reverse=True):
+            if idx < 0 or idx >= self.count():
+                continue
+            ed = self.widget(idx)
+            if not _is_workspace_document_widget(ed):
+                continue
+            if self._is_tab_pinned(ed):
+                continue
+            before = self.count()
+            self._on_tab_close_requested(idx)
+            if self.count() < before:
+                closed_any = True
+        return closed_any
+
+    def _copy_tab_path(self, index: int) -> None:
+        if index < 0 or index >= self.count():
+            return
+        ed = self.widget(index)
+        if not _is_workspace_document_widget(ed):
+            return
+        path = _widget_file_path(ed)
+        if not path:
+            return
+        QApplication.clipboard().setText(path)
+
+    def _copy_tab_reference(self, index: int) -> None:
+        if index < 0 or index >= self.count():
+            return
+        ed = self.widget(index)
+        if not _is_workspace_document_widget(ed):
+            return
+        path = _widget_file_path(ed)
+        if not path:
+            return
+        cur = _widget_text_cursor(ed)
+        if cur is None:
+            QApplication.clipboard().setText(path)
+            return
+        line = int(cur.blockNumber()) + 1
+        col = int(cur.positionInBlock()) + 1
+        QApplication.clipboard().setText(f"{path}:{line}:{col}")
+
+    def _split_from_tab_index(self, index: int, *, horizontal: bool) -> None:
+        if index < 0 or index >= self.count():
+            return
+        ed = self.widget(index)
+        if not isinstance(_as_editor_widget(ed), EditorWidget):
+            return
+        self.setCurrentIndex(index)
+        ed.setFocus()
+
+        # Prefer IDE-level split actions to keep all follow-up hooks in sync.
+        host = self.workspace.parentWidget()
+        while host is not None:
+            method_name = "split_editor_down" if horizontal else "split_editor_right"
+            method = getattr(host, method_name, None)
+            if callable(method):
+                method()
+                return
+            host = host.parentWidget()
+
+        if horizontal:
+            self.workspace.split_editor_down()
+        else:
+            self.workspace.split_editor_right()
+
+    def show_tab_context_menu(self, index: int, global_pos) -> None:
+        menu = QMenu(self)
+
+        has_tab = 0 <= int(index) < self.count()
+        ed = self.widget(index) if has_tab else None
+        is_doc = _is_workspace_document_widget(ed)
+        is_code_editor = isinstance(_as_editor_widget(ed), EditorWidget)
+        is_pinned = self._is_tab_pinned(ed) if is_doc else False
+
+        act_close = menu.addAction("Close")
+        act_close.setEnabled(is_doc and not is_pinned)
+        act_close.triggered.connect(lambda _checked=False, idx=int(index): self._on_tab_close_requested(idx))
+
+        act_close_others = menu.addAction("Close Others")
+        act_close_others.setEnabled(is_doc and self.count() > 1)
+        act_close_others.triggered.connect(
+            lambda _checked=False, keep=int(index): self._close_tab_indices(
+                [i for i in range(self.count()) if i != keep]
+            )
+        )
+
+        act_close_all = menu.addAction("Close All")
+        act_close_all.setEnabled(self.count() > 0)
+        act_close_all.triggered.connect(
+            lambda _checked=False: self._close_tab_indices(list(range(self.count())))
+        )
+
+        menu.addSeparator()
+
+        act_split_h = menu.addAction("Split Horizontal")
+        act_split_h.setEnabled(is_code_editor)
+        act_split_h.triggered.connect(
+            lambda _checked=False, idx=int(index): self._split_from_tab_index(idx, horizontal=True)
+        )
+
+        act_split_v = menu.addAction("Split Vertical")
+        act_split_v.setEnabled(is_code_editor)
+        act_split_v.triggered.connect(
+            lambda _checked=False, idx=int(index): self._split_from_tab_index(idx, horizontal=False)
+        )
+
+        menu.addSeparator()
+
+        act_pin = menu.addAction("Pin Tab")
+        act_pin.setCheckable(True)
+        act_pin.setChecked(is_pinned)
+        act_pin.setEnabled(is_doc)
+        act_pin.triggered.connect(
+            lambda checked, editor=ed: self._set_tab_pinned(editor, bool(checked))
+            if _is_workspace_document_widget(editor)
+            else None
+        )
+
+        act_unpin_all = menu.addAction("Unpin All Tabs")
+        has_any_pinned = any(
+            _is_workspace_document_widget(self.widget(i)) and self._is_tab_pinned(self.widget(i))
+            for i in range(self.count())
+        )
+        act_unpin_all.setEnabled(has_any_pinned)
+        act_unpin_all.triggered.connect(lambda _checked=False: self._unpin_all_tabs())
+
+        menu.addSeparator()
+
+        has_path = is_doc and bool(_widget_file_path(ed))
+        act_copy_path = menu.addAction("Copy Path")
+        act_copy_path.setEnabled(has_path)
+        act_copy_path.triggered.connect(
+            lambda _checked=False, idx=int(index): self._copy_tab_path(idx)
+        )
+
+        act_copy_ref = menu.addAction("Copy Reference")
+        act_copy_ref.setEnabled(has_path)
+        act_copy_ref.triggered.connect(
+            lambda _checked=False, idx=int(index): self._copy_tab_reference(idx)
+        )
+
+        menu.exec(global_pos)
+
+    def tear_out_index(self, index: int):
+        ed = self.widget(index)
+        if not _is_workspace_document_widget(ed):
+            return
+        self.removeTab(index)
+        self.workspace.create_tearout_window_with_editor(ed)
+        self.workspace.request_cleanup_empty_panes()
+
+        if self.count() == 0 and isinstance(self.owner_window, EditorTearOutWindow):
+            self.owner_window.close()
+
+    # ---- Drag/drop between panes/windows ----
+
+    def _handle_drop_with_zone(self, editor_id: str, zone: DropZone, drop_pos_widget, *, file_path: str | None = None):
+        ed, src_tabs, src_idx = self.workspace.find_editor_by_id(editor_id)
+        if ed is None or src_tabs is None or src_idx < 0:
+            if file_path:
+                opener = getattr(self.workspace, "open_path", None)
+                if callable(opener):
+                    opener(file_path)
+                else:
+                    self.workspace.open_editor(os.path.basename(file_path), file_path)
+                self.workspace.request_cleanup_empty_panes()
+            return
+
+        # Remove from source first
+        src_tabs.removeTab(src_idx)
+
+        if zone in (DropZone.LEFT, DropZone.RIGHT, DropZone.TOP, DropZone.BOTTOM):
+            # create a sibling pane by splitting THIS pane
+            orientation = Qt.Horizontal if zone in (DropZone.LEFT, DropZone.RIGHT) else Qt.Vertical
+            new_tabs = self.workspace.split_tabs_for_drop(self, orientation, before=(zone in (DropZone.LEFT, DropZone.TOP)))
+            new_tabs.add_editor(ed)
+            new_tabs.setCurrentWidget(ed)
+            ed.setFocus()
+        else:
+            # center drop = tab into this pane
+            p_tabbar = self.tabBar().mapFrom(self, drop_pos_widget)
+            target_idx = self.tabBar().tabAt(p_tabbar)
+            if target_idx < 0 or target_idx > self.count():
+                self.addTab(ed, "")
+                new_idx = self.indexOf(ed)
+            else:
+                self.insertTab(target_idx, ed, "")
+                new_idx = target_idx
+            self._connect_widget_document_signal(ed)
+            notify = getattr(self.workspace, "notify_document_widgets_changed", None)
+            if callable(notify):
+                notify()
+            self._refresh_tab_title(ed)
+            self._reflow_pinned_tabs()
+            new_idx = self.indexOf(ed)
+            self.setCurrentIndex(new_idx)
+            ed.setFocus()
+
+        self.workspace.request_cleanup_empty_panes()
+
+        if src_tabs.count() == 0 and isinstance(src_tabs.owner_window, EditorTearOutWindow):
+            src_tabs.owner_window.close()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._overlay.setGeometry(self.rect())
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            zone = self._compute_zone(event.position().toPoint())
+            self._show_overlay(zone)
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            zone = self._compute_zone(event.position().toPoint())
+            self._show_overlay(zone)
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self._hide_overlay()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat(MIME_EDITOR_TAB):
+            self._hide_overlay()
+            super().dropEvent(event)
+            return
+
+        editor_id, file_path = _decode_editor_drag_payload(bytes(event.mimeData().data(MIME_EDITOR_TAB)))
+        zone = self._overlay.zone()
+        self._hide_overlay()
+
+        self._handle_drop_with_zone(editor_id, zone, event.position().toPoint(), file_path=file_path)
+        event.acceptProposedAction()
+
+
+class EditorTearOutWindow(QMainWindow):
+    def __init__(self, workspace: "EditorWorkspace", parent=None):
+        super().__init__(parent)
+        self.workspace = workspace
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.resize(900, 600)
+
+        self.tabs = EditorTabs(workspace=workspace, owner_window=self, parent=self)
+        self.setCentralWidget(self.tabs)
+
+    def closeEvent(self, event):
+        # move remaining tabs back to primary pane
+        remaining = []
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if _is_workspace_document_widget(w):
+                remaining.append(w)
+
+        for ed in remaining:
+            idx = self.tabs.indexOf(ed)
+            if idx >= 0:
+                self.tabs.removeTab(idx)
+            self.workspace.move_editor_to_primary_tabs(ed)
+
+        event.accept()
+
+
+class EditorWorkspace(QWidget):
+    documentModificationStateChanged = Signal()
+    documentWidgetsChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self._tearouts: list[EditorTearOutWindow] = []
+        self._documents: dict[str, DocumentRecord] = {}
+        self._cleanup_pending = False
+        self._path_opener: Callable[[str], Any] | None = None
+        self._default_editor_font_size = 10
+        self._default_editor_font_family: str | None = None
+
+        self.root_splitter = QSplitter(Qt.Horizontal, self)
+        self.root_splitter.setChildrenCollapsible(False)
+        self.root_splitter.setHandleWidth(6)
+
+        first_tabs = EditorTabs(workspace=self, owner_window=None, parent=self.root_splitter)
+        self.root_splitter.addWidget(first_tabs)
+        self.root_splitter.setStretchFactor(0, 1)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.root_splitter)
+
+    def notify_document_widgets_changed(self) -> None:
+        try:
+            self.documentWidgetsChanged.emit()
+        except Exception:
+            pass
+
+    def set_path_opener(self, opener: Callable[[str], Any] | None) -> None:
+        self._path_opener = opener if callable(opener) else None
+
+    def set_editor_font_defaults(
+            self,
+            *,
+            font_size: int | None = None,
+            font_family: str | None = None,
+    ) -> None:
+        if font_size is not None:
+            try:
+                self._default_editor_font_size = max(1, int(font_size))
+            except Exception:
+                self._default_editor_font_size = 10
+        if font_family is not None:
+            text = str(font_family or "").strip()
+            self._default_editor_font_family = text or None
+
+    def _effective_font_size(self, font_size: int | None) -> int:
+        if font_size is None:
+            return int(self._default_editor_font_size)
+        try:
+            return max(1, int(font_size))
+        except Exception:
+            return int(self._default_editor_font_size)
+
+    def _effective_font_family(self, font_family: str | None) -> str | None:
+        if isinstance(font_family, str) and font_family.strip():
+            return font_family.strip()
+        return self._default_editor_font_family
+
+    # -------- document registry --------
+
+    def _canonical_path(self, path: str) -> str:
+        try:
+            return str(Path(path).resolve())
+        except Exception:
+            return os.path.abspath(path)
+
+    def _doc_key_for(self, file_path: str | None) -> str:
+        if file_path:
+            return self._canonical_path(file_path)
+        return "__editor__/missing"
+
+    @staticmethod
+    def _is_document_alive(document: QTextDocument | None) -> bool:
+        if not isinstance(document, QTextDocument):
+            return False
+        try:
+            _ = document.isModified()
+        except RuntimeError:
+            return False
+        return True
+
+    def _adopt_record_document(self, record: DocumentRecord, fallback_editor: EditorWidget | None = None) -> QTextDocument:
+        """
+        Ensure the record has a live QTextDocument owned by the workspace.
+        This prevents editor-view deletion from destroying shared documents.
+        """
+        doc = record.document
+        if self._is_document_alive(doc):
+            if doc.parent() is not self:
+                doc.setParent(self)
+            return doc
+
+        text = ""
+        modified = False
+        if isinstance(fallback_editor, EditorWidget):
+            try:
+                text = fallback_editor.toPlainText()
+                modified = bool(fallback_editor.document().isModified())
+            except RuntimeError:
+                text = ""
+                modified = False
+
+        if not text:
+            for view in list(record.views):
+                if not isinstance(view, EditorWidget):
+                    continue
+                try:
+                    text = view.toPlainText()
+                    modified = bool(view.document().isModified())
+                    break
+                except RuntimeError:
+                    continue
+
+        new_doc = QTextDocument(self)
+        new_doc.setPlainText(text)
+        new_doc.setModified(modified)
+        record.document = new_doc
+        return new_doc
+
+    def _ensure_record_for_editor(self, ed: EditorWidget) -> DocumentRecord:
+        existing = ed.document_record()
+        if existing is not None:
+            self._adopt_record_document(existing, fallback_editor=ed)
+            return existing
+
+        key = self._doc_key_for(ed.file_path) if ed.file_path else f"__editor__/{ed.editor_id}"
+        record = self._documents.get(key)
+        adopt_current = False
+        if record is None:
+            record = DocumentRecord(
+                key=key,
+                document=ed.document(),
+                file_path=ed.file_path,
+            )
+            self._documents[key] = record
+            self._adopt_record_document(record, fallback_editor=ed)
+            adopt_current = True
+        else:
+            self._adopt_record_document(record, fallback_editor=ed)
+        ed.attach_document_record(record, adopt_current_document=adopt_current)
+        return record
+
+    def sync_document_record_key(self, record: DocumentRecord):
+        if not isinstance(record, DocumentRecord):
+            return
+        desired = self._doc_key_for(record.file_path) if record.file_path else record.key
+        if desired == record.key:
+            self._documents[record.key] = record
+            return
+        conflict = self._documents.get(desired)
+        if conflict is not None and conflict is not record:
+            return
+        if self._documents.get(record.key) is record:
+            self._documents.pop(record.key, None)
+        record.key = desired
+        self._documents[desired] = record
+
+    def document_key_for_editor(self, ed: EditorWidget) -> str:
+        record = self._ensure_record_for_editor(ed)
+        self.sync_document_record_key(record)
+        return record.key
+
+    def is_last_view_for_document(self, ed: EditorWidget) -> bool:
+        record = self._ensure_record_for_editor(ed)
+        count = 0
+        for view in list(record.views):
+            if isinstance(view, EditorWidget):
+                count += 1
+        return count <= 1
+
+    def _prune_orphan_document_records(self):
+        stale_keys: list[str] = []
+        for key, record in self._documents.items():
+            has_live_view = any(isinstance(view, EditorWidget) for view in list(record.views))
+            if not has_live_view:
+                stale_keys.append(key)
+        for key in stale_keys:
+            self._documents.pop(key, None)
+
+    def release_document_view(self, ed: EditorWidget, _doc_key: str | None = None):
+        record = ed.document_record()
+        if record is None:
+            self._disarm_editor_before_delete(ed)
+            self._prune_orphan_document_records()
+            return
+        try:
+            record.views.discard(ed)
+        except Exception:
+            pass
+        if not any(isinstance(view, EditorWidget) for view in list(record.views)):
+            if self._documents.get(record.key) is record:
+                self._documents.pop(record.key, None)
+        ed.detach_document_record()
+        self._disarm_editor_before_delete(ed)
+
+    @staticmethod
+    def _disarm_editor_before_delete(ed: EditorWidget):
+        """
+        Detach an editor from shared document state before deletion.
+        This avoids Qt teardown races when a view closes while another
+        view still references the same QTextDocument.
+        """
+        if not isinstance(ed, EditorWidget):
+            return
+        try:
+            ed.blockSignals(True)
+        except RuntimeError:
+            return
+        try:
+            ed.hide_completion_popup()
+        except Exception:
+            pass
+        try:
+            scratch = QTextDocument(ed)
+            scratch.setDocumentLayout(QPlainTextDocumentLayout(scratch))
+            ed.setDocument(scratch)
+            ed.set_file_path(None)
+        except RuntimeError:
+            return
+
+    def _new_view_for_record(
+            self,
+            record: DocumentRecord,
+            font_size: int | None = None,
+            font_family: str | None = None,
+            source_editor: EditorWidget | None = None,
+    ) -> EditorWidget:
+        self._adopt_record_document(record, fallback_editor=source_editor)
+        ed = EditorWidget(
+            None,
+            font_size=self._effective_font_size(font_size),
+            font_family=self._effective_font_family(font_family),
+            workspace=self,
+        )
+        ed.attach_document_record(record)
+
+        if isinstance(source_editor, EditorWidget):
+            src_cursor = source_editor.textCursor()
+            dst_cursor = ed.textCursor()
+            dst_cursor.setPosition(src_cursor.selectionStart())
+            dst_cursor.setPosition(src_cursor.selectionEnd(), QTextCursor.KeepAnchor)
+            ed.setTextCursor(dst_cursor)
+            ed.verticalScrollBar().setValue(source_editor.verticalScrollBar().value())
+            ed.horizontalScrollBar().setValue(source_editor.horizontalScrollBar().value())
+        return ed
+
+    def _find_editor_for_doc_key(self, doc_key: str, preferred_tabs: EditorTabs | None = None) -> EditorWidget | None:
+        if preferred_tabs is not None:
+            for i in range(preferred_tabs.count()):
+                w = preferred_tabs.widget(i)
+                if isinstance(w, EditorWidget) and self.document_key_for_editor(w) == doc_key:
+                    return w
+        for ed in self.all_editors():
+            if self.document_key_for_editor(ed) == doc_key:
+                return ed
+        return None
+
+    def split_tabs_for_drop(self, target_tabs: EditorTabs, orientation: Qt.Orientation, before: bool) -> EditorTabs:
+        parent = target_tabs.parentWidget()
+
+        if isinstance(parent, QSplitter) and parent.orientation() == orientation:
+            idx = parent.indexOf(target_tabs)
+            insert_idx = idx if before else idx + 1
+            new_tabs = EditorTabs(workspace=self, owner_window=None, parent=parent)
+            parent.insertWidget(insert_idx, new_tabs)
+            parent.setStretchFactor(insert_idx, 1)
+            return new_tabs
+
+        # wrap target in a new splitter of requested orientation
+        new_splitter = QSplitter(orientation)
+        new_splitter.setChildrenCollapsible(False)
+        new_splitter.setHandleWidth(6)
+
+        new_tabs = EditorTabs(workspace=self, owner_window=None, parent=new_splitter)
+
+        if isinstance(parent, QSplitter):
+            idx = parent.indexOf(target_tabs)
+            target_tabs.setParent(None)
+            parent.insertWidget(idx, new_splitter)
+        else:
+            old = self.root_splitter
+            old.setParent(None)
+            self.root_splitter = new_splitter
+            self.layout().addWidget(self.root_splitter)
+
+        if before:
+            new_splitter.addWidget(new_tabs)
+            new_splitter.addWidget(target_tabs)
+        else:
+            new_splitter.addWidget(target_tabs)
+            new_splitter.addWidget(new_tabs)
+
+        new_splitter.setStretchFactor(0, 1)
+        new_splitter.setStretchFactor(1, 1)
+        return new_tabs
+
+    # compatibility no-ops
+    def editor_docks(self):
+        return []
+
+    def dock_for_editor(self, _editor):
+        return None
+
+    def refresh_dock_title(self, _editor):
+        pass
+
+    # -------- root validity guard --------
+    def _ensure_valid_root_splitter(self):
+        try:
+            _ = self.root_splitter.count()
+            return
+        except RuntimeError:
+            pass
+
+        self.root_splitter = QSplitter(Qt.Horizontal, self)
+        self.root_splitter.setChildrenCollapsible(False)
+        self.root_splitter.setHandleWidth(6)
+
+        # clear layout and re-add
+        lay = self.layout()
+        if lay is None:
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+        else:
+            while lay.count():
+                item = lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+        lay.addWidget(self.root_splitter)
+
+        self.root_splitter.addWidget(EditorTabs(workspace=self, owner_window=None, parent=self.root_splitter))
+
+    # -------- traversal --------
+
+    def _all_tabs_in_widget(self, w: QWidget) -> list[EditorTabs]:
+        out = []
+        stack = [w]
+        while stack:
+            obj = stack.pop()
+            if isinstance(obj, EditorTabs):
+                out.append(obj)
+            elif isinstance(obj, QSplitter):
+                try:
+                    n = obj.count()
+                except RuntimeError:
+                    continue
+                for i in range(n):
+                    child = obj.widget(i)
+                    if child is not None:
+                        stack.append(child)
+        return out
+
+    def all_tabs(self) -> list[EditorTabs]:
+        self._ensure_valid_root_splitter()
+        tabs = self._all_tabs_in_widget(self.root_splitter)
+
+        for tw in list(self._tearouts):
+            if tw is None:
+                continue
+            try:
+                cw = tw.centralWidget()
+            except RuntimeError:
+                continue
+            if cw is not None:
+                tabs.extend(self._all_tabs_in_widget(cw))
+        return tabs
+
+    def all_editors(self) -> list[EditorWidget]:
+        result = []
+        seen_ids: set[int] = set()
+        for tabs in self.all_tabs():
+            for i in range(tabs.count()):
+                w = tabs.widget(i)
+                resolved = _as_editor_widget(w)
+                if not isinstance(resolved, EditorWidget):
+                    continue
+                key = int(id(resolved))
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                result.append(resolved)
+        return result
+
+    def all_document_widgets(self) -> list[QWidget]:
+        result: list[QWidget] = []
+        for tabs in self.all_tabs():
+            for i in range(tabs.count()):
+                w = tabs.widget(i)
+                if _is_workspace_document_widget(w):
+                    result.append(w)
+        return result
+
+    def _main_tabs(self) -> list[EditorTabs]:
+        self._ensure_valid_root_splitter()
+        return self._all_tabs_in_widget(self.root_splitter)
+
+    def _ensure_one_main_tabs(self) -> EditorTabs:
+        tabs = self._main_tabs()
+        if tabs:
+            return tabs[0]
+        t = EditorTabs(workspace=self, owner_window=None, parent=self.root_splitter)
+        self.root_splitter.addWidget(t)
+        return t
+
+    def _current_tabs(self) -> EditorTabs | None:
+        fw = QApplication.focusWidget()
+        w = fw
+        while w is not None:
+            if isinstance(w, EditorTabs):
+                return w
+            w = w.parentWidget()
+
+        for t in self._main_tabs():
+            if t.count() > 0:
+                return t
+        mts = self._main_tabs()
+        return mts[0] if mts else None
+
+    def active_editor(self):
+        fw = QApplication.focusWidget()
+        w = fw
+        while w is not None:
+            if isinstance(w, EditorWidget):
+                return w
+            w = w.parentWidget()
+
+        tabs = self._current_tabs()
+        if tabs:
+            cw = tabs.currentWidget()
+            resolved = _as_editor_widget(cw)
+            if isinstance(resolved, EditorWidget):
+                return resolved
+        return None
+
+    def active_document_widget(self) -> QWidget | None:
+        fw = QApplication.focusWidget()
+        w = fw
+        while w is not None:
+            if _is_workspace_document_widget(w):
+                return w
+            w = w.parentWidget()
+
+        tabs = self._current_tabs()
+        if tabs is not None:
+            current = tabs.currentWidget()
+            if _is_workspace_document_widget(current):
+                return current
+        return None
+
+    @staticmethod
+    def editor_from_document_widget(widget: object) -> EditorWidget | None:
+        return _as_editor_widget(widget)
+
+    # -------- find/open --------
+
+    def find_editor_by_id(self, editor_id: str):
+        for tabs in self.all_tabs():
+            for i in range(tabs.count()):
+                w = tabs.widget(i)
+                if not _is_workspace_document_widget(w):
+                    continue
+                if str(getattr(w, "editor_id", "") or "") != str(editor_id or ""):
+                    continue
+                return w, tabs, i
+        return None, None, -1
+
+    def _find_editor_for_path(self, path: str):
+        target = self._canonical_path(path)
+        preferred = self._current_tabs()
+        if preferred is not None:
+            for i in range(preferred.count()):
+                w = preferred.widget(i)
+                resolved = _as_editor_widget(w)
+                if isinstance(resolved, EditorWidget) and resolved.file_path and self._canonical_path(resolved.file_path) == target:
+                    return resolved
+        for ed in self.all_editors():
+            if ed.file_path and self._canonical_path(ed.file_path) == target:
+                return ed
+        return None
+
+    def find_document_by_path(self, path: str) -> QWidget | None:
+        target = self._canonical_path(path)
+        preferred = self._current_tabs()
+        if preferred is not None:
+            for i in range(preferred.count()):
+                w = preferred.widget(i)
+                if not _is_workspace_document_widget(w):
+                    continue
+                file_path = _widget_file_path(w)
+                if file_path and self._canonical_path(file_path) == target:
+                    return w
+        for widget in self.all_document_widgets():
+            file_path = _widget_file_path(widget)
+            if file_path and self._canonical_path(file_path) == target:
+                return widget
+        return None
+
+    def _focus_editor_widget(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
+        for tabs in self.all_tabs():
+            for idx in range(tabs.count()):
+                candidate = tabs.widget(idx)
+                if candidate is ed or _as_editor_widget(candidate) is ed:
+                    tabs.setCurrentIndex(idx)
+                    candidate.setFocus()
+                    return
+
+    def prepare_editor_for_cross_instance_transfer(self, ed: QWidget) -> str | None:
+        if not _is_workspace_document_widget(ed):
+            return None
+        file_path = _widget_file_path(ed)
+        if not file_path:
+            return None
+        if _widget_modified(ed):
+            if not _widget_save_file(ed):
+                return None
+        try:
+            return self._canonical_path(file_path)
+        except Exception:
+            return file_path
+
+    def open_path(self, path: str, *, opener: Callable[[str], Any] | None = None) -> QWidget | None:
+        target = str(path or "").strip()
+        if not target:
+            return None
+        effective_opener = opener if callable(opener) else self._path_opener
+        if callable(effective_opener):
+            try:
+                result = effective_opener(target)
+            except Exception:
+                return None
+            return result if isinstance(result, QWidget) else None
+        return self.open_editor(os.path.basename(target), target)
+
+    def open_editor(
+            self,
+            title: str,
+            path: str,
+            font_size: int | None = None,
+            font_family: str | None = None,
+            *,
+            force_new_view: bool = False,
+            show_errors: bool = True,
+    ):
+        self._ensure_valid_root_splitter()
+        tabs = self._current_tabs() or self._ensure_one_main_tabs()
+
+        cpath = self._canonical_path(path)
+        if not force_new_view:
+            existing = self._find_editor_for_path(cpath)
+            if existing:
+                self._focus_editor_widget(existing)
+                return existing
+        record = self._documents.get(cpath)
+        if record is None:
+            reduced_capability_mode = False
+            large_file_analysis: LargeFileAnalysis | None = None
+            if os.path.exists(cpath):
+                large_file_analysis = analyze_large_text_file(cpath)
+                if large_file_analysis is not None:
+                    should_open, reduced_capability_mode = prompt_large_file_open(self, large_file_analysis)
+                    if not should_open:
+                        return None
+            ed = EditorWidget(
+                None,
+                font_size=self._effective_font_size(font_size),
+                font_family=self._effective_font_family(font_family),
+                workspace=self,
+            )
+            if os.path.exists(cpath):
+                if not ed.load_file(
+                    cpath,
+                    show_errors=show_errors,
+                    reduced_capability_mode=reduced_capability_mode,
+                    large_file_analysis=large_file_analysis,
+                ):
+                    ed.deleteLater()
+                    return None
+            else:
+                ed.file_path = cpath
+            record = DocumentRecord(
+                key=cpath,
+                document=ed.document(),
+                file_path=cpath,
+                reduced_capability_mode=bool(reduced_capability_mode),
+                large_file_analysis=large_file_analysis,
+            )
+            self._documents[cpath] = record
+            self._adopt_record_document(record, fallback_editor=ed)
+            ed.attach_document_record(record, adopt_current_document=True)
+        else:
+            self._adopt_record_document(record)
+            ed = self._new_view_for_record(record, font_size=font_size, font_family=font_family)
+
+        tabs.add_editor(ed)
+        return ed
+
+    def ensure_editor_available(self, font_size: int = 10):
+        _ = font_size
+        return
+
+    # -------- split --------
+
+    def _split_tabs(self, tabs: EditorTabs, orientation: Qt.Orientation) -> EditorTabs:
+        parent = tabs.parentWidget()
+
+        if isinstance(parent, QSplitter) and parent.orientation() == orientation:
+            new_tabs = EditorTabs(workspace=self, owner_window=None, parent=parent)
+            idx = parent.indexOf(tabs)
+            parent.insertWidget(idx + 1, new_tabs)
+            parent.setStretchFactor(idx, 1)
+            parent.setStretchFactor(idx + 1, 1)
+            return new_tabs
+
+        new_splitter = QSplitter(orientation)
+        new_splitter.setChildrenCollapsible(False)
+        new_splitter.setHandleWidth(6)
+        new_tabs = EditorTabs(workspace=self, owner_window=None, parent=new_splitter)
+
+        if isinstance(parent, QSplitter):
+            idx = parent.indexOf(tabs)
+            tabs.setParent(None)
+            parent.insertWidget(idx, new_splitter)
+        else:
+            old = self.root_splitter
+            old.setParent(None)
+            self.root_splitter = new_splitter
+            self.layout().addWidget(self.root_splitter)
+
+        new_splitter.addWidget(tabs)
+        new_splitter.addWidget(new_tabs)
+        new_splitter.setStretchFactor(0, 1)
+        new_splitter.setStretchFactor(1, 1)
+        return new_tabs
+
+    def split_editor_right(self, font_size: int | None = None, font_family: str | None = None):
+        tabs = self._current_tabs()
+        if tabs is None:
+            return
+
+        src_widget = tabs.currentWidget()
+        src = _as_editor_widget(src_widget)
+        if not isinstance(src, EditorWidget):
+            return
+        new_tabs = self._split_tabs(tabs, Qt.Horizontal)
+        record = self._ensure_record_for_editor(src)
+        ed = self._new_view_for_record(
+            record,
+            font_size=font_size,
+            font_family=font_family,
+            source_editor=src,
+        )
+
+        new_tabs.add_editor(ed)
+
+    def split_editor_down(self, font_size: int | None = None, font_family: str | None = None):
+        tabs = self._current_tabs()
+        if tabs is None:
+            return
+
+        src_widget = tabs.currentWidget()
+        src = _as_editor_widget(src_widget)
+        if not isinstance(src, EditorWidget):
+            return
+        new_tabs = self._split_tabs(tabs, Qt.Vertical)
+        record = self._ensure_record_for_editor(src)
+        ed = self._new_view_for_record(
+            record,
+            font_size=font_size,
+            font_family=font_family,
+            source_editor=src,
+        )
+
+        new_tabs.add_editor(ed)
+
+    # -------- tearout --------
+
+    def create_tearout_window_with_editor(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
+        tw = EditorTearOutWindow(self)
+        self._tearouts.append(tw)
+        tw.tabs.add_editor(ed)
+        tw.setWindowTitle(_widget_display_name(ed))
+        tw.show()
+        ed.setFocus()
+
+        def _cleanup(*_):
+            if tw in self._tearouts:
+                self._tearouts.remove(tw)
+
+        tw.destroyed.connect(_cleanup)
+
+    def move_editor_to_primary_tabs(self, ed: QWidget):
+        if not _is_workspace_document_widget(ed):
+            return
+        tabs = self._ensure_one_main_tabs()
+        tabs.add_editor(ed)
+
+    # -------- cleanup --------
+
+    def request_cleanup_empty_panes(self):
+        if self._cleanup_pending:
+            return
+        self._cleanup_pending = True
+        QTimer.singleShot(0, self._run_deferred_cleanup)
+
+    def _run_deferred_cleanup(self):
+        self._cleanup_pending = False
+        try:
+            self.cleanup_empty_panes()
+        except RuntimeError:
+            # Workspace may be mid-destruction; ignore deferred cleanup then.
+            return
+
+    def cleanup_empty_panes(self):
+        self._ensure_valid_root_splitter()
+
+        changed = True
+        while changed:
+            changed = False
+            for tabs in self._main_tabs():
+                if tabs.count() > 0:
+                    continue
+                parent = tabs.parentWidget()
+                tabs.setParent(None)
+                tabs.deleteLater()
+                self._collapse_splitter_if_needed(parent)
+                changed = True
+                break
+
+        # always keep at least one main tabs pane
+        self._ensure_one_main_tabs()
+        self._prune_orphan_document_records()
+
+    def _collapse_splitter_if_needed(self, splitter):
+        if not isinstance(splitter, QSplitter):
+            return
+
+        try:
+            count = splitter.count()
+        except RuntimeError:
+            return
+
+        if count > 1:
+            return
+
+        parent = splitter.parentWidget()
+
+        if count == 0:
+            splitter.setParent(None)
+            splitter.deleteLater()
+            if isinstance(parent, QSplitter):
+                self._collapse_splitter_if_needed(parent)
+            return
+
+        child = splitter.widget(0)
+        if child is None:
+            return
+        child.setParent(None)
+
+        if isinstance(parent, QSplitter):
+            idx = parent.indexOf(splitter)
+            splitter.setParent(None)
+            splitter.deleteLater()
+            parent.insertWidget(idx, child)
+            self._collapse_splitter_if_needed(parent)
+        else:
+            # replace root safely
+            old = self.root_splitter
+            old.setParent(None)
+            old.deleteLater()
+
+            if isinstance(child, QSplitter):
+                self.root_splitter = child
+            else:
+                self.root_splitter = QSplitter(Qt.Horizontal, self)
+                self.root_splitter.setChildrenCollapsible(False)
+                self.root_splitter.setHandleWidth(6)
+                self.root_splitter.addWidget(child)
+
+            lay = self.layout()
+            if lay is None:
+                lay = QVBoxLayout(self)
+                lay.setContentsMargins(0, 0, 0, 0)
+            else:
+                while lay.count():
+                    item = lay.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.setParent(None)
+            lay.addWidget(self.root_splitter)
+        self._prune_orphan_document_records()

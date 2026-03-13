@@ -6,7 +6,7 @@ from unittest import mock
 
 from PySide6.QtCore import QCoreApplication
 
-from src.ui.completion_manager import CompletionManager, _CompletionPayload, _fallback_attribute_candidates
+from pytpo.ui.completion_manager import CompletionManager, _CompletionPayload, _fallback_attribute_candidates
 
 
 def _qt_app() -> QCoreApplication:
@@ -141,7 +141,7 @@ class CompletionManagerJediContextTests(unittest.TestCase):
         completed.returncode = 0
         completed.stdout = json.dumps(["/venv/lib/python3.11", "/venv/lib/python3.11/site-packages"])
 
-        with mock.patch("src.ui.completion_manager.subprocess.run", return_value=completed) as run_mock:
+        with mock.patch("pytpo.ui.completion_manager.subprocess.run", return_value=completed) as run_mock:
             first = self.manager._resolve_analysis_sys_path("/project/.venv/bin/python")
             second = self.manager._resolve_analysis_sys_path("/project/.venv/bin/python")
 

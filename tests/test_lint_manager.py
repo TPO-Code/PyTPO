@@ -4,12 +4,12 @@ import json
 import unittest
 from unittest.mock import patch
 
-from src.ui import lint_manager
+from pytpo.ui import lint_manager
 
 
 class LintManagerBackendFallbackTests(unittest.TestCase):
     def test_build_backend_command_uses_ide_runtime_interpreter(self) -> None:
-        with patch("src.ui.lint_manager.os.sys.executable", "/ide/python"):
+        with patch("pytpo.ui.lint_manager.os.sys.executable", "/ide/python"):
             cmd = lint_manager._build_backend_command(
                 backend="ruff",
                 interpreter=lint_manager._lint_backend_interpreter(),
@@ -40,8 +40,8 @@ class LintManagerBackendFallbackTests(unittest.TestCase):
                 return _Proc(returncode=1, stdout=json.dumps(payload), stderr="")
             raise FileNotFoundError(cmd[0])
 
-        with patch("src.ui.lint_manager.os.sys.executable", "/ide/python"):
-            with patch("src.ui.lint_manager.subprocess.run", side_effect=fake_run):
+        with patch("pytpo.ui.lint_manager.os.sys.executable", "/ide/python"):
+            with patch("pytpo.ui.lint_manager.subprocess.run", side_effect=fake_run):
                 result = lint_manager._run_external_backend(
                     backend="ruff",
                     file_path="/tmp/example.py",
@@ -59,8 +59,8 @@ class LintManagerBackendFallbackTests(unittest.TestCase):
         def fake_run(_cmd, **_kwargs):
             return _Proc(returncode=1, stdout="", stderr="No module named ruff")
 
-        with patch("src.ui.lint_manager.os.sys.executable", "/ide/python"):
-            with patch("src.ui.lint_manager.subprocess.run", side_effect=fake_run):
+        with patch("pytpo.ui.lint_manager.os.sys.executable", "/ide/python"):
+            with patch("pytpo.ui.lint_manager.subprocess.run", side_effect=fake_run):
                 result = lint_manager._run_external_backend(
                     backend="ruff",
                     file_path="/tmp/example.py",

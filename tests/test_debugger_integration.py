@@ -15,17 +15,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QProcess, QTimer
 
-from src.ui.debugger.breakpoint_store import DebuggerBreakpointStore
-from src.ui.debugger.backend import DebugLaunchKind, DebugLaunchRequest, ExecutionState
-from src.ui.debugger.debugpy_backend import DebugpyPythonDebuggerBackend
-from src.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
-from src.ui.debugger.python_backend import BdbPythonDebuggerBackend, DEBUGGER_HARNESS_CODE, normalize_breakpoint_map
-from src.ui.debugger.python_backend import PythonDebuggerBackend
-from src.ui.debugger.session_widget import DebuggerSessionWidget
-from src.ui.debugger.terminal_bridge import DebugTerminalBridge
-from src.ui.debugger_support import debugger_breakpoints_supported_for_path
-from src.ui.console_run_manager import ConsoleRunManager
-from src.ui.controllers.execution_controller import ExecutionController
+from pytpo.ui.debugger.breakpoint_store import DebuggerBreakpointStore
+from pytpo.ui.debugger.backend import DebugLaunchKind, DebugLaunchRequest, ExecutionState
+from pytpo.ui.debugger.debugpy_backend import DebugpyPythonDebuggerBackend
+from pytpo.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
+from pytpo.ui.debugger.python_backend import BdbPythonDebuggerBackend, DEBUGGER_HARNESS_CODE, normalize_breakpoint_map
+from pytpo.ui.debugger.python_backend import PythonDebuggerBackend
+from pytpo.ui.debugger.session_widget import DebuggerSessionWidget
+from pytpo.ui.debugger.terminal_bridge import DebugTerminalBridge
+from pytpo.ui.debugger_support import debugger_breakpoints_supported_for_path
+from pytpo.ui.console_run_manager import ConsoleRunManager
+from pytpo.ui.controllers.execution_controller import ExecutionController
 
 
 class _FakeSettingsManager:
@@ -438,7 +438,7 @@ class PythonDebuggerBackendUnitTests(unittest.TestCase):
 class LldbDapBackendUnitTests(unittest.TestCase):
     def test_adapter_path_accepts_versioned_lldb_vscode_binary(self) -> None:
         with mock.patch.object(LldbDapDebuggerBackend, "_adapter_candidates", return_value=("lldb-dap", "lldb-vscode-14")):
-            with mock.patch("src.ui.debugger.lldb_dap_backend.shutil.which") as which_mock:
+            with mock.patch("pytpo.ui.debugger.lldb_dap_backend.shutil.which") as which_mock:
                 which_mock.side_effect = lambda name: {"lldb-dap": "", "lldb-vscode-14": "/usr/bin/lldb-vscode-14"}.get(name, "")
                 self.assertEqual(LldbDapDebuggerBackend.adapter_path(), "/usr/bin/lldb-vscode-14")
 
