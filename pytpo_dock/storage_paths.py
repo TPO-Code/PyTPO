@@ -29,5 +29,13 @@ def dock_pinned_apps_path() -> Path:
     return dock_config_dir() / "pinned.json"
 
 
+def dock_settings_path() -> Path:
+    return dock_config_dir() / "settings.json"
+
+
+def dock_debug_log_path() -> Path:
+    return dock_state_dir() / "render-debug.log"
+
+
 def migrate_legacy_dock_storage() -> None:
     migrate_file_if_missing(_LEGACY_CONFIG_DIR / "pinned.json", dock_pinned_apps_path())
