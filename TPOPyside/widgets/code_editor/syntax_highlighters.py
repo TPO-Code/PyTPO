@@ -38,6 +38,7 @@ SYNTAX_LANGUAGE_LABELS: dict[str, str] = {
     "php": "PHP",
     "cpp": "C/C++",
     "json": "JSON",
+    "desktop": "Desktop Entry/Session",
     "toml": "TOML/QSST",
     "rust": "Rust",
     "css": "CSS/SCSS/LESS",
@@ -58,6 +59,7 @@ SYNTAX_LANGUAGE_ALIASES: dict[str, str] = {
     "make": "cpp",
     "json": "json",
     "jsonc": "json",
+    "desktop": "desktop",
     "toml": "toml",
     "rust": "rust",
     "css": "css",
@@ -118,6 +120,16 @@ SYNTAX_TOKEN_DEFAULTS: dict[str, dict[str, str]] = {
         "key": "#9CDCFE",
         "string": "#CE9178",
         "number": "#B5CEA8",
+    },
+    "desktop": {
+        "section": "#4EC9B0",
+        "key": "#9CDCFE",
+        "locale": "#C586C0",
+        "value": "#CE9178",
+        "field_code": "#DCDCAA",
+        "literal": "#569Cff",
+        "number": "#B5CEA8",
+        "comment": "#6A9955",
     },
     "toml": {
         "key": "#9CDCFE",
@@ -703,6 +715,66 @@ class JsonHighlighter(QSyntaxHighlighter):
         for pat, fmt in self.rules:
             for m in pat.finditer(text):
                 self.setFormat(m.start(), m.end() - m.start(), fmt)
+        hide_hash_for_colors(self, text)
+
+
+class DesktopEntryHighlighter(QSyntaxHighlighter):
+    _SECTION_RE = re.compile(r"^\s*\[[^\]\n]+\]\s*$")
+    _KEY_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9@._+-]*)(\[[^\]\n]+\])?(?=\s*=)")
+    _VALUE_RE = re.compile(r"(?<=\=)\s*.*$")
+    _FIELD_CODE_RE = re.compile(r"%[fFuUdDnNickvmDNUVK]")
+    _BOOLEAN_RE = re.compile(r"\b(?:true|false)\b", re.IGNORECASE)
+    _NUMBER_RE = re.compile(r"\b-?\d+(?:\.\d+)?\b")
+    _COMMENT_RE = re.compile(r"^\s*[#;].*$")
+
+    def __init__(self, parent=None, *, language_id: str | None = None):
+        super().__init__(parent)
+        self._language_id = canonicalize_syntax_language(language_id or "desktop")
+        self.fmt_section = _fmt(self._language_id, "section", "#4EC9B0", bold=True)
+        self.fmt_key = _fmt(self._language_id, "key", "#9CDCFE")
+        self.fmt_locale = _fmt(self._language_id, "locale", "#C586C0")
+        self.fmt_value = _fmt(self._language_id, "value", "#CE9178")
+        self.fmt_field_code = _fmt(self._language_id, "field_code", "#DCDCAA", bold=True)
+        self.fmt_literal = _fmt(self._language_id, "literal", "#569Cff", bold=True)
+        self.fmt_number = _fmt(self._language_id, "number", "#B5CEA8")
+        self.fmt_comment = _fmt(self._language_id, "comment", "#6A9955", italic=True)
+
+    def highlightBlock(self, text):
+        comment_match = self._COMMENT_RE.match(text)
+        if comment_match is not None:
+            self.setFormat(0, len(text), self.fmt_comment)
+            hide_hash_for_colors(self, text)
+            return
+
+        section_match = self._SECTION_RE.match(text)
+        if section_match is not None:
+            self.setFormat(section_match.start(), section_match.end() - section_match.start(), self.fmt_section)
+            hide_hash_for_colors(self, text)
+            return
+
+        key_match = self._KEY_RE.match(text)
+        if key_match is not None:
+            key_start, key_end = key_match.span(1)
+            self.setFormat(key_start, key_end - key_start, self.fmt_key)
+            locale_start, locale_end = key_match.span(2)
+            if locale_start >= 0 and locale_end > locale_start:
+                self.setFormat(locale_start, locale_end - locale_start, self.fmt_locale)
+
+        value_match = self._VALUE_RE.search(text)
+        if value_match is not None:
+            value_start, value_end = value_match.span()
+            if value_end > value_start:
+                self.setFormat(value_start, value_end - value_start, self.fmt_value)
+
+        for match in self._BOOLEAN_RE.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self.fmt_literal)
+
+        for match in self._NUMBER_RE.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self.fmt_number)
+
+        for match in self._FIELD_CODE_RE.finditer(text):
+            self.setFormat(match.start(), match.end() - match.start(), self.fmt_field_code)
+
         hide_hash_for_colors(self, text)
 
 
@@ -1415,6 +1487,7 @@ LANGUAGE_HIGHLIGHTER_MAP: dict[str, type[QSyntaxHighlighter]] = {
     "cpp": CppHighlighter,
     "json": JsonHighlighter,
     "jsonc": JsonHighlighter,
+    "desktop": DesktopEntryHighlighter,
     "rust": RustHighlighter,
     "css": CssHighlighter,
     "scss": CssHighlighter,
@@ -1506,6 +1579,7 @@ __all__ = [
     "PhpHighlighter",
     "CppHighlighter",
     "JsonHighlighter",
+    "DesktopEntryHighlighter",
     "TomlHighlighter",
     "RustHighlighter",
     "CssHighlighter",

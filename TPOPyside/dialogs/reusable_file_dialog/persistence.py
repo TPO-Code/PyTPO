@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -63,7 +64,20 @@ def load_starred_paths(settings: QSettings | None) -> list[str]:
     except Exception:
         return []
     if isinstance(raw, str):
-        raw = [raw]
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                decoded = json.loads(text)
+            except Exception:
+                decoded = None
+            if isinstance(decoded, list):
+                raw = decoded
+            else:
+                raw = [raw]
+        elif "," in text:
+            raw = [part.strip() for part in text.split(",") if part.strip()]
+        else:
+            raw = [raw]
     if not isinstance(raw, list):
         return []
     return normalize_starred_paths(raw)
@@ -74,7 +88,7 @@ def save_starred_paths(settings: QSettings | None, paths: Iterable[str | Path]) 
         return
     clean = normalize_starred_paths(paths)
     try:
-        settings.setValue(_STARRED_PATHS_KEY, clean)
+        settings.setValue(_STARRED_PATHS_KEY, json.dumps(clean))
         settings.sync()
     except Exception:
         return

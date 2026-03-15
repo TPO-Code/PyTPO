@@ -33,6 +33,8 @@ _EXTENSION_LANGUAGE_IDS: dict[str, str] = {
     ".json": "json",
     ".jsonc": "jsonc",
     ".geojson": "json",
+    ".desktop": "desktop",
+    ".session": "desktop",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",

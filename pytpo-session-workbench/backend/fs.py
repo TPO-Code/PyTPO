@@ -1,4 +1,5 @@
 # pytpo-session-workbench/backend/fs.py
+import os
 import shutil
 from pathlib import Path
 import json
@@ -22,6 +23,29 @@ LIVE_ROOTS = [
 import stat
 from datetime import datetime
 import subprocess
+
+def tracked_key_for_live_path(live_path: str | Path) -> str:
+    return str(Path(live_path)).replace("/", "_").lstrip("_")
+
+
+def _read_meta(tracked_dir: str | Path) -> tuple[Path, dict]:
+    tracked_path = Path(tracked_dir)
+    meta_path = tracked_path / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError("meta.json missing")
+    return meta_path, json.loads(meta_path.read_text())
+
+
+def _write_meta(meta_path: Path, meta: dict) -> None:
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
+def _backup_path(tracked_dir: str | Path, prefix: str) -> Path:
+    backup_dir = Path(tracked_dir) / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return backup_dir / f"{prefix}_{ts}"
+
 
 def _fmt_mtime(path: Path):
     try:
@@ -70,7 +94,7 @@ def restore_backup_to_draft(tracked_dir: str, backup_path: str):
             except Exception:
                 meta["hash_workspace_draft"] = None
             meta["last_restore_to_draft_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            meta_path.write_text(json.dumps(meta, indent=2))
+            _write_meta(meta_path, meta)
         return {"ok": True, "message": f"Restored backup {b.name} into workspace draft"}
     except Exception as e:
         return {"ok": False, "message": f"Failed to restore backup to draft: {e}"}
@@ -103,7 +127,9 @@ def restore_backup_to_live(tracked_dir: str, backup_path: str, escalate_helper: 
         try:
             shutil.copy2(str(b), str(live_path))
             meta["last_pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            meta_path.write_text(json.dumps(meta, indent=2))
+            meta["exists_live"] = True
+            meta["last_deleted_at"] = None
+            _write_meta(meta_path, meta)
             return {"ok": True, "message": f"Installed backup to {live_path}"}
         except PermissionError:
             # fallthrough to escalate or instruct GUI
@@ -115,7 +141,9 @@ def restore_backup_to_live(tracked_dir: str, backup_path: str, escalate_helper: 
                 p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 if p.returncode == 0:
                     meta["last_pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    meta_path.write_text(json.dumps(meta, indent=2))
+                    meta["exists_live"] = True
+                    meta["last_deleted_at"] = None
+                    _write_meta(meta_path, meta)
                     return {"ok": True, "message": f"Installed backup to {live_path} (via pkexec)"}
                 else:
                     return {"ok": False, "message": f"Escalation helper failed: {p.returncode}\nstdout: {p.stdout}\nstderr: {p.stderr}"}
@@ -157,7 +185,7 @@ def import_file_to_project(live_path: str, project_root: Path):
     if not p.exists():
         raise FileNotFoundError(live_path)
     # key-safe directory name
-    key = str(p).replace("/", "_").lstrip("_")
+    key = tracked_key_for_live_path(p)
     dest = Path(project_root) / "files" / key
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -185,7 +213,43 @@ def import_file_to_project(live_path: str, project_root: Path):
         "last_backup_path": None,
         "notes": ""
     }
-    (dest / "meta.json").write_text(json.dumps(meta, indent=2))
+    _write_meta(dest / "meta.json", meta)
+    return str(dest)
+
+
+def create_file_in_project(project_root: Path, live_path: str, initial_contents: str = "") -> str:
+    project_root = Path(project_root)
+    target = Path(live_path).expanduser()
+    if target.exists():
+        raise FileExistsError(f"Live target already exists: {target}\nUse Import Live File for existing files.")
+
+    key = tracked_key_for_live_path(target)
+    dest = project_root / "files" / key
+    if dest.exists():
+        raise FileExistsError(f"A tracked workspace entry already exists for {target}.")
+    dest.mkdir(parents=True, exist_ok=False)
+
+    contents = str(initial_contents or "")
+    (dest / "original.live.path.txt").write_text(str(target))
+    (dest / "import_snapshot").write_text("")
+    (dest / "workspace_draft").write_text(contents)
+
+    meta = {
+        "original_live_path": str(target),
+        "imported_at": None,
+        "created_in_project_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "last_opened_at": None,
+        "last_pushed_at": None,
+        "last_deleted_at": None,
+        "file_type_guess": target.suffix.lstrip("."),
+        "editable": True,
+        "exists_live": False,
+        "hash_import_snapshot": _hash_text(""),
+        "hash_workspace_draft": _hash_text(contents),
+        "last_backup_path": None,
+        "notes": "",
+    }
+    _write_meta(dest / "meta.json", meta)
     return str(dest)
 
 def save_draft(tracked_dir: str, contents: str):
@@ -200,7 +264,7 @@ def save_draft(tracked_dir: str, contents: str):
         meta = json.loads(meta_path.read_text())
         meta["hash_workspace_draft"] = _hash_text(contents)
         meta["last_opened_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        meta_path.write_text(json.dumps(meta, indent=2))
+        _write_meta(meta_path, meta)
     return True
 
 def read_draft(tracked_dir: str):
@@ -233,7 +297,7 @@ def create_backup(tracked_dir: str, backup_root=None):
         meta = json.loads(meta_path.read_text())
         meta["last_backup_path"] = str(dest)
         meta["last_backup_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        meta_path.write_text(json.dumps(meta, indent=2))
+        _write_meta(meta_path, meta)
     return str(dest)
 
 def push_draft_to_live(tracked_dir: str, escalate_helper: str = None, try_escalate: bool = False):
@@ -262,7 +326,9 @@ def push_draft_to_live(tracked_dir: str, escalate_helper: str = None, try_escala
         # attempt to copy (may raise PermissionError)
         shutil.copy2(str(draft), str(live_path))
         meta["last_pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        meta_path.write_text(json.dumps(meta, indent=2))
+        meta["exists_live"] = True
+        meta["last_deleted_at"] = None
+        _write_meta(meta_path, meta)
         return {"ok": True, "message": f"Pushed to {live_path}"}
     except PermissionError as e:
         # if caller explicitly asks to try escalation, attempt pkexec
@@ -278,7 +344,9 @@ def push_draft_to_live(tracked_dir: str, escalate_helper: str = None, try_escala
                 if p.returncode == 0:
                     # successful; update meta
                     meta["last_pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    meta_path.write_text(json.dumps(meta, indent=2))
+                    meta["exists_live"] = True
+                    meta["last_deleted_at"] = None
+                    _write_meta(meta_path, meta)
                     return {"ok": True, "message": f"Pushed to {live_path} (via pkexec)"}
                 else:
                     return {"ok": False, "message": f"Escalation helper failed: {p.returncode}\nstdout: {p.stdout}\nstderr: {p.stderr}"}
@@ -294,3 +362,83 @@ def push_draft_to_live(tracked_dir: str, escalate_helper: str = None, try_escala
         }
     except Exception as e:
         return {"ok": False, "message": f"Failed to push: {e}"}
+
+
+def delete_live_file(tracked_dir: str, escalate_helper: str = None, try_escalate: bool = False):
+    tracked_path = Path(tracked_dir)
+    meta_path, meta = _read_meta(tracked_path)
+    live_path = Path(str(meta.get("original_live_path") or "")).expanduser()
+    if not str(live_path).strip():
+        return {"ok": False, "message": "Tracked file does not have a live target path."}
+
+    try:
+        create_backup(str(tracked_path))
+    except Exception:
+        pass
+
+    if not live_path.exists():
+        meta["exists_live"] = False
+        meta["last_deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_meta(meta_path, meta)
+        return {"ok": True, "message": f"Live file is already missing: {live_path}"}
+
+    live_backup_path = _backup_path(tracked_path, "live_delete_backup")
+
+    try:
+        shutil.copy2(str(live_path), str(live_backup_path))
+        os.remove(str(live_path))
+        meta["exists_live"] = False
+        meta["last_deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        meta["last_live_delete_backup_path"] = str(live_backup_path)
+        _write_meta(meta_path, meta)
+        return {
+            "ok": True,
+            "message": f"Deleted live file {live_path}",
+            "backup_path": str(live_backup_path),
+        }
+    except PermissionError:
+        if escalate_helper and try_escalate:
+            helper_path = Path(escalate_helper)
+            if not helper_path.exists():
+                return {"ok": False, "message": f"Escalation helper not found at {escalate_helper}"}
+            cmd = [
+                "pkexec",
+                "/usr/bin/python3",
+                str(helper_path),
+                "--delete",
+                "--dst",
+                str(live_path),
+                "--backup",
+                str(live_backup_path),
+            ]
+            try:
+                process = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            except Exception as exc:
+                return {"ok": False, "message": f"Escalation attempt failed: {exc}"}
+            if process.returncode == 0:
+                meta["exists_live"] = False
+                meta["last_deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                meta["last_live_delete_backup_path"] = str(live_backup_path)
+                _write_meta(meta_path, meta)
+                return {
+                    "ok": True,
+                    "message": f"Deleted live file {live_path} (via pkexec)",
+                    "backup_path": str(live_backup_path),
+                }
+            return {
+                "ok": False,
+                "message": (
+                    f"Escalation helper failed: {process.returncode}\n"
+                    f"stdout: {process.stdout}\nstderr: {process.stderr}"
+                ),
+            }
+        return {
+            "ok": False,
+            "needs_elevation": True,
+            "message": f"Permission denied when deleting {live_path}. Use a privileged helper (pkexec).",
+            "live_path": str(live_path),
+            "backup_path": str(live_backup_path),
+            "helper_suggestion": escalate_helper,
+        }
+    except Exception as exc:
+        return {"ok": False, "message": f"Failed to delete live file: {exc}"}

@@ -25,6 +25,7 @@ pytpo-terminal = "pytpo_terminal.app:main"
 pytpo-text-editor = "pytpo_text_editor.app:main"
 pytpo-dock = "pytpo_dock.app:main"
 pytpo-appgrid = "pytpo_appgrid.app:main"
+pytpo-topbar = "topbar.app:main"
 
 [tool.setuptools.package-data]
 pytpo = ["icon.png"]
@@ -43,6 +44,7 @@ include = [
     "pytpo_dock*",
     "pytpo_appgrid*",
     "tdock*",
+    "topbar*",
 ]
 exclude = ["tests*", "test_projects*"]
 

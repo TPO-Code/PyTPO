@@ -465,6 +465,11 @@ class SplitterTabWorkspace(QWidget):
         editor.setFocus()
         self.set_active_editor(editor)
 
+    def focus_editor(self, editor: object) -> None:
+        if not isinstance(editor, QWidget):
+            return
+        self._focus_editor(editor)
+
     def add_editor(self, editor: QWidget, *, tabs: WorkspaceTabs | None = None) -> None:
         target_tabs = tabs if self._is_workspace_tabs(tabs) else self._current_tabs()
         if not self._is_workspace_tabs(target_tabs):

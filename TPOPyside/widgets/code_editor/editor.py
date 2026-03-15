@@ -628,6 +628,14 @@ class CodeEditor(QPlainTextEdit):
     def _on_duplicate_selection_or_line_shortcut(self) -> None:
         self.duplicate_selection_or_line()
 
+    @property
+    def file_path(self) -> str | None:
+        return self._file_path
+
+    @file_path.setter
+    def file_path(self, file_path: str | None) -> None:
+        self.set_file_path(file_path)
+
     def set_file_path(self, file_path: str | None):
         self._file_path = str(file_path) if file_path else None
         self._apply_highlighter()

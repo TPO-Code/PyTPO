@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .constants import NOTIFICATIONS_SERVICE, WATCHER_SERVICES
-from .dbus import launch_background_command, run_logout_command
+from .dbus import launch_background_command, load_xlib, run_logout_command
 from .notifications import NotificationCenter, NotificationCenterButton, NotificationServer
 from .tray import StatusNotifierTrayArea, StatusNotifierWatcher, X11TraySelectionManager
 
@@ -71,6 +71,14 @@ class StartupStatusDialog(QDialog):
 class TopBar(QWidget):
     def __init__(self):
         super().__init__()
+        self._x11_panel_hints_applied = False
+        self._auto_hide_enabled = False
+        self._is_hidden_to_edge = False
+        self._visible_reserve_height = 0  # optional override
+        dock_attribute = getattr(Qt.WidgetAttribute, "WA_X11NetWmWindowTypeDock", None)
+        if dock_attribute is not None:
+            self.setAttribute(dock_attribute, True)
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.notification_center = NotificationCenter(self)
         self.notification_server = NotificationServer(self.notification_center, self)
@@ -210,6 +218,136 @@ class TopBar(QWidget):
         quit_action = menu.addAction("Quit TopBar")
         quit_action.triggered.connect(QApplication.instance().quit)
         return menu
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Wait until the native window + final geometry exist
+        QTimer.singleShot(0, self._apply_x11_panel_hints)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+        # Reapply after any size change because struts depend on geometry.
+        # A singleShot keeps this from fighting Qt during a live resize.
+        QTimer.singleShot(0, self._apply_x11_panel_hints)
+
+    def _current_reserved_height(self) -> int:
+        """
+        Return how much top-edge space should be reserved.
+
+        Full bar:
+            reserve self.height()
+
+        Fully auto-hidden:
+            reserve 0
+
+        Partial reveal / hover strip:
+            reserve that small visible amount instead
+        """
+        if self._auto_hide_enabled and self._is_hidden_to_edge:
+            return self._visible_reserve_height  # often 0, or maybe 1-2 px
+        return self.height()
+
+    def _apply_x11_panel_hints(self):
+        if not self.isVisible():
+            return
+
+        # Only do this on X11
+        from PySide6.QtGui import QGuiApplication
+        if QGuiApplication.platformName().lower() != "xcb":
+            return
+
+        wid = int(self.winId())  # ensure native window exists
+
+        reserve_height = max(0, self._current_reserved_height())
+
+        # Geometry in global/root coords
+        geom = self.frameGeometry()
+
+        left = geom.left()
+        right = geom.right()
+
+        # Top strut: reserve 'reserve_height' pixels from top edge
+        top_strut = reserve_height
+
+        # _NET_WM_STRUT values: left, right, top, bottom
+        strut = [0, 0, top_strut, 0]
+
+        # _NET_WM_STRUT_PARTIAL values:
+        # left, right, top, bottom,
+        # left_start_y, left_end_y,
+        # right_start_y, right_end_y,
+        # top_start_x, top_end_x,
+        # bottom_start_x, bottom_end_x
+        strut_partial = [
+            0, 0, top_strut, 0,
+            0, 0,
+            0, 0,
+            left, right,
+            0, 0,
+        ]
+
+        self._set_x11_dock_and_strut_properties(wid, strut, strut_partial)
+        self._x11_panel_hints_applied = True
+
+    def _set_x11_dock_and_strut_properties(self, wid: int, strut, strut_partial):
+        """
+        Apply the EWMH panel hints required for the WM to reserve space.
+        """
+        try:
+            X, Xatom, display = load_xlib()
+            x_display = display.Display()
+        except Exception as exc:
+            LOGGER.warning("Could not connect to X11 for panel hints: %r", exc)
+            return
+
+        try:
+            window = x_display.create_resource_object("window", wid)
+            window_type_atom = x_display.intern_atom("_NET_WM_WINDOW_TYPE")
+            window_type_dock_atom = x_display.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")
+            state_atom = x_display.intern_atom("_NET_WM_STATE")
+            state_above_atom = x_display.intern_atom("_NET_WM_STATE_ABOVE")
+            state_sticky_atom = x_display.intern_atom("_NET_WM_STATE_STICKY")
+            strut_atom = x_display.intern_atom("_NET_WM_STRUT")
+            strut_partial_atom = x_display.intern_atom("_NET_WM_STRUT_PARTIAL")
+
+            window.change_property(
+                window_type_atom,
+                Xatom.ATOM,
+                32,
+                [window_type_dock_atom],
+                X.PropModeReplace,
+            )
+            window.change_property(
+                state_atom,
+                Xatom.ATOM,
+                32,
+                [state_above_atom, state_sticky_atom],
+                X.PropModeReplace,
+            )
+            window.change_property(
+                strut_atom,
+                Xatom.CARDINAL,
+                32,
+                [int(value) for value in strut],
+                X.PropModeReplace,
+            )
+            window.change_property(
+                strut_partial_atom,
+                Xatom.CARDINAL,
+                32,
+                [int(value) for value in strut_partial],
+                X.PropModeReplace,
+            )
+            x_display.flush()
+            x_display.sync()
+        except Exception as exc:
+            LOGGER.warning("Failed to apply X11 dock/strut hints to window %s: %r", wid, exc)
+        finally:
+            try:
+                x_display.close()
+            except Exception:
+                pass
 
     @Slot()
     def _show_startup_dialog(self) -> None:

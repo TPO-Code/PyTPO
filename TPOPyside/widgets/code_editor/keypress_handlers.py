@@ -44,6 +44,8 @@ EXT_TO_LANG: dict[str, str] = {
     ".json": "json",
     ".jsonc": "jsonc",
     ".geojson": "json",
+    ".desktop": "desktop",
+    ".session": "desktop",
     ".toml": "toml",
     ".rs": "rust",
     ".css": "css",
