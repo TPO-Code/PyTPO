@@ -5,6 +5,8 @@ description = "A simple custom IDE."
 requires-python = ">=3.11"
 dependencies = [
     "pyside6",
+    "xcffib",
+    "python-xlib",
     "pyte",
     "ruff",
     "pyflakes",
@@ -18,9 +20,18 @@ dependencies = [
 
 [project.scripts]
 pytpo = "pytpo.app:main"
+pytpo-desktop-integration = "pytpo.desktop_entries:main"
 pytpo-terminal = "pytpo_terminal.app:main"
 pytpo-text-editor = "pytpo_text_editor.app:main"
 pytpo-dock = "pytpo_dock.app:main"
+pytpo-appgrid = "pytpo_appgrid.app:main"
+
+[tool.setuptools.package-data]
+pytpo = ["icon.png"]
+pytpo_terminal = ["icon.png"]
+pytpo_text_editor = ["icon.png"]
+pytpo_dock = ["icon.png"]
+pytpo_appgrid = ["icon.png"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -30,6 +41,7 @@ include = [
     "pytpo_terminal*",
     "pytpo_text_editor*",
     "pytpo_dock*",
+    "pytpo_appgrid*",
     "tdock*",
 ]
 exclude = ["tests*", "test_projects*"]

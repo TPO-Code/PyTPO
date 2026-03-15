@@ -5,7 +5,10 @@ import sys
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from pytpo.services.app_icons import shared_app_icon_path
+
 from .debug import install_qt_debug_message_logger, log_dock_debug, reset_dock_debug_log
+from .xlib_window_source import ensure_xlib_available
 from .ui.main_window import CustomDock
 
 
@@ -14,14 +17,29 @@ def main(argv: list[str] | None = None) -> int:
     log_path = reset_dock_debug_log()
     install_qt_debug_message_logger()
     log_dock_debug("dock-main-start", argv=effective_argv, log_path=log_path)
+    try:
+        ensure_xlib_available()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     app = QApplication(effective_argv)
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("pytpo-dock")
+    app.setQuitOnLastWindowClosed(False)
+    icon_path = shared_app_icon_path("dock")
+    app_icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+    log_dock_debug("dock-quit-on-last-window-closed-disabled")
 
     if QIcon.themeName() == "":
         QIcon.setThemeName("Adwaita")
     log_dock_debug("dock-theme-ready", theme_name=QIcon.themeName())
 
     dock = CustomDock()
+    if not app_icon.isNull():
+        dock.setWindowIcon(app_icon)
     log_dock_debug(
         "dock-created",
         geometry=dock.geometry().getRect(),
@@ -33,17 +51,21 @@ def main(argv: list[str] | None = None) -> int:
     if screen is None:
         log_dock_debug("dock-no-primary-screen")
     else:
-        screen_geo = screen.geometry()
-        target_x = (screen_geo.width() - dock.width()) // 2
-        target_y = screen_geo.height()
-        dock.move(target_x, target_y)
-        log_dock_debug(
-            "dock-initial-move",
-            screen_geometry=screen_geo.getRect(),
-            target_pos=(target_x, target_y),
-            geometry=dock.geometry().getRect(),
-            visible=dock.isVisible(),
-        )
+        initializer = getattr(dock, "ensure_hidden_window_mapped", None)
+        if callable(initializer):
+            initializer()
+        else:
+            screen_geo = screen.geometry()
+            target_x = (screen_geo.width() - dock.width()) // 2
+            target_y = screen_geo.height()
+            dock.move(target_x, target_y)
+            log_dock_debug(
+                "dock-initial-move",
+                screen_geometry=screen_geo.getRect(),
+                target_pos=(target_x, target_y),
+                geometry=dock.geometry().getRect(),
+                visible=dock.isVisible(),
+            )
     return app.exec()
 
 

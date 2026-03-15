@@ -37,5 +37,13 @@ def dock_debug_log_path() -> Path:
     return dock_state_dir() / "render-debug.log"
 
 
+def dock_window_snapshot_json_path() -> Path:
+    return dock_state_dir() / "window-snapshot.json"
+
+
+def dock_window_snapshot_markdown_path() -> Path:
+    return dock_state_dir() / "window-snapshot.md"
+
+
 def migrate_legacy_dock_storage() -> None:
     migrate_file_if_missing(_LEGACY_CONFIG_DIR / "pinned.json", dock_pinned_apps_path())

@@ -210,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     app = QApplication(args)
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("pytpo-text-editor")
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     configure_shared_file_dialog_defaults()

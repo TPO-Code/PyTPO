@@ -22,6 +22,11 @@ _QT_MESSAGE_TYPE_NAMES = {
 }
 
 
+def dock_debug_enabled() -> bool:
+    text = str(os.environ.get("PYTPO_DOCK_DEBUG", "") or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
 def _timestamp() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
@@ -34,6 +39,8 @@ def _normalize_value(value: Any) -> str:
 
 def reset_dock_debug_log(*, reason: str = "dock-startup") -> Path:
     path = dock_debug_log_path()
+    if not dock_debug_enabled():
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOG_LOCK:
         path.write_text("", encoding="utf-8")
@@ -42,6 +49,8 @@ def reset_dock_debug_log(*, reason: str = "dock-startup") -> Path:
 
 
 def log_dock_debug(event: str, /, **fields: Any) -> None:
+    if not dock_debug_enabled():
+        return
     path = dock_debug_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     details = " ".join(f"{key}={_normalize_value(value)}" for key, value in fields.items())
@@ -55,6 +64,8 @@ def log_dock_debug(event: str, /, **fields: Any) -> None:
 
 def install_qt_debug_message_logger() -> None:
     global _QT_MESSAGE_HANDLER, _QT_MESSAGE_HANDLER_INSTALLED
+    if not dock_debug_enabled():
+        return
     if _QT_MESSAGE_HANDLER_INSTALLED:
         return
 

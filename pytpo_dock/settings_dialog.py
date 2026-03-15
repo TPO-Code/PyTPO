@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QCheckBox, QWidget
 
 from TPOPyside.dialogs.reusable_file_dialog import FileDialog, get_default_starred_paths_settings
 from TPOPyside.dialogs.schema_settings_dialog import (
+    FieldBinding,
     SchemaField,
     SchemaPage,
     SchemaSection,
@@ -17,6 +18,7 @@ from TPOPyside.dialogs.schema_settings_dialog import (
     SettingsSchema,
 )
 
+from .autostart import DockAutostartManager
 from .storage_paths import dock_settings_path
 
 DOCK_SCOPE = "dock"
@@ -60,10 +62,19 @@ def _normalize_color(value: Any, default: str) -> str:
 @dataclass(slots=True)
 class DockVisualSettings:
     instance_indicator_mode: str = "dots"
+    visibility_animation_mode: str = "fade"
     dock_padding: int = 10
     icon_size: int = 42
+    icon_opacity: int = 100
+    hover_highlight_color: str = "#ffffff"
+    hover_highlight_opacity: int = 18
+    hover_highlight_radius: int = 12
+    focused_window_highlight_color: str = "#f4d269"
+    focused_window_highlight_opacity: int = 30
+    focused_window_highlight_radius: int = 12
     background_color: str = "#1e1e1ebe"
     background_image_path: str = ""
+    background_image_opacity: int = 100
     background_image_fit: str = "cover"
     background_tint: str = "#00000000"
     border_color: str = "#ffffff33"
@@ -78,6 +89,12 @@ class DockVisualSettings:
         indicator_mode = str(raw.get("instance_indicator_mode", defaults.instance_indicator_mode) or "").strip().lower()
         if indicator_mode not in {"dots", "numbers"}:
             indicator_mode = defaults.instance_indicator_mode
+
+        visibility_animation_mode = str(
+            raw.get("visibility_animation_mode", defaults.visibility_animation_mode) or ""
+        ).strip().lower()
+        if visibility_animation_mode not in {"fade", "slide"}:
+            visibility_animation_mode = defaults.visibility_animation_mode
 
         image_fit = str(raw.get("background_image_fit", defaults.background_image_fit) or "").strip().lower()
         if image_fit not in {"cover", "contain", "stretch", "tile", "center"}:
@@ -96,10 +113,47 @@ class DockVisualSettings:
 
         return cls(
             instance_indicator_mode=indicator_mode,
+            visibility_animation_mode=visibility_animation_mode,
             dock_padding=_clamp_int(raw.get("dock_padding"), defaults.dock_padding, minimum=0, maximum=48),
             icon_size=_clamp_int(raw.get("icon_size"), defaults.icon_size, minimum=16, maximum=96),
+            icon_opacity=_clamp_int(raw.get("icon_opacity"), defaults.icon_opacity, minimum=0, maximum=100),
+            hover_highlight_color=_normalize_color(raw.get("hover_highlight_color"), defaults.hover_highlight_color),
+            hover_highlight_opacity=_clamp_int(
+                raw.get("hover_highlight_opacity"),
+                defaults.hover_highlight_opacity,
+                minimum=0,
+                maximum=100,
+            ),
+            hover_highlight_radius=_clamp_int(
+                raw.get("hover_highlight_radius"),
+                defaults.hover_highlight_radius,
+                minimum=0,
+                maximum=48,
+            ),
+            focused_window_highlight_color=_normalize_color(
+                raw.get("focused_window_highlight_color"),
+                defaults.focused_window_highlight_color,
+            ),
+            focused_window_highlight_opacity=_clamp_int(
+                raw.get("focused_window_highlight_opacity"),
+                defaults.focused_window_highlight_opacity,
+                minimum=0,
+                maximum=100,
+            ),
+            focused_window_highlight_radius=_clamp_int(
+                raw.get("focused_window_highlight_radius"),
+                defaults.focused_window_highlight_radius,
+                minimum=0,
+                maximum=48,
+            ),
             background_color=_normalize_color(raw.get("background_color"), defaults.background_color),
             background_image_path=image_path,
+            background_image_opacity=_clamp_int(
+                raw.get("background_image_opacity"),
+                defaults.background_image_opacity,
+                minimum=0,
+                maximum=100,
+            ),
             background_image_fit=image_fit,
             background_tint=_normalize_color(raw.get("background_tint"), defaults.background_tint),
             border_color=_normalize_color(raw.get("border_color"), defaults.border_color),
@@ -111,10 +165,19 @@ class DockVisualSettings:
     def to_mapping(self) -> dict[str, Any]:
         return {
             "instance_indicator_mode": self.instance_indicator_mode,
+            "visibility_animation_mode": self.visibility_animation_mode,
             "dock_padding": self.dock_padding,
             "icon_size": self.icon_size,
+            "icon_opacity": self.icon_opacity,
+            "hover_highlight_color": self.hover_highlight_color,
+            "hover_highlight_opacity": self.hover_highlight_opacity,
+            "hover_highlight_radius": self.hover_highlight_radius,
+            "focused_window_highlight_color": self.focused_window_highlight_color,
+            "focused_window_highlight_opacity": self.focused_window_highlight_opacity,
+            "focused_window_highlight_radius": self.focused_window_highlight_radius,
             "background_color": self.background_color,
             "background_image_path": self.background_image_path,
+            "background_image_opacity": self.background_image_opacity,
             "background_image_fit": self.background_image_fit,
             "background_tint": self.background_tint,
             "border_color": self.border_color,
@@ -204,10 +267,90 @@ class DockSettingsBackend:
         self._dirty_scopes.add(DOCK_SCOPE)
 
 
+class DockAutostartFieldController:
+    def __init__(self, manager: DockAutostartManager | None = None) -> None:
+        self._manager = manager or DockAutostartManager()
+        self._applied_state = self._manager.is_enabled()
+
+    def current_state(self) -> bool:
+        return self._manager.is_enabled()
+
+    def has_pending_changes(self, checked: bool) -> bool:
+        return bool(checked) != self._applied_state
+
+    def apply_checked_state(self, checked: bool) -> list[str]:
+        try:
+            if checked:
+                self._manager.enable()
+            else:
+                self._manager.disable()
+        except OSError as exc:
+            return [f"Run on startup: {exc}"]
+        self._applied_state = self._manager.is_enabled()
+        return []
+
+
+def _build_autostart_checkbox_binding(field: SchemaField, _dialog: SchemaSettingsDialog) -> FieldBinding:
+    checkbox = QCheckBox(field.label)
+    controller = DockAutostartFieldController()
+
+    def get_value() -> bool:
+        return checkbox.isChecked()
+
+    def set_value(value: Any) -> None:
+        checkbox.setChecked(bool(value))
+
+    def connect_change(callback: Callable[..., None]) -> None:
+        checkbox.toggled.connect(callback)
+
+    set_value(controller.current_state())
+    if field.description:
+        checkbox.setToolTip(field.description)
+
+    return FieldBinding(
+        field.key,
+        field.scope,
+        checkbox,
+        get_value,
+        set_value,
+        connect_change,
+        lambda: [],
+        persist=False,
+        has_pending_changes=lambda: controller.has_pending_changes(checkbox.isChecked()),
+        apply_changes=lambda: controller.apply_checked_state(checkbox.isChecked()),
+    )
+
+
 def _build_schema() -> SettingsSchema:
     defaults = DockVisualSettings()
     return SettingsSchema(
         pages=[
+            SchemaPage(
+                id="dock.general",
+                category="Dock",
+                title="General",
+                scope=DOCK_SCOPE,
+                description="Control startup behavior for the dock.",
+                keywords=["dock", "startup", "autostart", "session"],
+                order=0,
+                sections=[
+                    SchemaSection(
+                        title="Startup",
+                        description="Create or remove the user's XDG autostart entry for the dock.",
+                        fields=[
+                            SchemaField(
+                                id="run_on_startup",
+                                key="run_on_startup",
+                                label="Run on startup",
+                                type="dock_autostart_checkbox",
+                                scope=DOCK_SCOPE,
+                                description="Start the PyTPO Dock automatically when your Linux desktop session starts.",
+                                default=False,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
             SchemaPage(
                 id="dock.appearance",
                 category="Dock",
@@ -215,6 +358,7 @@ def _build_schema() -> SettingsSchema:
                 scope=DOCK_SCOPE,
                 description="Customize how the dock looks and how running app instances are shown.",
                 keywords=["dock", "appearance", "instances", "background", "border"],
+                order=1,
                 sections=[
                     SchemaSection(
                         title="Instances",
@@ -239,6 +383,18 @@ def _build_schema() -> SettingsSchema:
                         description="Adjust dock spacing and icon sizing.",
                         fields=[
                             SchemaField(
+                                id="visibility_animation_mode",
+                                key="visibility_animation_mode",
+                                label="Show or hide animation",
+                                type="combo",
+                                scope=DOCK_SCOPE,
+                                default=defaults.visibility_animation_mode,
+                                options=[
+                                    {"label": "Fade", "value": "fade"},
+                                    {"label": "Slide from bottom", "value": "slide"},
+                                ],
+                            ),
+                            SchemaField(
                                 id="dock_padding",
                                 key="dock_padding",
                                 label="Padding",
@@ -257,6 +413,78 @@ def _build_schema() -> SettingsSchema:
                                 default=defaults.icon_size,
                                 min=16,
                                 max=96,
+                            ),
+                            SchemaField(
+                                id="icon_opacity",
+                                key="icon_opacity",
+                                label="Icon opacity",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.icon_opacity,
+                                min=0,
+                                max=100,
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="Highlights",
+                        description="Control how dock items look on hover and when one of their windows is focused.",
+                        fields=[
+                            SchemaField(
+                                id="hover_highlight_color",
+                                key="hover_highlight_color",
+                                label="Hover highlight color",
+                                type="color",
+                                scope=DOCK_SCOPE,
+                                default=defaults.hover_highlight_color,
+                            ),
+                            SchemaField(
+                                id="hover_highlight_opacity",
+                                key="hover_highlight_opacity",
+                                label="Hover highlight opacity",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.hover_highlight_opacity,
+                                min=0,
+                                max=100,
+                            ),
+                            SchemaField(
+                                id="hover_highlight_radius",
+                                key="hover_highlight_radius",
+                                label="Hover highlight radius",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.hover_highlight_radius,
+                                min=0,
+                                max=48,
+                            ),
+                            SchemaField(
+                                id="focused_window_highlight_color",
+                                key="focused_window_highlight_color",
+                                label="Focused window color",
+                                type="color",
+                                scope=DOCK_SCOPE,
+                                default=defaults.focused_window_highlight_color,
+                            ),
+                            SchemaField(
+                                id="focused_window_highlight_opacity",
+                                key="focused_window_highlight_opacity",
+                                label="Focused window opacity",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.focused_window_highlight_opacity,
+                                min=0,
+                                max=100,
+                            ),
+                            SchemaField(
+                                id="focused_window_highlight_radius",
+                                key="focused_window_highlight_radius",
+                                label="Focused window radius",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.focused_window_highlight_radius,
+                                min=0,
+                                max=48,
                             ),
                         ],
                     ),
@@ -298,6 +526,16 @@ def _build_schema() -> SettingsSchema:
                                     {"label": "Tile", "value": "tile"},
                                     {"label": "Center", "value": "center"},
                                 ],
+                            ),
+                            SchemaField(
+                                id="background_image_opacity",
+                                key="background_image_opacity",
+                                label="Image opacity",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.background_image_opacity,
+                                min=0,
+                                max=100,
                             ),
                             SchemaField(
                                 id="background_tint",
@@ -378,6 +616,7 @@ class DockSettingsDialog(SchemaSettingsDialog):
             window_title="Dock Settings",
             tree_expanded_paths_key=DOCK_SETTINGS_TREE_EXPANDED_PATHS_KEY,
             tree_expanded_paths_scope=DOCK_SCOPE,
+            field_factories={"dock_autostart_checkbox": _build_autostart_checkbox_binding},
             browse_providers={"dock_background_image": self._browse_background_image},
         )
 

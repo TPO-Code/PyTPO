@@ -7,7 +7,7 @@ import sys
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from pytpo.services.asset_paths import preferred_shared_asset_path
+from pytpo.services.app_icons import shared_app_icon_path
 
 from .instance_coordinator import TerminalInstanceServer, request_open_tab
 from .main_window import APP_NAME, TerminalMainWindow
@@ -58,9 +58,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     app = QApplication(qt_args)
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("pytpo-terminal")
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
-    icon_path = preferred_shared_asset_path("icons/terminal.png")
+    icon_path = shared_app_icon_path("terminal")
     if icon_path.is_file():
         app_icon = QIcon(str(icon_path))
         if not app_icon.isNull():

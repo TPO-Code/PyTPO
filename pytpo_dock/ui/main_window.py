@@ -2,18 +2,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 
-from PySide6.QtCore import QEasingCurve, QAbstractAnimation, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QCursor, QDesktopServices, QPixmap
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QEasingCurve, QAbstractAnimation, QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QPixmap
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QMenu, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
-from ..apps import build_app_registry, build_runtime_window_app, launch_app, parse_desktop_file
-from ..debug import log_dock_debug
+from ..apps import (
+    DESKTOP_APP_DRAG_MIME_TYPE,
+    build_app_registry,
+    build_runtime_window_app,
+    launch_app,
+    parse_desktop_app_drag_payload,
+    parse_desktop_file,
+)
+from ..debug import dock_debug_enabled, log_dock_debug
+from ..match_diagnostics import write_window_snapshot
 from ..settings_dialog import DockSettingsDialog, load_dock_settings
-from ..storage_paths import dock_config_dir, dock_pinned_apps_path, migrate_legacy_dock_storage
-from .widgets import DockContainerFrame, DockItem, WindowPreview, build_settings_icon
+from ..storage_paths import dock_pinned_apps_path, migrate_legacy_dock_storage
+from ..window_matching import finalize_window_records, match_threshold, runtime_group_path, score_window_match
+from ..x11_dock_window import X11DockWindowManager
+from ..xlib_window_source import list_windows_via_xlib
+from ..x11_window_preview import X11WindowPreviewCapturer
+from .widgets import DockContainerFrame, DockItem, WindowPreview, apply_widget_opacity, build_settings_icon
 
 
 class CustomDock(QWidget):
@@ -21,9 +34,18 @@ class CustomDock(QWidget):
         super().__init__()
         migrate_legacy_dock_storage()
 
-        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+        platform_name = QApplication.instance().platformName().lower() if QApplication.instance() is not None else ""
+        window_flags = Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
+        if platform_name == "xcb":
+            window_flags |= Qt.X11BypassWindowManagerHint
+        self.setWindowFlags(window_flags)
+        if platform_name == "xcb":
+            self.setAttribute(Qt.WA_X11NetWmWindowTypeDock, True)
+            self.setAttribute(Qt.WA_X11DoNotAcceptFocus, True)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+        self.setAcceptDrops(True)
+        self.x11_window_manager = X11DockWindowManager(self)
 
         self.registry = build_app_registry()
         self.load_pinned_apps()
@@ -37,6 +59,12 @@ class CustomDock(QWidget):
         self.preview_host.setFixedSize(0, 0)
         self.preview_popup = WindowPreview(self.preview_host)
         self.preview_popup.hide()
+        self.preview_popup_opacity = QGraphicsOpacityEffect(self.preview_popup)
+        self.preview_popup_opacity.setOpacity(1.0)
+        self.preview_popup.setGraphicsEffect(self.preview_popup_opacity)
+        self.preview_popup_fade = QPropertyAnimation(self.preview_popup_opacity, b"opacity", self)
+        self.preview_popup_fade.setDuration(300)
+        self.preview_popup_fade.setEasingCurve(QEasingCurve.InOutCubic)
         self.preview_popup.hover_changed.connect(self.handle_preview_hover_changed)
         self.preview_popup.action_requested.connect(self.handle_preview_action)
         self.preview_timer = QTimer(self)
@@ -49,6 +77,9 @@ class CustomDock(QWidget):
         self.preview_hover_active = False
         self.active_preview_item = None
         self.active_preview_anchor_rect = None
+        self._last_active_window_id = ""
+        self.last_focused_windows = {}
+        self.x11_preview_capturer = X11WindowPreviewCapturer()
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -56,6 +87,8 @@ class CustomDock(QWidget):
 
         self.container = DockContainerFrame(self)
         self.container.setObjectName("DockContainer")
+        self.container.setAcceptDrops(True)
+        self.container.installEventFilter(self)
         self.container_layout = QHBoxLayout(self.container)
         self.container_layout.setContentsMargins(10, 10, 10, 10)
         self.container_layout.setSpacing(5)
@@ -88,6 +121,8 @@ class CustomDock(QWidget):
         self.settings_panel_layout.addWidget(self.settings_button)
 
         self.app_row = QWidget(self.container)
+        self.app_row.setAcceptDrops(True)
+        self.app_row.installEventFilter(self)
         self.app_row_layout = QHBoxLayout(self.app_row)
         self.app_row_layout.setContentsMargins(0, 0, 0, 0)
         self.app_row_layout.setSpacing(5)
@@ -111,8 +146,13 @@ class CustomDock(QWidget):
         self.wm_timer.timeout.connect(self.update_dock_items)
         self.wm_timer.start(1000)
 
+        self.active_window_timer = QTimer(self)
+        self.active_window_timer.timeout.connect(self.refresh_active_window_highlight)
+        self.active_window_timer.start(250)
+
         self.apply_dock_settings()
         self.update_dock_items()
+        self.refresh_active_window_highlight(force=True)
         self.recenter()
         self._log_window_state("dock-init-complete", pinned_apps=list(self.pinned_apps))
 
@@ -135,15 +175,124 @@ class CustomDock(QWidget):
         screen = QApplication.primaryScreen()
         return screen.geometry() if screen is not None else QRect()
 
+    def ensure_hidden_window_mapped(self):
+        screen_geometry = self._screen_geometry()
+        if screen_geometry.isNull():
+            return
+        hidden_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
+        hidden_y = self._hidden_y(screen_geometry)
+        self.move(hidden_x, hidden_y)
+        self.setWindowOpacity(0.0 if self._visibility_animation_mode() == "fade" else 1.0)
+        if not self.isVisible():
+            self.show()
+        self.x11_window_manager.sync(
+            reserve_space=False,
+            window_rect=QRect(hidden_x, hidden_y, self.width(), self.height()),
+        )
+        self._log_window_state(
+            "dock-hidden-window-mapped",
+            screen_geometry=screen_geometry.getRect(),
+            target_pos=(hidden_x, hidden_y),
+        )
+
     def _visible_y(self, screen_geometry):
-        return screen_geometry.height() - self.height() - 15
+        return screen_geometry.y() + screen_geometry.height() - self.height() - 15
 
     def _hidden_y(self, screen_geometry):
-        return screen_geometry.height()
+        overshoot = max(12, int(self.height() * 0.25))
+        return screen_geometry.y() + screen_geometry.height() + overshoot
 
     def _normalize_window_id(self, win_id):
+        if isinstance(win_id, int):
+            return format(win_id, "x")
         try:
             return format(int(str(win_id), 0), "x")
+        except (TypeError, ValueError):
+            return ""
+
+    def _normalize_desktop_path(self, desktop_path):
+        normalized = os.path.abspath(os.path.expanduser(str(desktop_path or "").strip()))
+        if not normalized.lower().endswith(".desktop"):
+            return ""
+        return normalized
+
+    def _valid_desktop_app_path(self, desktop_path):
+        normalized = self._normalize_desktop_path(desktop_path)
+        if not normalized or not os.path.isfile(normalized):
+            return ""
+        app_data = parse_desktop_file(normalized)
+        if app_data.get("Type") != "Application" or not app_data.get("Name"):
+            return ""
+        return normalized
+
+    def _desktop_path_from_mime_data(self, mime_data):
+        if mime_data is None:
+            return ""
+        if mime_data.hasFormat(DESKTOP_APP_DRAG_MIME_TYPE):
+            payload = bytes(mime_data.data(DESKTOP_APP_DRAG_MIME_TYPE))
+            desktop_path = self._valid_desktop_app_path(parse_desktop_app_drag_payload(payload))
+            if desktop_path:
+                return desktop_path
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                if not url.isLocalFile():
+                    continue
+                desktop_path = self._valid_desktop_app_path(url.toLocalFile())
+                if desktop_path:
+                    return desktop_path
+        if mime_data.hasText():
+            return self._valid_desktop_app_path(mime_data.text())
+        return ""
+
+    def _set_drop_active(self, is_active):
+        self.container.set_drop_active(is_active)
+
+    def _pin_dropped_app(self, desktop_path):
+        if not desktop_path or desktop_path in self.pinned_apps:
+            return False
+        self.pinned_apps.append(desktop_path)
+        self.save_pinned_apps()
+        self.update_dock_items()
+        return True
+
+    def _accept_app_drag(self, event):
+        desktop_path = self._desktop_path_from_mime_data(event.mimeData())
+        if not desktop_path:
+            self._set_drop_active(False)
+            event.ignore()
+            return ""
+        if not self.is_visible:
+            self.show_dock()
+        if self.preview_popup.isVisible() or self.pending_preview_item is not None:
+            self.hide_preview()
+        self.set_settings_revealed(False)
+        self._set_drop_active(True)
+        event.setDropAction(Qt.CopyAction)
+        event.acceptProposedAction()
+        return desktop_path
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if event_type == QEvent.DragEnter:
+            self.dragEnterEvent(event)
+            return event.isAccepted()
+        if event_type == QEvent.DragMove:
+            self.dragMoveEvent(event)
+            return event.isAccepted()
+        if event_type == QEvent.DragLeave:
+            self.dragLeaveEvent(event)
+            return event.isAccepted()
+        if event_type == QEvent.Drop:
+            self.dropEvent(event)
+            return event.isAccepted()
+        return super().eventFilter(watched, event)
+
+    def _run_window_command(self, args):
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    def _xdotool_window_id(self, win_id):
+        try:
+            return str(int(str(win_id), 0))
         except (TypeError, ValueError):
             return ""
 
@@ -153,28 +302,134 @@ class CustomDock(QWidget):
             return False
         return self._normalize_window_id(win_id) == self._normalize_window_id(own_id)
 
+    def _remember_window_focus(self, app_path, win_id):
+        if app_path and win_id:
+            self.last_focused_windows[str(app_path)] = self._normalize_window_id(win_id)
+
+    def _active_window_id(self):
+        try:
+            output = subprocess.check_output(
+                ['xprop', '-root', '_NET_ACTIVE_WINDOW'],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return ""
+        match = re.search(r'window id # (0x[0-9a-fA-F]+)', output)
+        if not match:
+            return ""
+        return self._normalize_window_id(match.group(1))
+
+    def _primary_window_for_item(self, dock_item):
+        windows = dock_item.windows or []
+        if not windows and dock_item.win_id:
+            windows = [{'id': dock_item.win_id, 'title': dock_item.app_data.get('Title', '')}]
+        if not windows:
+            return None
+
+        active_window_id = self._active_window_id()
+        app_path = str(dock_item.app_data.get('path') or '')
+        remembered_window_id = self.last_focused_windows.get(app_path, "")
+
+        for window in windows:
+            if self._normalize_window_id(window.get('id')) == active_window_id:
+                return window
+        for window in windows:
+            if self._normalize_window_id(window.get('id')) == remembered_window_id:
+                return window
+        return windows[0]
+
+    def _item_action_payload(self, dock_item):
+        target_window = self._primary_window_for_item(dock_item)
+        win_id = target_window.get('id') if target_window else dock_item.win_id
+        return {
+            'win_id': win_id,
+            'app_data': dock_item.app_data,
+            'app_path': dock_item.app_data.get('path'),
+            'is_maximized': self.is_window_maximized(win_id),
+        }
+
+    def _dock_item_matches_active_window(self, dock_item, normalized_active_window_id):
+        normalized_active_window_id = str(normalized_active_window_id or "").strip().lower()
+        if not normalized_active_window_id:
+            return False
+        windows = list(getattr(dock_item, "windows", None) or [])
+        if not windows and getattr(dock_item, "win_id", None):
+            windows = [{"id": getattr(dock_item, "win_id", None)}]
+        for window in windows:
+            if self._normalize_window_id(window.get("id")) == normalized_active_window_id:
+                return True
+        return False
+
+    def refresh_active_window_highlight(self, force: bool = False):
+        normalized_active_window_id = self._active_window_id()
+        if not force and normalized_active_window_id == self._last_active_window_id:
+            return
+        self._last_active_window_id = normalized_active_window_id
+
+        active_app_names: list[str] = []
+        for index in range(self.app_row_layout.count()):
+            layout_item = self.app_row_layout.itemAt(index)
+            dock_item = layout_item.widget() if layout_item is not None else None
+            if dock_item is None or not hasattr(dock_item, "set_active_window"):
+                continue
+            is_active_window = self._dock_item_matches_active_window(dock_item, normalized_active_window_id)
+            dock_item.set_active_window(is_active_window)
+            if is_active_window:
+                active_app_names.append(str(getattr(dock_item, "app_data", {}).get("Name", "Unknown App")))
+
+        log_dock_debug(
+            "dock-active-window-highlight-updated",
+            active_window_id=normalized_active_window_id,
+            active_apps=active_app_names,
+        )
+
     def _stop_animation(self):
         if self.anim is not None and self.anim.state() == QAbstractAnimation.Running:
             self.anim.stop()
 
+    def _visibility_animation_mode(self) -> str:
+        mode = str(getattr(self.dock_settings, "visibility_animation_mode", "fade") or "").strip().lower()
+        return mode if mode in {"fade", "slide"} else "fade"
+
+    def _preview_delay_ms(self) -> int:
+        return 300
+
+    def _is_visibility_animation_running(self) -> bool:
+        return bool(self.anim is not None and self.anim.state() == QAbstractAnimation.Running)
+
+    def _cursor_over_widget(self, widget) -> bool:
+        if widget is None or not isValid(widget) or not widget.isVisible():
+            return False
+        widget_rect = QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+        return widget_rect.contains(QCursor.pos())
+
+    def _restart_deferred_preview_if_hovered(self):
+        dock_item = self.pending_preview_item
+        if not self._cursor_over_widget(dock_item):
+            return
+        self.preview_timer.start(self._preview_delay_ms())
+
     def _handle_visibility_animation_finished(self):
         if self.is_visible:
             self.setWindowOpacity(1.0)
+            self._restart_deferred_preview_if_hovered()
             self._log_window_state("dock-show-animation-finished")
             return
 
         screen_geometry = self._screen_geometry()
-        self.hide()
-        self.setWindowOpacity(1.0)
+        self.setWindowOpacity(0.0 if self._visibility_animation_mode() == "fade" else 1.0)
         self.move(self.x(), self._hidden_y(screen_geometry))
         self._log_window_state("dock-hide-animation-finished")
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.x11_window_manager.sync(reserve_space=self.is_visible)
         self._log_window_state("dock-show-event")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.x11_window_manager.sync(reserve_space=self.is_visible)
         self._log_window_state(
             "dock-resize-event",
             old_size=(event.oldSize().width(), event.oldSize().height()),
@@ -183,11 +438,16 @@ class CustomDock(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        self.x11_window_manager.sync(reserve_space=self.is_visible)
         self._log_window_state(
             "dock-move-event",
             old_pos=(event.oldPos().x(), event.oldPos().y()),
             new_pos=(event.pos().x(), event.pos().y()),
         )
+
+    def closeEvent(self, event):
+        self.x11_window_manager.sync(reserve_space=False)
+        super().closeEvent(event)
 
     def load_pinned_apps(self):
         self.pinned_apps = []
@@ -205,6 +465,7 @@ class CustomDock(QWidget):
             json.dump(self.pinned_apps, file_handle)
 
     def handle_pin_toggle(self, desktop_path, should_pin):
+        desktop_path = self._normalize_desktop_path(desktop_path) or str(desktop_path or "").strip()
         if should_pin and desktop_path not in self.pinned_apps:
             self.pinned_apps.append(desktop_path)
         elif not should_pin and desktop_path in self.pinned_apps:
@@ -212,51 +473,97 @@ class CustomDock(QWidget):
         self.save_pinned_apps()
         self.update_dock_items()
 
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        self._accept_app_drag(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        self._accept_app_drag(event)
+
+    def dragLeaveEvent(self, event):
+        self._set_drop_active(False)
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent):
+        desktop_path = self._accept_app_drag(event)
+        self._set_drop_active(False)
+        if not desktop_path:
+            return
+        was_pinned = self._pin_dropped_app(desktop_path)
+        log_dock_debug("dock-app-dropped", desktop_path=desktop_path, pinned=was_pinned)
+        event.acceptProposedAction()
+
     def get_running_windows(self):
-        try:
-            output = subprocess.check_output(['wmctrl', '-l', '-x'], text=True)
-        except FileNotFoundError:
-            print("Warning: 'wmctrl' not found. Cannot track running apps.")
-            log_dock_debug("dock-wmctrl-missing")
-            return []
-        except Exception as exc:
-            log_dock_debug("dock-wmctrl-error", error=repr(exc))
-            return []
+        records = list_windows_via_xlib()
+        return finalize_window_records(records, is_own_window=self._is_own_window)
 
-        windows = []
-        for line in output.splitlines():
-            parts = line.split(maxsplit=4)
-            if len(parts) < 5:
+    def _known_apps_by_path(self):
+        known_apps: dict[str, dict[str, str]] = {}
+        for path in self.pinned_apps:
+            if not os.path.exists(path):
                 continue
-            win_id = parts[0]
-            desktop_id = parts[1]
-            if desktop_id == '-1':
-                continue
-            if self._is_own_window(win_id):
-                log_dock_debug("dock-own-window-skipped", win_id=win_id)
-                continue
-            windows.append({
-                'id': win_id,
-                'class': parts[2].split('.')[-1].lower(),
-                'title': parts[4].strip(),
-            })
-        return windows
+            app_data = parse_desktop_file(path)
+            if app_data:
+                known_apps[path] = app_data
 
-    def update_dock_items(self):
+        for app_data in self.registry.values():
+            path = str(app_data.get('path') or '').strip()
+            if path and path not in known_apps:
+                known_apps[path] = app_data
+        return known_apps
+
+    def _assign_windows_to_apps(self, running_windows, known_apps_by_path):
+        assigned_windows: dict[str, list[dict]] = {}
+        matched_paths_in_order: list[str] = []
+        unmatched_windows: list[dict] = []
+        threshold = match_threshold()
+
+        app_entries = [(path, app_data) for path, app_data in known_apps_by_path.items()]
+        for window in running_windows:
+            best_path = ""
+            best_score = 0
+            for path, app_data in app_entries:
+                score = score_window_match(window, app_data)
+                if score > best_score:
+                    best_score = score
+                    best_path = path
+
+            if best_path and best_score >= threshold:
+                if best_path not in assigned_windows:
+                    assigned_windows[best_path] = []
+                    matched_paths_in_order.append(best_path)
+                assigned_windows[best_path].append(window)
+                continue
+
+            unmatched_windows.append(window)
+
+        return assigned_windows, matched_paths_in_order, unmatched_windows
+
+    def _runtime_window_groups(self, windows):
+        groups: dict[str, list[dict]] = {}
+        ordered_paths: list[str] = []
+        for window in windows:
+            path = runtime_group_path(window)
+            if path not in groups:
+                groups[path] = []
+                ordered_paths.append(path)
+            groups[path].append(window)
+        return [(path, groups[path]) for path in ordered_paths]
+
+    def update_dock_items(self, force_snapshot: bool = False):
         running_windows = self.get_running_windows()
         target_items = []
         added_paths = set()
+        known_apps_by_path = self._known_apps_by_path()
+        assigned_windows, matched_paths_in_order, unmatched_windows = self._assign_windows_to_apps(
+            running_windows,
+            known_apps_by_path,
+        )
 
         for path in self.pinned_apps:
-            app_data = parse_desktop_file(path) if os.path.exists(path) else None
+            app_data = known_apps_by_path.get(path)
             if not app_data:
                 continue
-
-            wm_class = app_data.get('StartupWMClass', '').lower()
-            if not wm_class:
-                wm_class = os.path.basename(path).lower().replace('.desktop', '')
-
-            matching_windows = [window for window in running_windows if window['class'] == wm_class or wm_class in window['class']]
+            matching_windows = assigned_windows.get(path, [])
             target_items.append({
                 'path': path,
                 'data': app_data,
@@ -267,35 +574,33 @@ class CustomDock(QWidget):
             })
             added_paths.add(path)
 
-        for window in running_windows:
-            wm_class = window['class']
-            if wm_class in self.registry:
-                app_data = self.registry[wm_class]
-                path = app_data['path']
-                if path in added_paths:
-                    continue
-                matching_windows = [item for item in running_windows if item['class'] == wm_class]
-                target_items.append({
-                    'path': path,
-                    'data': app_data,
-                    'is_pinned': False,
-                    'is_running': True,
-                    'win_id': matching_windows[0]['id'],
-                    'windows': matching_windows,
-                })
-                added_paths.add(path)
-                continue
-
-            path = f"window://{window['id']}"
+        for path in matched_paths_in_order:
             if path in added_paths:
+                continue
+            app_data = known_apps_by_path.get(path)
+            matching_windows = assigned_windows.get(path, [])
+            if not app_data or not matching_windows:
                 continue
             target_items.append({
                 'path': path,
-                'data': build_runtime_window_app(window),
+                'data': app_data,
                 'is_pinned': False,
                 'is_running': True,
-                'win_id': window['id'],
-                'windows': [window],
+                'win_id': matching_windows[0]['id'],
+                'windows': matching_windows,
+            })
+            added_paths.add(path)
+
+        for path, windows in self._runtime_window_groups(unmatched_windows):
+            if path in added_paths or not windows:
+                continue
+            target_items.append({
+                'path': path,
+                'data': build_runtime_window_app(windows[0], path=path),
+                'is_pinned': False,
+                'is_running': True,
+                'win_id': windows[0]['id'],
+                'windows': windows,
             })
             added_paths.add(path)
 
@@ -307,6 +612,14 @@ class CustomDock(QWidget):
             )
             for item in target_items
         ]
+        if dock_debug_enabled() and (force_snapshot or current_state_signature != self.last_dock_state):
+            self._write_window_snapshot(
+                running_windows=running_windows,
+                known_apps_by_path=known_apps_by_path,
+                assigned_windows=assigned_windows,
+                unmatched_windows=unmatched_windows,
+                target_items=target_items,
+            )
         if current_state_signature != self.last_dock_state:
             log_dock_debug(
                 "dock-items-state-change",
@@ -323,6 +636,34 @@ class CustomDock(QWidget):
             )
             self.rebuild_layout(target_items)
             self.last_dock_state = current_state_signature
+
+    def _write_window_snapshot(
+        self,
+        *,
+        running_windows,
+        known_apps_by_path,
+        assigned_windows,
+        unmatched_windows,
+        target_items,
+    ):
+        try:
+            json_path, markdown_path = write_window_snapshot(
+                running_windows=running_windows,
+                known_apps_by_path=known_apps_by_path,
+                assigned_windows=assigned_windows,
+                unmatched_windows=unmatched_windows,
+                target_items=target_items,
+            )
+        except Exception as exc:
+            log_dock_debug("dock-window-snapshot-write-failed", error=repr(exc))
+            return
+        log_dock_debug(
+            "dock-window-snapshot-written",
+            json_path=json_path,
+            markdown_path=markdown_path,
+            running_windows=len(running_windows),
+            item_count=len(target_items),
+        )
 
     def rebuild_layout(self, items):
         if self.preview_popup.isVisible() or self.pending_preview_item is not None:
@@ -341,14 +682,21 @@ class CustomDock(QWidget):
                 item['win_id'],
                 item.get('windows'),
                 icon_size=self.dock_settings.icon_size,
+                icon_opacity=self.dock_settings.icon_opacity,
                 indicator_mode=self.dock_settings.instance_indicator_mode,
             )
+            button.apply_visual_settings(self.dock_settings)
+            button.setAcceptDrops(True)
+            button.installEventFilter(self)
             button.pin_toggled.connect(self.handle_pin_toggle)
             button.preview_requested.connect(self.schedule_preview)
             button.preview_hidden.connect(self.schedule_preview_hide)
+            button.activated.connect(self.handle_item_activation)
+            button.context_menu_requested.connect(self.show_item_context_menu)
             self.app_row_layout.addWidget(button)
 
         self.adjustSize()
+        self.refresh_active_window_highlight(force=True)
         self.recenter()
         self._log_window_state(
             "dock-layout-rebuilt",
@@ -370,24 +718,11 @@ class CustomDock(QWidget):
     def show_settings_menu(self):
         menu = QMenu(self)
         settings_action = QAction("Dock Settings", self)
-        settings_action.triggered.connect(self.open_settings_dialog)
         menu.addAction(settings_action)
-        menu.addSeparator()
-
-        open_config_action = QAction("Open Dock Config Folder", self)
-        open_config_action.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(dock_config_dir())))
-        )
-        menu.addAction(open_config_action)
-
-        reload_action = QAction("Reload Applications", self)
-        reload_action.triggered.connect(self.reload_registry)
-        menu.addAction(reload_action)
 
         menu.addSeparator()
 
         quit_action = QAction("Quit Dock", self)
-        quit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(quit_action)
 
         menu.setStyleSheet("""
@@ -400,7 +735,11 @@ class CustomDock(QWidget):
                 background-color: rgba(255, 255, 255, 40);
             }
         """)
-        menu.exec(self.settings_button.mapToGlobal(self.settings_button.rect().bottomLeft()))
+        chosen_action = menu.exec(self.settings_button.mapToGlobal(self.settings_button.rect().bottomLeft()))
+        if chosen_action == settings_action:
+            self.open_settings_dialog()
+        elif chosen_action == quit_action:
+            QApplication.instance().quit()
 
     def open_settings_dialog(self):
         self.hide_preview()
@@ -423,8 +762,10 @@ class CustomDock(QWidget):
         self.app_row_layout.setSpacing(spacing)
         self.settings_button.setFixedSize(button_size, button_size)
         self.settings_button.setIconSize(QSize(max(18, button_size - 20), max(18, button_size - 20)))
+        apply_widget_opacity(self.settings_button, self.dock_settings.icon_opacity)
         self.settings_panel.setMaximumWidth(self.settings_button.width() if self.settings_revealed else 0)
 
+        self.last_dock_state = []
         self.update_dock_items()
         self.adjustSize()
         self.recenter()
@@ -433,7 +774,14 @@ class CustomDock(QWidget):
             padding=padding,
             spacing=spacing,
             button_size=button_size,
+            visibility_animation_mode=self.dock_settings.visibility_animation_mode,
             icon_size=self.dock_settings.icon_size,
+            icon_opacity=self.dock_settings.icon_opacity,
+            hover_highlight_color=self.dock_settings.hover_highlight_color,
+            hover_highlight_opacity=self.dock_settings.hover_highlight_opacity,
+            focused_window_highlight_color=self.dock_settings.focused_window_highlight_color,
+            focused_window_highlight_opacity=self.dock_settings.focused_window_highlight_opacity,
+            background_image_opacity=self.dock_settings.background_image_opacity,
         )
 
     def schedule_preview(self, dock_item):
@@ -447,7 +795,14 @@ class CustomDock(QWidget):
             dock_item.size(),
         )
         self.preview_hide_timer.stop()
-        self.preview_timer.start(200)
+        if self._is_visibility_animation_running():
+            self.preview_timer.stop()
+            self._log_window_state(
+                "dock-preview-deferred-for-animation",
+                app_name=dock_item.app_data.get('Name', 'Unknown App'),
+            )
+            return
+        self.preview_timer.start(self._preview_delay_ms())
         self._log_window_state(
             "dock-preview-scheduled",
             app_name=dock_item.app_data.get('Name', 'Unknown App'),
@@ -515,7 +870,12 @@ class CustomDock(QWidget):
         popup_y = max(0, self.preview_host.height() - self.preview_popup.height() - 4)
 
         self.preview_popup.move(popup_x, popup_y)
+        self.preview_popup_fade.stop()
+        self.preview_popup_opacity.setOpacity(0.0)
         self.preview_popup.show()
+        self.preview_popup_fade.setStartValue(0.0)
+        self.preview_popup_fade.setEndValue(1.0)
+        self.preview_popup_fade.start()
         self._log_window_state(
             "dock-preview-shown",
             app_name=dock_item.app_data.get('Name', 'Unknown App'),
@@ -532,6 +892,8 @@ class CustomDock(QWidget):
         self.preview_hover_active = False
         self.preview_timer.stop()
         self.preview_hide_timer.stop()
+        self.preview_popup_fade.stop()
+        self.preview_popup_opacity.setOpacity(1.0)
         self.preview_popup.hide()
         self.preview_host.setFixedSize(0, 0)
         self.adjustSize()
@@ -562,25 +924,132 @@ class CustomDock(QWidget):
         elif self.preview_popup.isVisible():
             self.schedule_preview_hide()
 
-    def handle_preview_action(self, action_name, preview):
-        win_id = str(preview.get('win_id') or '').strip()
-        if action_name == 'focus' and win_id:
-            subprocess.run(['wmctrl', '-i', '-a', win_id])
-        elif action_name == 'minimize' and win_id:
-            subprocess.run(['wmctrl', '-i', '-r', win_id, '-b', 'add,hidden'])
-        elif action_name == 'toggle_maximize' and win_id:
-            self.toggle_window_maximize(win_id, bool(preview.get('is_maximized')))
-        elif action_name == 'close' and win_id:
-            subprocess.run(['wmctrl', '-i', '-c', win_id])
-        elif action_name == 'new_window':
-            launch_app(preview.get('app_data', {}))
+    def focus_window(self, win_id, *, app_path=None):
+        if not win_id:
+            return
+        self._run_window_command(['wmctrl', '-i', '-r', win_id, '-b', 'remove,hidden'])
+        xdotool_window_id = self._xdotool_window_id(win_id)
+        if xdotool_window_id:
+            self._run_window_command(['xdotool', 'windowmap', '--sync', xdotool_window_id])
+            self._run_window_command(['xdotool', 'windowactivate', '--sync', xdotool_window_id])
+            self._run_window_command(['xdotool', 'windowraise', xdotool_window_id])
+        else:
+            self._run_window_command(['wmctrl', '-i', '-R', win_id])
+        self._remember_window_focus(app_path, win_id)
 
+    def minimize_window(self, win_id):
+        if not win_id:
+            return
+        xdotool_window_id = self._xdotool_window_id(win_id)
+        if xdotool_window_id:
+            self._run_window_command(['xdotool', 'windowminimize', xdotool_window_id])
+            return
+        self._run_window_command(['wmctrl', '-i', '-r', win_id, '-b', 'add,hidden'])
+
+    def close_window(self, win_id):
+        if not win_id:
+            return
+        self._run_window_command(['wmctrl', '-i', '-c', win_id])
+
+    def open_new_window(self, app_data):
+        launch_app(app_data or {})
+
+    def toggle_window_focus(self, win_id, *, app_path=None):
+        if not win_id:
+            return
+        if self.is_window_minimized(win_id):
+            self.focus_window(win_id, app_path=app_path)
+            return
+        if self._normalize_window_id(win_id) == self._active_window_id():
+            self.minimize_window(win_id)
+            return
+        self.focus_window(win_id, app_path=app_path)
+
+    def execute_window_action(self, action_name, payload):
+        win_id = str(payload.get('win_id') or '').strip()
+        app_data = payload.get('app_data', {})
+        app_path = payload.get('app_path') or app_data.get('path')
+        if action_name == 'toggle_focus':
+            if win_id:
+                self.toggle_window_focus(win_id, app_path=app_path)
+            else:
+                self.open_new_window(app_data)
+        elif action_name == 'focus':
+            self.focus_window(win_id, app_path=app_path)
+        elif action_name == 'minimize':
+            self.minimize_window(win_id)
+        elif action_name == 'toggle_maximize':
+            is_maximized = payload.get('is_maximized')
+            if is_maximized is None:
+                is_maximized = self.is_window_maximized(win_id)
+            self.toggle_window_maximize(win_id, bool(is_maximized))
+        elif action_name == 'close':
+            self.close_window(win_id)
+        elif action_name == 'new_window':
+            self.open_new_window(app_data)
+        log_dock_debug("dock-window-action", action=action_name, win_id=win_id, app_path=app_path)
+
+    def handle_item_activation(self, dock_item):
+        self.hide_preview()
+        self.execute_window_action('toggle_focus', self._item_action_payload(dock_item))
+
+    def show_item_context_menu(self, dock_item, global_pos):
+        self.hide_preview()
+        menu = QMenu(self)
+        payload = self._item_action_payload(dock_item)
+        win_id = str(payload.get('win_id') or '').strip()
+        is_running = bool(dock_item.is_running and win_id)
+
+        if is_running:
+            focus_action = QAction("Focus Window", self)
+            focus_action.triggered.connect(lambda: self.execute_window_action('focus', dict(payload)))
+            menu.addAction(focus_action)
+
+            minimize_action = QAction("Minimize Window", self)
+            minimize_action.triggered.connect(lambda: self.execute_window_action('minimize', dict(payload)))
+            menu.addAction(minimize_action)
+
+            maximize_text = "Restore Window" if payload.get('is_maximized') else "Maximize Window"
+            maximize_action = QAction(maximize_text, self)
+            maximize_action.triggered.connect(lambda: self.execute_window_action('toggle_maximize', dict(payload)))
+            menu.addAction(maximize_action)
+
+            close_action = QAction("Close Window", self)
+            close_action.triggered.connect(lambda: self.execute_window_action('close', dict(payload)))
+            menu.addAction(close_action)
+            menu.addSeparator()
+
+        new_window_action = QAction("Open New Window", self)
+        new_window_action.triggered.connect(lambda: self.execute_window_action('new_window', dict(payload)))
+        menu.addAction(new_window_action)
+
+        if not dock_item.app_data.get('runtime_only'):
+            menu.addSeparator()
+            pin_text = "Unpin from Dock" if dock_item.is_pinned else "Pin to Dock"
+            pin_action = QAction(pin_text, self)
+            pin_action.triggered.connect(dock_item.toggle_pin)
+            menu.addAction(pin_action)
+
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(40, 40, 40, 240);
+                color: white;
+                border-radius: 5px;
+            }
+            QMenu::item:selected {
+                background-color: rgba(255, 255, 255, 40);
+            }
+        """)
+        menu.exec(global_pos)
+
+    def handle_preview_action(self, action_name, preview):
+        self.execute_window_action(action_name, preview)
         self.hide_preview()
         QTimer.singleShot(180, self.update_dock_items)
 
     def toggle_window_maximize(self, win_id, is_maximized):
         action = 'remove' if is_maximized else 'add'
-        subprocess.run(['wmctrl', '-i', '-r', win_id, '-b', f'{action},maximized_vert,maximized_horz'])
+        self._run_window_command(['wmctrl', '-i', '-r', win_id, '-b', f'{action},maximized_vert,maximized_horz'])
 
     def is_window_maximized(self, win_id):
         if not win_id:
@@ -596,12 +1065,39 @@ class CustomDock(QWidget):
         text = output.lower()
         return '_net_wm_state_maximized_vert' in text and '_net_wm_state_maximized_horz' in text
 
-    def capture_window_preview(self, win_id):
+    def is_window_minimized(self, win_id):
+        if not win_id:
+            return False
         try:
-            native_id = int(win_id, 16)
+            output = subprocess.check_output(
+                ['xprop', '-id', str(win_id), 'WM_STATE', '_NET_WM_STATE'],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return False
+        text = output.lower()
+        return 'iconic' in text or '_net_wm_state_hidden' in text
+
+    def capture_window_preview(self, win_id):
+        pixmap = self.x11_preview_capturer.capture(win_id)
+        if not pixmap.isNull():
+            log_dock_debug(
+                "dock-preview-captured",
+                win_id=win_id,
+                size=(pixmap.width(), pixmap.height()),
+                backend=self.x11_preview_capturer.backend_name,
+            )
+            return pixmap
+
+        try:
+            native_id = int(str(win_id), 0)
         except (TypeError, ValueError):
-            log_dock_debug("dock-preview-invalid-win-id", win_id=win_id)
-            return QPixmap()
+            try:
+                native_id = int(str(win_id), 16)
+            except (TypeError, ValueError):
+                log_dock_debug("dock-preview-invalid-win-id", win_id=win_id)
+                return QPixmap()
 
         for screen in QApplication.screens():
             pixmap = screen.grabWindow(native_id)
@@ -611,6 +1107,7 @@ class CustomDock(QWidget):
                     win_id=win_id,
                     size=(pixmap.width(), pixmap.height()),
                     screen_geometry=screen.geometry().getRect(),
+                    backend="qscreen",
                 )
                 return pixmap
         log_dock_debug("dock-preview-capture-failed", win_id=win_id)
@@ -655,22 +1152,50 @@ class CustomDock(QWidget):
         self.is_visible = True
 
         screen_geometry = self._screen_geometry()
+        target_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
         target_y = self._visible_y(screen_geometry)
-        if not self.isVisible():
-            self.move(self.x(), target_y)
-            self.setWindowOpacity(0.0)
-            self.show()
+        animation_mode = self._visibility_animation_mode()
+        was_visible = self.isVisible()
 
-        self.anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self.anim.setDuration(180)
-        self.anim.setStartValue(self.windowOpacity())
-        self.anim.setEndValue(1.0)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        if animation_mode == "slide":
+            start_pos = QPoint(target_x, self._hidden_y(screen_geometry))
+            end_pos = QPoint(target_x, target_y)
+            if not was_visible:
+                self.move(start_pos)
+                self.setWindowOpacity(1.0)
+                self.show()
+                self.move(start_pos)
+            else:
+                self.move(target_x, self.y())
+            self.setWindowOpacity(1.0)
+            self.anim = QPropertyAnimation(self, b"pos", self)
+            self.anim.setDuration(320)
+            self.anim.setStartValue(start_pos if not was_visible else self.pos())
+            self.anim.setEndValue(end_pos)
+            self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        else:
+            if not was_visible:
+                self.move(target_x, target_y)
+                self.setWindowOpacity(0.0)
+                self.show()
+            else:
+                self.move(target_x, target_y)
+            self.anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self.anim.setDuration(280)
+            self.anim.setStartValue(self.windowOpacity())
+            self.anim.setEndValue(1.0)
+            self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.x11_window_manager.sync(
+            reserve_space=True,
+            window_rect=QRect(target_x, target_y, self.width(), self.height()),
+        )
         self.anim.finished.connect(self._handle_visibility_animation_finished)
         self.anim.start()
         self._log_window_state(
             "dock-show-animation-started",
             screen_geometry=screen_geometry.getRect(),
+            animation_mode=animation_mode,
+            target_x=target_x,
             target_y=target_y,
         )
 
@@ -684,23 +1209,34 @@ class CustomDock(QWidget):
 
         screen_geometry = self._screen_geometry()
         target_y = self._hidden_y(screen_geometry)
+        animation_mode = self._visibility_animation_mode()
 
-        self.anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self.anim.setDuration(180)
-        self.anim.setStartValue(self.windowOpacity())
-        self.anim.setEndValue(0.0)
-        self.anim.setEasingCurve(QEasingCurve.InCubic)
+        if animation_mode == "slide":
+            self.setWindowOpacity(1.0)
+            self.anim = QPropertyAnimation(self, b"pos", self)
+            self.anim.setDuration(300)
+            self.anim.setStartValue(self.pos())
+            self.anim.setEndValue(QPoint(self.x(), target_y))
+            self.anim.setEasingCurve(QEasingCurve.InCubic)
+        else:
+            self.anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self.anim.setDuration(240)
+            self.anim.setStartValue(self.windowOpacity())
+            self.anim.setEndValue(0.0)
+            self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.x11_window_manager.sync(reserve_space=False)
         self.anim.finished.connect(self._handle_visibility_animation_finished)
         self.anim.start()
         self._log_window_state(
             "dock-hide-animation-started",
             screen_geometry=screen_geometry.getRect(),
+            animation_mode=animation_mode,
             target_y=target_y,
         )
 
     def recenter(self):
         screen_geometry = self._screen_geometry()
-        new_x = (screen_geometry.width() - self.width()) // 2
+        new_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
         if self.is_visible:
             new_y = self._visible_y(screen_geometry)
         elif self.isVisible():
@@ -708,6 +1244,10 @@ class CustomDock(QWidget):
         else:
             new_y = self._hidden_y(screen_geometry)
         self.move(new_x, new_y)
+        self.x11_window_manager.sync(
+            reserve_space=self.is_visible,
+            window_rect=QRect(new_x, new_y, self.width(), self.height()),
+        )
         self._log_window_state(
             "dock-recentered",
             screen_geometry=screen_geometry.getRect(),

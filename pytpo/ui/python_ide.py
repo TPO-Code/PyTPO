@@ -39,6 +39,7 @@ from pytpo.services.asset_paths import (
     preferred_shared_asset_path,
     shared_asset_search_dirs,
 )
+from pytpo.services.app_icons import shared_app_icon_path
 from pytpo.services.commit_md import (
     commit_md_path_for_project,
     ensure_commit_md_exists,
@@ -308,7 +309,7 @@ class PythonIDE(Window):
 
     @classmethod
     def app_icon_path(cls) -> Path:
-        return preferred_shared_asset_path("icons/app_icon.png")
+        return shared_app_icon_path("pytpo")
 
     def __init__(self):
         requested_root = os.path.realpath(QDir.currentPath())

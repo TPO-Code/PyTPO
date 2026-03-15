@@ -1427,7 +1427,7 @@ class CodexAgentDockWidget(QWidget):
         self._runner = _CodexRunner()
         self._session_id: str | None = None
         self._session_project = ""
-        self._session_options_signature: tuple[str, str, str] | None = None
+        self._session_options_signature: tuple[str, str, str, str] | None = None
         self._command_template = DEFAULT_CODEX_COMMAND
         self._auto_skip_git_repo_check = True
         self._sandbox_mode = "workspace-write"
@@ -3131,11 +3131,23 @@ class CodexAgentDockWidget(QWidget):
             timestamp=_timestamp(),
         )
 
-    def _active_options_signature(self) -> tuple[str, str, str]:
+    def _resolved_permission_mode(self) -> str:
+        permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
+        if permission_mode not in {"default", "full_access"}:
+            permission_mode = "default"
+        if self._is_project_read_only():
+            return "default"
+        return permission_mode
+
+    def _active_options_signature(self) -> tuple[str, str, str, str]:
         model = str(self.model_combo.currentData() or "").strip()
         reasoning = str(self.reasoning_combo.currentData() or "medium").strip().lower()
-        permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
-        return model, reasoning, permission_mode
+        return (
+            model,
+            reasoning,
+            self._resolved_sandbox_mode(),
+            self._resolved_permission_mode(),
+        )
 
     def _on_option_changed(self, *_args: Any) -> None:
         if self._updating_options:
@@ -3250,12 +3262,18 @@ class CodexAgentDockWidget(QWidget):
         updated = self._drop_flag_with_value(updated, {"-m", "--model"})
         updated = self._drop_flag_with_value(updated, {"-s", "--sandbox"})
         updated = self._drop_reasoning_config(updated)
-        updated = [token for token in updated if token != "--dangerously-bypass-approvals-and-sandbox"]
-        updated = self._drop_flags(updated, {"--skip-git-repo-check"})
+        updated = self._drop_flags(
+            updated,
+            {
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--full-auto",
+                "--skip-git-repo-check",
+            },
+        )
 
         added_skip_git_repo_check = False
 
-        model, reasoning, _ = self._active_options_signature()
+        model, reasoning, sandbox_mode, permission_mode = self._active_options_signature()
         insert_at = 2
         if self._auto_skip_git_repo_check and not self._is_project_source_controlled(project):
             updated[insert_at:insert_at] = ["--skip-git-repo-check"]
@@ -3266,7 +3284,10 @@ class CodexAgentDockWidget(QWidget):
             insert_at += 2
         updated[insert_at:insert_at] = ["--config", f'model_reasoning_effort="{reasoning}"']
         insert_at += 2
-        updated[insert_at:insert_at] = ["--sandbox", self._resolved_sandbox_mode()]
+        if permission_mode == "full_access":
+            updated[insert_at:insert_at] = ["--dangerously-bypass-approvals-and-sandbox"]
+        else:
+            updated[insert_at:insert_at] = ["--full-auto", "--sandbox", sandbox_mode]
         return shlex.join(updated), added_skip_git_repo_check
 
     def _normalize_command(self, command: str) -> str:
@@ -3343,9 +3364,7 @@ class CodexAgentDockWidget(QWidget):
         if base and base[-1] == "-":
             base = base[:-1]
         resume_args = self._resume_supported_args(base[2:])
-        permission_mode = str(self.permissions_combo.currentData() or "default").strip().lower()
-        if self._is_project_read_only():
-            permission_mode = "default"
+        permission_mode = self._resolved_permission_mode()
         permission_flag = (
             "--dangerously-bypass-approvals-and-sandbox"
             if permission_mode == "full_access"
@@ -3408,18 +3427,21 @@ class CodexAgentDockWidget(QWidget):
 
     @staticmethod
     def _compose_followup_prompt(
+        project: Path,
         user_text: str,
         attachment_references: list[str] | None = None,
     ) -> str:
         attachments = list(attachment_references or [])
+        project_block = f"Project path: {project}\n\n"
         if attachments:
             attachment_block = "\n".join(attachments)
             return (
+                f"{project_block}"
                 "Attached files (staged for this turn):\n"
                 f"{attachment_block}\n\n"
                 f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
             )
-        return f"{_wrap_user_prompt_text(user_text)}\n"
+        return f"{project_block}User message:\n{_wrap_user_prompt_text(user_text)}\n"
 
     def _refresh_session_ui(self) -> None:
         if self._session_id:
@@ -4093,7 +4115,7 @@ class CodexAgentDockWidget(QWidget):
         prompt = (
             self._compose_prompt(project, user_text, attachment_refs)
             if not self._session_id
-            else self._compose_followup_prompt(user_text, attachment_refs)
+            else self._compose_followup_prompt(project, user_text, attachment_refs)
         )
         invocation = _CodexInvocation(
             project_dir=project,

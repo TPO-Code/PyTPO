@@ -150,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     app = QApplication([sys.argv[0], *cli_args])
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("pytpo")
     configure_shared_file_dialog_defaults()
     #app.setStyle("Fusion")
     app.setStyleSheet("border:0px")
