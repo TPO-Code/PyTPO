@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from PySide6.QtCore import QDateTime, Qt, QTimer, Slot
 from PySide6.QtWidgets import (
@@ -8,10 +9,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QMenu,
     QMessageBox,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -19,6 +18,7 @@ from PySide6.QtWidgets import (
 from .constants import NOTIFICATIONS_SERVICE, WATCHER_SERVICES
 from .dbus import launch_background_command, load_xlib, run_logout_command
 from .notifications import NotificationCenter, NotificationCenterButton, NotificationServer
+from .system_menu import SystemMenuButton
 from .tray import StatusNotifierTrayArea, StatusNotifierWatcher, X11TraySelectionManager
 
 LOGGER = logging.getLogger("topbar.ui")
@@ -71,6 +71,7 @@ class StartupStatusDialog(QDialog):
 class TopBar(QWidget):
     def __init__(self):
         super().__init__()
+        startup_started = time.perf_counter()
         self._x11_panel_hints_applied = False
         self._auto_hide_enabled = False
         self._is_hidden_to_edge = False
@@ -80,10 +81,28 @@ class TopBar(QWidget):
             self.setAttribute(dock_attribute, True)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        center_started = time.perf_counter()
         self.notification_center = NotificationCenter(self)
+        LOGGER.info("startup timing: NotificationCenter initialized in %.1f ms", (time.perf_counter() - center_started) * 1000.0)
+
+        server_started = time.perf_counter()
         self.notification_server = NotificationServer(self.notification_center, self)
+        LOGGER.info("startup timing: NotificationServer initialized in %.1f ms", (time.perf_counter() - server_started) * 1000.0)
+
+        watcher_started = time.perf_counter()
         self.status_notifier_watcher = StatusNotifierWatcher(self)
+        LOGGER.info(
+            "startup timing: StatusNotifierWatcher initialized in %.1f ms",
+            (time.perf_counter() - watcher_started) * 1000.0,
+        )
+
+        tray_selection_started = time.perf_counter()
         self.x11_tray_selection_manager = X11TraySelectionManager(self, self)
+        LOGGER.info(
+            "startup timing: X11TraySelectionManager initialized in %.1f ms",
+            (time.perf_counter() - tray_selection_started) * 1000.0,
+        )
+
         self._startup_dialog = StartupStatusDialog(self)
         self._startup_dialog_shown = False
 
@@ -99,32 +118,27 @@ class TopBar(QWidget):
         layout.addWidget(self.workspaces_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
         layout.addStretch(1)
 
+        tray_area_started = time.perf_counter()
         self.tray_area = StatusNotifierTrayArea(self.status_notifier_watcher, self.x11_tray_selection_manager, self)
+        LOGGER.info("startup timing: StatusNotifierTrayArea initialized in %.1f ms", (time.perf_counter() - tray_area_started) * 1000.0)
         layout.addWidget(self.tray_area, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
+        notifications_button_started = time.perf_counter()
         self.notifications_button = NotificationCenterButton(self.notification_center, self.notification_server, self)
+        LOGGER.info(
+            "startup timing: NotificationCenterButton initialized in %.1f ms",
+            (time.perf_counter() - notifications_button_started) * 1000.0,
+        )
         layout.addWidget(self.notifications_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
-        self.menu_button = QToolButton(self)
-        self.menu_button.setText("Menu")
-        self.menu_button.setAutoRaise(True)
-        self.menu_button.setCursor(Qt.PointingHandCursor)
-        self.menu_button.setFocusPolicy(Qt.NoFocus)
-        self.menu_button.setPopupMode(QToolButton.InstantPopup)
-        self.menu_button.setStyleSheet(
-            """
-            QToolButton {
-                background: transparent;
-                color: #f4f4f4;
-                border: 1px solid #6f6f6f;
-                border-radius: 6px;
-                padding: 4px 10px;
-                margin-left: 8px;
-            }
-            QToolButton:hover { background: #6a6a6a; }
-            """
+        self.menu_button = SystemMenuButton(
+            show_status=self._show_startup_dialog,
+            open_terminal=self._open_terminal,
+            open_dock=self._open_dock_panel,
+            logout=self._logout_session,
+            quit_app=QApplication.instance().quit,
+            parent=self,
         )
-        self.menu_button.setMenu(self._build_menu())
         layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self.clock_label = QLabel()
@@ -147,6 +161,7 @@ class TopBar(QWidget):
         self._last_status_text = ""
         self._refresh_runtime_status()
         QTimer.singleShot(0, self._claim_x11_tray_selection)
+        LOGGER.info("startup timing: TopBar.__init__ completed in %.1f ms", (time.perf_counter() - startup_started) * 1000.0)
 
     @Slot()
     def _update_clock(self) -> None:
@@ -188,36 +203,6 @@ class TopBar(QWidget):
             self._startup_dialog.show()
             self._startup_dialog.raise_()
             self._startup_dialog.activateWindow()
-
-    def _build_menu(self) -> QMenu:
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            """
-            QMenu { background: #4a4a4a; color: #f2f2f2; border: 1px solid #686868; }
-            QMenu::item { padding: 6px 20px; }
-            QMenu::item:selected { background: #666666; }
-            """
-        )
-
-        show_status_action = menu.addAction("Show Welcome Dialog")
-        show_status_action.triggered.connect(self._show_startup_dialog)
-
-        terminal_action = menu.addAction("Open Terminal")
-        terminal_action.triggered.connect(self._open_terminal)
-
-        dock_action = menu.addAction("Open Dock Panel")
-        dock_action.triggered.connect(self._open_dock_panel)
-
-        menu.addSeparator()
-
-        logout_action = menu.addAction("Logout")
-        logout_action.triggered.connect(self._logout_session)
-
-        menu.addSeparator()
-
-        quit_action = menu.addAction("Quit TopBar")
-        quit_action.triggered.connect(QApplication.instance().quit)
-        return menu
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+import time
 from typing import Any
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Slot, Signal
@@ -15,6 +17,7 @@ from PySide6.QtDBus import (
 )
 from PySide6.QtGui import QAction, QCursor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QSizePolicy, QStyle, QToolButton, QWidget
+from TPOPyside.components.tray_discovery import TrayDiscovery
 
 from .constants import (
     BUSCTL,
@@ -52,6 +55,8 @@ from .dbus import (
 )
 
 LOGGER = logging.getLogger("topbar.tray")
+FALLBACK_ITEM_SCAN_RETRY_SECONDS = 15.0
+FALLBACK_ITEM_SERVICE_KEYWORDS = ("statusnotifieritem", "indicator", "ayatana")
 
 DBUS_NEXT_IMPORT_ERROR: Exception | None = None
 try:
@@ -942,11 +947,13 @@ class StatusNotifierTrayArea(QWidget):
     ):
         super().__init__(parent)
         self._bus = QDBusConnection.sessionBus()
+        self._discovery = TrayDiscovery(self._bus)
         self._local_watcher = watcher
         self._tray_selection_manager = tray_selection_manager
         self._watcher_service = ""
         self._watcher_props: QDBusInterface | None = None
-        self._buttons: dict[str, StatusNotifierButton] = {}
+        self._buttons: dict[str, QToolButton] = {}
+        self._fallback_item_cache: dict[str, tuple[str | None, float]] = {}
 
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self._layout = QHBoxLayout(self)
@@ -959,14 +966,12 @@ class StatusNotifierTrayArea(QWidget):
         self._refresh_timer.start()
         if self._local_watcher is not None:
             self._local_watcher.itemsChanged.connect(self.sync_items)
-        self.sync_items()
+        QTimer.singleShot(0, self.sync_items)
 
     def sync_items(self) -> None:
-        self._refresh_watcher_interface()
-        if self._local_watcher is not None and self._local_watcher.is_active:
-            ordered_ids = self._local_watcher.registered_items()
-        else:
-            ordered_ids = self._remote_registered_items()
+        discovered_items = self._discovery.get_items(visible_only=True)
+        ordered_ids = [item.item_id for item in discovered_items]
+        item_map = {item.item_id: item for item in discovered_items}
 
         current_ids = set(self._buttons)
         target_ids = set(ordered_ids)
@@ -978,19 +983,19 @@ class StatusNotifierTrayArea(QWidget):
             button.deleteLater()
 
         for item_id in ordered_ids:
-            if item_id not in self._buttons:
-                LOGGER.debug("Creating tray button for %s", item_id)
-                button = StatusNotifierButton(item_id, self)
-                self._buttons[item_id] = button
-                self._layout.addWidget(button)
+            LOGGER.debug("Creating tray button for %s via TrayDiscovery", item_id)
+            existing = self._buttons.pop(item_id, None)
+            if existing is not None:
+                self._layout.removeWidget(existing)
+                existing.deleteLater()
+            button = item_map[item_id].create_button(self, icon_size=20, button_size=28)
+            self._buttons[item_id] = button
+            self._layout.addWidget(button)
 
         status_parts: list[str] = []
         if self._local_watcher is not None:
             status_parts.append(self._local_watcher.status_text())
-        elif self._watcher_service:
-            status_parts.append(f"Using remote tray watcher {self._watcher_service}")
-        else:
-            status_parts.append("No tray watcher service available")
+        status_parts.append(f"TrayDiscovery items: {len(ordered_ids)}")
         if self._tray_selection_manager is not None:
             status_parts.append(self._tray_selection_manager.status_text())
         self.setToolTip("\n".join(status_parts))
@@ -1010,8 +1015,13 @@ class StatusNotifierTrayArea(QWidget):
     def _refresh_watcher_interface(self) -> None:
         if self._local_watcher is not None and self._local_watcher.is_active:
             target_service = self._local_watcher.primary_service_name or WATCHER_SERVICES[0]
-        else:
-            target_service = discover_watcher_service(self._bus)
+            if target_service == self._watcher_service and self._watcher_props is None:
+                return
+            self._watcher_service = target_service
+            self._watcher_props = None
+            return
+
+        target_service = discover_watcher_service(self._bus)
 
         if target_service == self._watcher_service and self._watcher_props is not None:
             return
@@ -1021,3 +1031,125 @@ class StatusNotifierTrayArea(QWidget):
             self._watcher_props = QDBusInterface(target_service, WATCHER_PATH, PROPERTIES_INTERFACE, self._bus)
             return
         self._watcher_props = None
+
+    def _fallback_discovered_items(self, primary_ids: list[str]) -> list[str]:
+        known_services = {extract_service_and_path(item_id)[0] for item_id in primary_ids if item_id}
+        candidate_services = self._candidate_item_services()
+        available_services = set(candidate_services)
+
+        for service in list(self._fallback_item_cache):
+            if service not in available_services:
+                self._fallback_item_cache.pop(service, None)
+
+        discovered: list[str] = []
+        now = time.monotonic()
+        for service in candidate_services:
+            if not service or service in known_services:
+                continue
+
+            cached_item_id, checked_at = self._fallback_item_cache.get(service, (None, 0.0))
+            if cached_item_id is not None and (now - checked_at) < FALLBACK_ITEM_SCAN_RETRY_SECONDS:
+                discovered.append(cached_item_id)
+                continue
+            if cached_item_id is None and (now - checked_at) < FALLBACK_ITEM_SCAN_RETRY_SECONDS:
+                continue
+
+            item_id = self._probe_item_service(service)
+            self._fallback_item_cache[service] = (item_id, now)
+            if item_id is not None:
+                LOGGER.info("Fallback tray discovery registered item=%s via service scan", item_id)
+                discovered.append(item_id)
+        return discovered
+
+    def _candidate_item_services(self) -> list[str]:
+        bus_interface = self._bus.interface()
+        if bus_interface is None:
+            return []
+
+        try:
+            reply = bus_interface.registeredServiceNames()
+        except Exception as exc:
+            LOGGER.debug("Tray item service scan failed to list bus names: %r", exc)
+            return []
+        if not reply.isValid():
+            return []
+
+        candidates: list[str] = []
+        for raw_name in reply.value():
+            service = str(raw_name or "").strip()
+            if not service or service.startswith(":"):
+                continue
+            lowered = service.lower()
+            if not any(keyword in lowered for keyword in FALLBACK_ITEM_SERVICE_KEYWORDS):
+                continue
+            candidates.append(service)
+        return candidates
+
+    def _probe_item_service(self, service: str) -> str | None:
+        for path in self._candidate_item_paths(service):
+            if self._path_exposes_item_interface(service, path):
+                return f"{service}{path}"
+        return None
+
+    def _candidate_item_paths(self, service: str) -> list[str]:
+        paths: list[str] = ["/StatusNotifierItem"]
+        tree_output = self._run_busctl_text("tree", service, timeout=0.8)
+        if not tree_output:
+            return paths
+
+        all_paths: list[str] = []
+        filtered_paths: list[str] = []
+        for line in tree_output.splitlines():
+            slash_index = line.find("/")
+            if slash_index < 0:
+                continue
+            path = line[slash_index:].strip()
+            if not path.startswith("/"):
+                continue
+            if path not in all_paths:
+                all_paths.append(path)
+
+            lowered = path.lower()
+            if any(token in lowered for token in ("statusnotifieritem", "notificationitem", "indicator")):
+                if path not in filtered_paths:
+                    filtered_paths.append(path)
+
+        for path in filtered_paths or all_paths[:12]:
+            if path not in paths:
+                paths.append(path)
+        return paths
+
+    def _path_exposes_item_interface(self, service: str, path: str) -> bool:
+        introspection = self._run_busctl_text("introspect", service, path, timeout=0.8)
+        return bool(introspection and ITEM_INTERFACE in introspection)
+
+    def _run_busctl_text(self, *args: str, timeout: float = 0.8) -> str:
+        if not BUSCTL:
+            return ""
+        try:
+            result = subprocess.run(
+                [BUSCTL, "--user", *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception as exc:
+            LOGGER.debug("busctl %s failed during tray fallback scan: %r", " ".join(args), exc)
+            return ""
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            if stderr:
+                LOGGER.debug("busctl %s exited with %s: %s", " ".join(args), result.returncode, stderr)
+            return ""
+        return result.stdout or ""
+
+    def _merge_item_ids(self, primary_ids: list[str], fallback_ids: list[str]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item_id in [*primary_ids, *fallback_ids]:
+            if not item_id or item_id in seen:
+                continue
+            seen.add(item_id)
+            ordered.append(item_id)
+        return ordered
