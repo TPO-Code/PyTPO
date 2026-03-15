@@ -569,16 +569,8 @@ def launch_background_command(*command: str) -> tuple[bool, str]:
     return True, " ".join(command)
 
 
-def run_logout_command() -> tuple[bool, str]:
-    commands: list[list[str]] = []
-    if shutil.which("gnome-session-quit"):
-        commands.append(["gnome-session-quit", "--logout", "--no-prompt"])
-
-    session_id = os.environ.get("XDG_SESSION_ID", "").strip()
-    if shutil.which("loginctl") and session_id:
-        commands.append(["loginctl", "terminate-session", session_id])
-
-    last_error = "no supported logout command was found"
+def _run_session_command_candidates(commands: list[list[str]]) -> tuple[bool, str]:
+    last_error = "no supported session command was found"
     for command in commands:
         try:
             result = subprocess.run(
@@ -597,3 +589,46 @@ def run_logout_command() -> tuple[bool, str]:
         stdout = (result.stdout or "").strip()
         last_error = stderr or stdout or f"{' '.join(command)} exited with {result.returncode}"
     return False, last_error
+
+
+def run_logout_command() -> tuple[bool, str]:
+    commands: list[list[str]] = []
+    if shutil.which("gnome-session-quit"):
+        commands.append(["gnome-session-quit", "--logout", "--no-prompt"])
+
+    session_id = os.environ.get("XDG_SESSION_ID", "").strip()
+    if shutil.which("loginctl") and session_id:
+        commands.append(["loginctl", "terminate-session", session_id])
+
+    return _run_session_command_candidates(commands)
+
+
+def run_suspend_command() -> tuple[bool, str]:
+    commands: list[list[str]] = []
+    if shutil.which("systemctl"):
+        commands.append(["systemctl", "suspend"])
+    if shutil.which("loginctl"):
+        commands.append(["loginctl", "suspend"])
+    return _run_session_command_candidates(commands)
+
+
+def run_poweroff_command() -> tuple[bool, str]:
+    commands: list[list[str]] = []
+    if shutil.which("systemctl"):
+        commands.append(["systemctl", "poweroff"])
+    if shutil.which("loginctl"):
+        commands.append(["loginctl", "poweroff"])
+    if shutil.which("shutdown"):
+        commands.append(["shutdown", "-P", "now"])
+    return _run_session_command_candidates(commands)
+
+
+def run_shutdown_command() -> tuple[bool, str]:
+    commands: list[list[str]] = []
+    if shutil.which("systemctl"):
+        commands.append(["systemctl", "poweroff"])
+    if shutil.which("loginctl"):
+        commands.append(["loginctl", "poweroff"])
+    if shutil.which("shutdown"):
+        commands.append(["shutdown", "-P", "now"])
+    return _run_session_command_candidates(commands)

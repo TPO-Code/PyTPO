@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import sys
+from typing import Callable
+
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Slot
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .connectivity import ConnectivitySection
+from .footer import FooterSection
+from .media_container import MediaContainer
+from .sound import SoundSection
+
+
+class SystemMenuContent(QWidget):
+    def __init__(
+        self,
+        *,
+        open_terminal: Callable[[], None],
+        open_dock: Callable[[], None],
+        close_panel: Callable[[], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+
+        self._live_refresh_timer = QTimer(self)
+        self._live_refresh_timer.setInterval(1500)
+        self._live_refresh_timer.timeout.connect(self.refresh_all)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(14)
+
+        header_layout = QVBoxLayout()
+        header_layout.setSpacing(3)
+        root.addLayout(header_layout)
+
+        title = QLabel("Control Center", self)
+        title.setObjectName("systemMenuTitle")
+        header_layout.addWidget(title)
+
+        subtitle = QLabel("Connectivity, sound, media, and session controls", self)
+        subtitle.setObjectName("systemMenuSubtitle")
+        header_layout.addWidget(subtitle)
+
+        self.connectivity = ConnectivitySection(self)
+        root.addWidget(self.connectivity)
+
+        self.sound = SoundSection(self)
+        root.addWidget(self.sound)
+
+        self.media = MediaContainer(self)
+        root.addWidget(self.media)
+
+        root.addStretch(1)
+
+        self.footer = FooterSection(
+            open_terminal=open_terminal,
+            open_dock=open_dock,
+            close_panel=close_panel,
+            parent=self,
+        )
+        root.addWidget(self.footer)
+
+    def refresh_all(self) -> None:
+        self.connectivity.refresh()
+        self.sound.refresh()
+        self.media.refresh()
+
+    def start_live_refresh(self) -> None:
+        self._live_refresh_timer.start()
+
+    def stop_live_refresh(self) -> None:
+        self._live_refresh_timer.stop()
+
+
+class TopBarSystemMenuPanel(QFrame):
+    def __init__(
+        self,
+        *,
+        open_terminal: Callable[[], None],
+        open_dock: Callable[[], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self._anchor: QWidget | None = None
+
+        self.setObjectName("topbarSystemMenuPanel")
+        self.setFixedWidth(400)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self.content = SystemMenuContent(
+            open_terminal=open_terminal,
+            open_dock=open_dock,
+            close_panel=self.hide,
+            parent=self,
+        )
+        root.addWidget(self.content)
+
+        self._apply_style()
+
+    def toggle(self, anchor: QWidget) -> None:
+        self._anchor = anchor
+        if self.isVisible():
+            self.hide()
+            return
+        self.reposition(anchor)
+        self.show()
+        self.raise_()
+        QTimer.singleShot(0, self.refresh_all)
+
+    def reposition(self, anchor: QWidget | None = None) -> None:
+        anchor_widget = anchor or self._anchor
+        if anchor_widget is None:
+            return
+
+        self.adjustSize()
+        anchor_bottom_right = anchor_widget.mapToGlobal(anchor_widget.rect().bottomRight())
+        anchor_bottom_left = anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft())
+        screen = QApplication.screenAt(anchor_bottom_right) or anchor_widget.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
+
+        x = anchor_bottom_right.x() - self.width()
+        x = max(available.left() + 12, min(x, available.right() - self.width() - 12))
+        y = anchor_bottom_left.y() + 8
+        y = min(y, available.bottom() - self.height() - 12)
+        y = max(available.top() + 12, y)
+        self.move(QPoint(x, y))
+
+    def refresh_all(self) -> None:
+        self.content.refresh_all()
+        if self.isVisible() and self._anchor is not None:
+            self.reposition(self._anchor)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.content.start_live_refresh()
+        QTimer.singleShot(0, self.refresh_all)
+
+    def hideEvent(self, event) -> None:
+        self.content.stop_live_refresh()
+        super().hideEvent(event)
+
+    def _apply_style(self) -> None:
+        pass
+
+
+class SystemMenuButton(QToolButton):
+    def __init__(
+        self,
+        *,
+        open_terminal: Callable[[], None],
+        open_dock: Callable[[], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._panel = TopBarSystemMenuPanel(
+            open_terminal=open_terminal,
+            open_dock=open_dock,
+            parent=self.window(),
+        )
+
+        self.setText("Menu")
+        self.setAutoRaise(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self.clicked.connect(self._toggle_panel)
+        self.installEventFilter(self)
+        if self.window() is not None:
+            self.window().installEventFilter(self)
+
+    def eventFilter(self, watched: QWidget, event) -> bool:
+        if self._panel.isVisible() and event.type() in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
+            QTimer.singleShot(0, lambda: self._panel.reposition(self))
+        return super().eventFilter(watched, event)
+
+    @Slot()
+    def _toggle_panel(self) -> None:
+        self._panel.toggle(self)
+
+
+def preview_main() -> int:
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    preview_host = QWidget()
+    preview_host.setWindowTitle("Topbar Menu Preview")
+    preview_host.resize(480, 120)
+
+    layout = QVBoxLayout(preview_host)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(12)
+
+    title = QLabel("Standalone Control Center Preview", preview_host)
+    title.setStyleSheet("font-size: 16px; font-weight: 700; color: #f4f4f4;")
+    layout.addWidget(title)
+
+    subtitle = QLabel("Use the button below to open the topbar system menu without starting the full topbar.", preview_host)
+    subtitle.setWordWrap(True)
+    subtitle.setStyleSheet("color: #d5dddf;")
+    layout.addWidget(subtitle)
+
+    anchor_button = QPushButton("Open Control Center", preview_host)
+    layout.addWidget(anchor_button, alignment=Qt.AlignLeft)
+
+    preview_host.setStyleSheet("background: #34393c;")
+
+    panel = TopBarSystemMenuPanel(
+        open_terminal=lambda: QMessageBox.information(preview_host, "Preview", "Terminal preview action triggered."),
+        open_dock=lambda: QMessageBox.information(preview_host, "Preview", "Dock preview action triggered."),
+        parent=preview_host,
+    )
+    anchor_button.clicked.connect(lambda checked=False: panel.toggle(anchor_button))
+
+    preview_host.show()
+    return app.exec()
+
+
+__all__ = ["SystemMenuButton", "TopBarSystemMenuPanel", "preview_main"]

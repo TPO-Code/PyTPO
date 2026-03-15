@@ -4,68 +4,22 @@ import logging
 import time
 
 from PySide6.QtCore import QDateTime, Qt, QTimer, Slot
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
-    QVBoxLayout,
     QWidget,
 )
 
 from .constants import NOTIFICATIONS_SERVICE, WATCHER_SERVICES
-from .dbus import launch_background_command, load_xlib, run_logout_command
+from .dbus import launch_background_command, load_xlib
 from .notifications import NotificationCenter, NotificationCenterButton, NotificationServer
 from .system_menu import SystemMenuButton
 from .tray import StatusNotifierTrayArea, StatusNotifierWatcher, X11TraySelectionManager
 
 LOGGER = logging.getLogger("topbar.ui")
-
-
-class StartupStatusDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("PyTPO TopBar")
-        self.setModal(False)
-        self.setMinimumWidth(560)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("Welcome to the PyTPO TopBar prototype.")
-        title.setStyleSheet("color: #f4f4f4; font-size: 18px; font-weight: 600;")
-        layout.addWidget(title)
-
-        self.summary_label = QLabel()
-        self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("color: #d8d8d8;")
-        layout.addWidget(self.summary_label)
-
-        self.details_label = QLabel()
-        self.details_label.setWordWrap(True)
-        self.details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.details_label.setStyleSheet(
-            "color: #efefef; background: #494949; border: 1px solid #676767; padding: 10px; border-radius: 8px;"
-        )
-        layout.addWidget(self.details_label)
-
-        close_button = QPushButton("Continue")
-        close_button.clicked.connect(self.accept)
-        close_button.setStyleSheet(
-            "QPushButton { background: #707070; color: white; border: 1px solid #8a8a8a; "
-            "border-radius: 6px; padding: 7px 16px; } "
-            "QPushButton:hover { background: #7b7b7b; }"
-        )
-        layout.addWidget(close_button, alignment=Qt.AlignRight)
-
-        self.setStyleSheet("background: #3f3f3f;")
-
-    def set_status(self, summary: str, details: str) -> None:
-        self.summary_label.setText(summary)
-        self.details_label.setText(details)
 
 
 class TopBar(QWidget):
@@ -103,9 +57,6 @@ class TopBar(QWidget):
             (time.perf_counter() - tray_selection_started) * 1000.0,
         )
 
-        self._startup_dialog = StartupStatusDialog(self)
-        self._startup_dialog_shown = False
-
         screen = QApplication.primaryScreen()
         width = screen.geometry().width() if screen else 1200
         self.setGeometry(0, 0, width, 35)
@@ -132,17 +83,15 @@ class TopBar(QWidget):
         layout.addWidget(self.notifications_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self.menu_button = SystemMenuButton(
-            show_status=self._show_startup_dialog,
             open_terminal=self._open_terminal,
             open_dock=self._open_dock_panel,
-            logout=self._logout_session,
-            quit_app=QApplication.instance().quit,
             parent=self,
         )
         layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self.clock_label = QLabel()
         self.clock_label.setStyleSheet("color: #f1f1f1; margin-left: 10px;")
+        self.clock_label.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         layout.addWidget(self.clock_label, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self._clock_timer = QTimer(self)
@@ -194,15 +143,6 @@ class TopBar(QWidget):
             LOGGER.info(status_text)
             self._last_status_text = status_text
         self.setToolTip(status_text)
-        self._startup_dialog.set_status(
-            "This bar is running as a standalone prototype. The details below show notification, watcher, and X11 tray registration status.",
-            status_text,
-        )
-        if not self._startup_dialog_shown:
-            self._startup_dialog_shown = True
-            self._startup_dialog.show()
-            self._startup_dialog.raise_()
-            self._startup_dialog.activateWindow()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -333,20 +273,6 @@ class TopBar(QWidget):
                 x_display.close()
             except Exception:
                 pass
-
-    @Slot()
-    def _show_startup_dialog(self) -> None:
-        self._startup_dialog.show()
-        self._startup_dialog.raise_()
-        self._startup_dialog.activateWindow()
-
-    @Slot()
-    def _logout_session(self) -> None:
-        ok, message = run_logout_command()
-        if ok:
-            LOGGER.info("Logout command executed: %s", message)
-            return
-        QMessageBox.warning(self, "Logout Failed", f"Could not log out of the current session.\n\n{message}")
 
     @Slot()
     def _open_terminal(self) -> None:

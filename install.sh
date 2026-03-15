@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#install the following dependencies
+#sudo apt install pavucontrol
+
 set -euo pipefail
 
 PKG_NAME="pytpo"
@@ -13,6 +16,30 @@ APPINDICATOR_STATE_FILE="${STATE_DIR}/appindicator-was-enabled"
 
 ACTION="install"
 TOPBAR_MODE="ask"
+
+# Core system dependencies for PyTPO and related desktop/dev integrations.
+# Add to this list when a fresh system install reveals a missing apt package.
+APT_DEPENDENCIES=(
+    playerctl
+    pavucontrol
+    wmctrl
+    pipx
+    libcairo2-dev
+    python3
+    cmake
+    clang-format
+    cargo
+    gnome-shell-extension-appindicator
+    lldb
+)
+
+OPTIONAL_COMMANDS=(
+    uv
+    ruff
+    clangd
+    rust-analyzer
+    rustfmt
+)
 
 usage() {
     cat <<'EOF'
@@ -33,6 +60,39 @@ EOF
 ensure_state_dir() {
     mkdir -p "$STATE_DIR"
 }
+
+
+have_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+install_apt_dependencies() {
+    if ! have_command apt-get; then
+        echo "Error: apt-get not found. This installer currently supports apt-based systems."
+        exit 1
+    fi
+
+    local missing=()
+    local pkg
+
+    for pkg in "${APT_DEPENDENCIES[@]}"; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "==> System dependencies already installed."
+        return
+    fi
+
+    echo "==> Installing missing system dependencies:"
+    printf '    %s\n' "${missing[@]}"
+    echo "==> You may be prompted for your sudo password."
+
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+
 
 disable_conflicting_extension() {
     ensure_state_dir
@@ -131,6 +191,7 @@ pipx_uninstall() {
 }
 
 do_install() {
+    install_apt_dependencies
     desktop_uninstall
     pipx_uninstall
 
