@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -9,14 +11,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .service import MprisService, PlayerInfo
+from .service import MediaSnapshot, MprisService, PlayerInfo
 from .media_widget import MediaPlayerCard
 
 
 class MediaContainer(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        request_refresh: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.mpris = MprisService()
+        self._request_refresh = request_refresh
         self.player_cards: dict[str, MediaPlayerCard] = {}
 
         root = QVBoxLayout(self)
@@ -72,11 +80,24 @@ class MediaContainer(QWidget):
             card.deleteLater()
 
     def refresh(self) -> None:
-        players = self.mpris.list_players()
-        active_players = set(players)
+        if self._request_refresh is not None:
+            self._request_refresh()
+            return
+        players = tuple(self.mpris.get_player(player_name) for player_name in self.mpris.list_players())
+        self.apply_snapshot(
+            MediaSnapshot(
+                playerctl_missing=self.mpris.playerctl_missing,
+                gdbus_missing=self.mpris.gdbus_missing,
+                players=players,
+            )
+        )
+
+    def apply_snapshot(self, snapshot: MediaSnapshot) -> None:
+        players = snapshot.players
+        active_players = {player.name for player in players}
         self._remove_missing_player_cards(active_players)
 
-        if self.mpris.playerctl_missing:
+        if snapshot.playerctl_missing:
             self.media_summary.setText("Media controls need playerctl to be installed.")
             self.media_empty_label.setText("Install playerctl to show active media players here.")
             self.media_empty_label.show()
@@ -85,7 +106,7 @@ class MediaContainer(QWidget):
 
         if not players:
             summary = "No active MPRIS media players found."
-            if self.mpris.gdbus_missing:
+            if snapshot.gdbus_missing:
                 summary += " Capability detection is limited because gdbus is missing."
             self.media_summary.setText(summary)
             self.media_empty_label.setText(
@@ -95,16 +116,12 @@ class MediaContainer(QWidget):
             self.media_scroll.hide()
             return
 
-        infos: list[PlayerInfo] = []
-        for player in players:
-            infos.append(self.mpris.get_player(player))
-
-        summary_bits = [f"{info.identity or info.name}: {info.status}" for info in infos]
-        if self.mpris.gdbus_missing:
+        summary_bits = [f"{info.identity or info.name}: {info.status}" for info in players]
+        if snapshot.gdbus_missing:
             summary_bits.append("gdbus missing; control capability detection is limited")
         self.media_summary.setText(" | ".join(summary_bits))
 
-        for info in infos:
+        for info in players:
             self._ensure_player_card(info.name).bind(info)
 
         self.media_empty_label.hide()

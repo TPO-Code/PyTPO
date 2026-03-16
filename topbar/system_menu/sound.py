@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtCore import QTimer, Qt, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -11,13 +13,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .service import VolumeService
+from .service import SoundSnapshot, VolumeService
 
 
 class SoundSection(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        request_refresh: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.volume = VolumeService()
+        self._request_refresh = request_refresh
         self._volume_syncing = False
 
         self._volume_apply_timer = QTimer(self)
@@ -73,15 +81,28 @@ class SoundSection(QWidget):
             self.volume_value_label.setText("Unavailable")
 
     def refresh(self) -> None:
-        available = self.volume.available()
+        if self._request_refresh is not None:
+            self._request_refresh()
+            return
+        self.apply_snapshot(
+            SoundSnapshot(
+                available=self.volume.available(),
+                volume_percent=self.volume.volume_percent(),
+                is_muted=self.volume.is_muted(),
+            )
+        )
+
+    def apply_snapshot(self, snapshot: SoundSnapshot) -> None:
+        available = snapshot.available
         self.volume_slider.setEnabled(available)
         self.volume_mute_button.setEnabled(available)
         if not available:
             self.volume_value_label.setText("Unavailable")
+            self.volume_mute_button.setText("Mute")
             return
 
-        percent = self.volume.volume_percent()
-        muted = self.volume.is_muted()
+        percent = snapshot.volume_percent
+        muted = snapshot.is_muted
         if percent is None:
             self.volume_value_label.setText("Unknown")
             return

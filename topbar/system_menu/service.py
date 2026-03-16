@@ -17,6 +17,35 @@ class WifiNetwork:
     bars: str
 
 
+@dataclass(frozen=True)
+class ConnectivitySnapshot:
+    current_ssid: str | None
+    visible_networks: tuple[WifiNetwork, ...]
+    bluetooth_adapter_present: bool
+    bluetooth_powered: bool | None
+
+
+@dataclass(frozen=True)
+class SoundSnapshot:
+    available: bool
+    volume_percent: int | None
+    is_muted: bool | None
+
+
+@dataclass(frozen=True)
+class MediaSnapshot:
+    playerctl_missing: bool
+    gdbus_missing: bool
+    players: tuple["PlayerInfo", ...]
+
+
+@dataclass(frozen=True)
+class SystemMenuSnapshot:
+    connectivity: ConnectivitySnapshot
+    sound: SoundSnapshot
+    media: MediaSnapshot
+
+
 class WifiService:
     def current_ssid(self) -> str | None:
         code, out, _ = run_command(["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"])
@@ -73,12 +102,16 @@ class WifiService:
 
 
 class BluetoothService:
-    def adapter_present(self) -> bool:
+    def _show_output(self) -> tuple[int, str]:
         code, out, _ = run_command(["bluetoothctl", "show"])
+        return code, out
+
+    def adapter_present(self) -> bool:
+        code, out = self._show_output()
         return code == 0 and bool(out.strip())
 
     def powered(self) -> bool | None:
-        code, out, _ = run_command(["bluetoothctl", "show"])
+        code, out = self._show_output()
         if code != 0:
             return None
         for line in out.splitlines():
@@ -331,3 +364,45 @@ class MprisService:
     def set_volume(self, player: str, value: float) -> bool:
         clamped = max(0.0, min(1.0, value))
         return self.command(player, "volume", f"{clamped:.3f}")
+
+
+def collect_system_menu_snapshot() -> SystemMenuSnapshot:
+    wifi = WifiService()
+    bluetooth = BluetoothService()
+    volume = VolumeService()
+    mpris = MprisService()
+
+    visible_networks = tuple(wifi.visible_networks())
+    current_ssid = next((network.ssid for network in visible_networks if network.in_use), None)
+    if current_ssid is None:
+        current_ssid = wifi.current_ssid()
+
+    bluetooth_show_code, bluetooth_show_out = bluetooth._show_output()
+    bluetooth_adapter_present = bluetooth_show_code == 0 and bool(bluetooth_show_out.strip())
+    bluetooth_powered: bool | None = None
+    if bluetooth_show_code == 0:
+        for line in bluetooth_show_out.splitlines():
+            line = line.strip()
+            if line.startswith("Powered:"):
+                bluetooth_powered = line.split(":", 1)[1].strip().lower() == "yes"
+                break
+
+    players = tuple(mpris.get_player(player_name) for player_name in mpris.list_players())
+
+    connectivity = ConnectivitySnapshot(
+        current_ssid=current_ssid,
+        visible_networks=visible_networks,
+        bluetooth_adapter_present=bluetooth_adapter_present,
+        bluetooth_powered=bluetooth_powered,
+    )
+    sound = SoundSnapshot(
+        available=volume.available(),
+        volume_percent=volume.volume_percent(),
+        is_muted=volume.is_muted(),
+    )
+    media = MediaSnapshot(
+        playerctl_missing=mpris.playerctl_missing,
+        gdbus_missing=mpris.gdbus_missing,
+        players=players,
+    )
+    return SystemMenuSnapshot(connectivity=connectivity, sound=sound, media=media)

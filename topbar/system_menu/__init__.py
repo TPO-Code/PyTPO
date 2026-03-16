@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import sys
-from typing import Callable
+from typing import Any, Callable
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Slot
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,7 +22,7 @@ from .connectivity import ConnectivitySection
 from .footer import FooterSection
 from .media_container import MediaContainer
 from .sound import SoundSection
-from .service import VolumeService, WifiService
+from .service import SystemMenuSnapshot, VolumeService, WifiService, collect_system_menu_snapshot
 
 _WIFI_ICON_NAMES = {
     0: "internet_0.svg",
@@ -36,6 +37,7 @@ _VOLUME_ICON_NAMES = {
     "medium": "volume_2.svg",
     "high": "volume_3.svg",
 }
+_POWER_ICON_NAME = "power.svg"
 
 
 def _icon_path(name: str) -> str:
@@ -43,6 +45,8 @@ def _icon_path(name: str) -> str:
 
 
 class SystemMenuContent(QWidget):
+    snapshotApplied = Signal()
+
     def __init__(
         self,
         *,
@@ -52,6 +56,14 @@ class SystemMenuContent(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="topbar-system-menu")
+        self._pending: dict[concurrent.futures.Future, str] = {}
+        self._refresh_requested_while_busy = False
+        self._snapshot: SystemMenuSnapshot | None = None
+
+        self._result_pump = QTimer(self)
+        self._result_pump.setInterval(40)
+        self._result_pump.timeout.connect(self._drain_pending)
 
         self._live_refresh_timer = QTimer(self)
         self._live_refresh_timer.setInterval(1500)
@@ -73,13 +85,13 @@ class SystemMenuContent(QWidget):
         subtitle.setObjectName("systemMenuSubtitle")
         header_layout.addWidget(subtitle)
 
-        self.connectivity = ConnectivitySection(self)
+        self.connectivity = ConnectivitySection(self, request_refresh=self.refresh_all)
         root.addWidget(self.connectivity)
 
-        self.sound = SoundSection(self)
+        self.sound = SoundSection(self, request_refresh=self.refresh_all)
         root.addWidget(self.sound)
 
-        self.media = MediaContainer(self)
+        self.media = MediaContainer(self, request_refresh=self.refresh_all)
         root.addWidget(self.media)
 
         root.addStretch(1)
@@ -92,16 +104,86 @@ class SystemMenuContent(QWidget):
         )
         root.addWidget(self.footer)
 
+        self.destroyed.connect(lambda *_args: self._shutdown())
+        QTimer.singleShot(0, self.warm_up)
+
     def refresh_all(self) -> None:
-        self.connectivity.refresh()
-        self.sound.refresh()
-        self.media.refresh()
+        self._schedule_refresh()
+
+    def warm_up(self) -> None:
+        self._schedule_refresh()
+
+    def _schedule_refresh(self) -> None:
+        if self._pending:
+            self._refresh_requested_while_busy = True
+            return
+
+        try:
+            future = self._executor.submit(collect_system_menu_snapshot)
+        except Exception:
+            return
+        self._pending[future] = "snapshot"
+        if not self._result_pump.isActive():
+            self._result_pump.start()
+
+    def _drain_pending(self) -> None:
+        if not self._pending:
+            self._result_pump.stop()
+            return
+
+        done: list[concurrent.futures.Future] = []
+        for future, kind in list(self._pending.items()):
+            if not future.done():
+                continue
+            done.append(future)
+            try:
+                result = future.result()
+                error = None
+            except Exception as exc:
+                result = None
+                error = exc
+            self._handle_result(kind, result, error)
+
+        for future in done:
+            self._pending.pop(future, None)
+
+        if not self._pending:
+            self._result_pump.stop()
+            if self._refresh_requested_while_busy:
+                self._refresh_requested_while_busy = False
+                self._schedule_refresh()
+
+    def _handle_result(self, kind: str, result: Any, error: Exception | None) -> None:
+        if kind != "snapshot" or error is not None or not isinstance(result, SystemMenuSnapshot):
+            return
+        self._snapshot = result
+        self.connectivity.apply_snapshot(result.connectivity)
+        self.sound.apply_snapshot(result.sound)
+        self.media.apply_snapshot(result.media)
+        self.snapshotApplied.emit()
 
     def start_live_refresh(self) -> None:
         self._live_refresh_timer.start()
 
     def stop_live_refresh(self) -> None:
         self._live_refresh_timer.stop()
+
+    def _shutdown(self) -> None:
+        self._live_refresh_timer.stop()
+        self._result_pump.stop()
+        for future in list(self._pending.keys()):
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        self._pending.clear()
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            try:
+                self._executor.shutdown(wait=False)
+            except Exception:
+                pass
 
 
 class TopBarSystemMenuPanel(QFrame):
@@ -128,6 +210,7 @@ class TopBarSystemMenuPanel(QFrame):
             parent=self,
         )
         root.addWidget(self.content)
+        self.content.snapshotApplied.connect(self._on_content_snapshot_applied)
 
         self._apply_style()
 
@@ -139,7 +222,7 @@ class TopBarSystemMenuPanel(QFrame):
         self.reposition(anchor)
         self.show()
         self.raise_()
-        QTimer.singleShot(0, self.refresh_all)
+        self.refresh_all()
 
     def reposition(self, anchor: QWidget | None = None) -> None:
         anchor_widget = anchor or self._anchor
@@ -167,11 +250,15 @@ class TopBarSystemMenuPanel(QFrame):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.content.start_live_refresh()
-        QTimer.singleShot(0, self.refresh_all)
+        self.refresh_all()
 
     def hideEvent(self, event) -> None:
         self.content.stop_live_refresh()
         super().hideEvent(event)
+
+    def _on_content_snapshot_applied(self) -> None:
+        if self.isVisible() and self._anchor is not None:
+            self.reposition(self._anchor)
 
     def _apply_style(self) -> None:
         pass
@@ -199,8 +286,8 @@ class SystemMenuButton(QToolButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedHeight(28)
-        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.setIconSize(QSize(48, 28))
+        self.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.setIconSize(QSize(74, 28))
 
         self.clicked.connect(self._toggle_panel)
         self.installEventFilter(self)
@@ -238,7 +325,7 @@ class SystemMenuButton(QToolButton):
             vol_str = "Muted"
 
         self.setIcon(self._build_status_icon(wifi_level, volume_icon_name))
-        self.setText("⏻")
+        self.setText("")
 
         wifi_tooltip = (
             f"Wi-Fi: {current_network.ssid} ({current_network.signal}%)"
@@ -258,8 +345,10 @@ class SystemMenuButton(QToolButton):
         try:
             wifi_icon = self._tinted_icon_pixmap(_WIFI_ICON_NAMES[wifi_level], icon_size)
             volume_icon = self._tinted_icon_pixmap(volume_icon_name, icon_size)
+            power_icon = self._tinted_icon_pixmap(_POWER_ICON_NAME, icon_size)
             painter.drawPixmap(0, icon_y, wifi_icon)
             painter.drawPixmap(26, icon_y, volume_icon)
+            painter.drawPixmap(52, icon_y, power_icon)
         finally:
             painter.end()
 

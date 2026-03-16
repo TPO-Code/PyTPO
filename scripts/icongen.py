@@ -10,6 +10,9 @@ Generate sterile monochrome SVG status icons for:
     - source is a very short rounded stroke so it reads like a dot
     - volume_muted is full volume plus a strike-through
 
+- Power: stroked power symbol
+    - sized and weighted to match the other generated icons
+
 Exports SVG files into ./generated_icons by default.
 
 Usage:
@@ -35,25 +38,31 @@ OUTPUT_DIR = Path("generated_icons")
 
 @dataclass(frozen=True)
 class InternetLevelSpec:
-    top_width: float
     height: float
 
 
 # 0 is outline-only, but uses the same full-size geometry as level 4
 INTERNET_LEVELS: dict[int, InternetLevelSpec] = {
-    0: InternetLevelSpec(top_width=16.0, height=18.0),
-    1: InternetLevelSpec(top_width=7.0, height=9.0),
-    2: InternetLevelSpec(top_width=10.0, height=12.0),
-    3: InternetLevelSpec(top_width=13.0, height=15.0),
-    4: InternetLevelSpec(top_width=16.0, height=18.0),
+    0: InternetLevelSpec(height=18.0),
+    1: InternetLevelSpec(height=9.0),
+    2: InternetLevelSpec(height=12.0),
+    3: InternetLevelSpec(height=15.0),
+    4: InternetLevelSpec(height=18.0),
 }
 
 # Internet icon placement / softness
 INTERNET_CENTER_X = 12.0
 INTERNET_BOTTOM_Y = 20.0
+INTERNET_CONE_SPAN_DEG = 46.0
 INTERNET_TOP_CORNER_RADIUS = 1.2
-INTERNET_TOP_CURVE_DEPTH = 1.15
+INTERNET_TOP_CURVE_DEPTH = 3
 INTERNET_TIP_SOFTEN = 0.95
+
+# Shoulder shaping as ratios of the top half-width / height
+INTERNET_SHOULDER_INSET_RATIO = 0.28
+INTERNET_SHOULDER_DROP_RATIO = 0.30
+INTERNET_MIN_SHOULDER_INSET = 0.9
+INTERNET_MIN_SHOULDER_DROP = 1.4
 
 # Outline for internet_0
 INTERNET_OUTLINE_STROKE = 2.2
@@ -82,9 +91,8 @@ VOLUME_ARC_RADII = {
     3: 10.4,
 }
 
-# Arc span in degrees
-VOLUME_ARC_START_DEG = -46.0
-VOLUME_ARC_END_DEG = 46.0
+# Arc span in degrees, symmetric around 0
+VOLUME_ARC_SPAN_DEG = 46.0
 
 # Muted slash
 MUTE_SLASH_X1 = 7.8
@@ -92,6 +100,25 @@ MUTE_SLASH_Y1 = 6.7
 MUTE_SLASH_X2 = 18.3
 MUTE_SLASH_Y2 = 17.3
 MUTE_SLASH_STROKE = 2.35
+
+
+# Power icon geometry
+POWER_STROKE = 2.2
+POWER_LINECAP = "round"
+POWER_LINEJOIN = "round"
+
+POWER_CENTER_X = 12.0
+POWER_CENTER_Y = 12.0
+
+# Outer ring, with a gap at the top for the stem
+POWER_RADIUS = 6.7
+POWER_ARC_START_DEG = -50.0
+POWER_ARC_END_DEG = 230.0
+
+# Vertical stem
+POWER_STEM_X = 12.0
+POWER_STEM_Y1 = 4.2
+POWER_STEM_Y2 = 11.1
 
 
 # ---------------------------------------------------------------------
@@ -140,6 +167,30 @@ def svg_arc_path(
     )
 
 
+def svg_arc_path_auto(
+    cx: float,
+    cy: float,
+    radius: float,
+    start_deg: float,
+    end_deg: float,
+) -> str:
+    """
+    Create an SVG arc path and automatically choose the large-arc flag
+    based on the angular span.
+    """
+    x1, y1 = polar_to_cartesian(cx, cy, radius, start_deg)
+    x2, y2 = polar_to_cartesian(cx, cy, radius, end_deg)
+
+    delta = (end_deg - start_deg) % 360.0
+    large_arc_flag = 1 if delta > 180.0 else 0
+    sweep_flag = 1
+
+    return (
+        f"M {fmt(x1)} {fmt(y1)} "
+        f"A {fmt(radius)} {fmt(radius)} 0 {large_arc_flag} {fmt(sweep_flag)} {fmt(x2)} {fmt(y2)}"
+    )
+
+
 def write_svg(path: Path, body: str) -> None:
     path.write_text(svg_document(body), encoding="utf-8")
 
@@ -148,11 +199,19 @@ def write_svg(path: Path, body: str) -> None:
 # Internet icon generation
 # ---------------------------------------------------------------------
 
+def internet_top_width_from_height(height: float, cone_span_deg: float) -> float:
+    """
+    Derive top width from height using a symmetric cone spread around the vertical axis.
+    """
+    half_width = height * math.tan(math.radians(cone_span_deg / 2.0))
+    return half_width * 2.0
+
+
 def internet_wedge_path(
     cx: float,
     bottom_y: float,
-    top_width: float,
     height: float,
+    cone_span_deg: float,
     top_corner_radius: float,
     top_curve_depth: float,
     tip_soften: float,
@@ -162,7 +221,10 @@ def internet_wedge_path(
     - shallow crowned top
     - softened shoulders
     - softened tip
+
+    Overall flare is driven by cone_span_deg.
     """
+    top_width = internet_top_width_from_height(height, cone_span_deg)
     half_top = top_width / 2.0
     top_y = bottom_y - height
 
@@ -176,8 +238,8 @@ def internet_wedge_path(
     top_mid_y = top_y - top_curve_depth
 
     # Shoulder points that lead down toward the tip
-    shoulder_inset = max(half_top * 0.28, 0.9)
-    shoulder_drop = max(height * 0.30, 1.4)
+    shoulder_inset = max(half_top * INTERNET_SHOULDER_INSET_RATIO, INTERNET_MIN_SHOULDER_INSET)
+    shoulder_drop = max(height * INTERNET_SHOULDER_DROP_RATIO, INTERNET_MIN_SHOULDER_DROP)
 
     left_shoulder_x = cx - shoulder_inset
     left_shoulder_y = bottom_y - shoulder_drop
@@ -204,8 +266,8 @@ def make_internet_icon(level: int) -> str:
     path_d = internet_wedge_path(
         cx=INTERNET_CENTER_X,
         bottom_y=INTERNET_BOTTOM_Y,
-        top_width=spec.top_width,
         height=spec.height,
+        cone_span_deg=INTERNET_CONE_SPAN_DEG,
         top_corner_radius=INTERNET_TOP_CORNER_RADIUS,
         top_curve_depth=INTERNET_TOP_CURVE_DEPTH,
         tip_soften=INTERNET_TIP_SOFTEN,
@@ -241,8 +303,8 @@ def make_volume_arc(level: int) -> str:
         cx=VOLUME_CENTER_X,
         cy=VOLUME_CENTER_Y,
         radius=radius,
-        start_deg=VOLUME_ARC_START_DEG,
-        end_deg=VOLUME_ARC_END_DEG,
+        start_deg=-VOLUME_ARC_SPAN_DEG,
+        end_deg=VOLUME_ARC_SPAN_DEG,
     )
     return (
         f'  <path d="{d}" stroke="currentColor" stroke-width="{fmt(VOLUME_STROKE)}" '
@@ -275,6 +337,40 @@ def make_volume_muted_icon() -> str:
 
 
 # ---------------------------------------------------------------------
+# Power icon generation
+# ---------------------------------------------------------------------
+
+def make_power_ring() -> str:
+    d = svg_arc_path_auto(
+        cx=POWER_CENTER_X,
+        cy=POWER_CENTER_Y,
+        radius=POWER_RADIUS,
+        start_deg=POWER_ARC_START_DEG,
+        end_deg=POWER_ARC_END_DEG,
+    )
+    return (
+        f'  <path d="{d}" stroke="currentColor" stroke-width="{fmt(POWER_STROKE)}" '
+        f'stroke-linecap="{POWER_LINECAP}" stroke-linejoin="{POWER_LINEJOIN}"/>'
+    )
+
+
+def make_power_stem() -> str:
+    return (
+        f'  <path d="M {fmt(POWER_STEM_X)} {fmt(POWER_STEM_Y1)} '
+        f'L {fmt(POWER_STEM_X)} {fmt(POWER_STEM_Y2)}" '
+        f'stroke="currentColor" stroke-width="{fmt(POWER_STROKE)}" '
+        f'stroke-linecap="{POWER_LINECAP}" stroke-linejoin="{POWER_LINEJOIN}"/>'
+    )
+
+
+def make_power_icon() -> str:
+    return "\n".join([
+        make_power_ring(),
+        make_power_stem(),
+    ])
+
+
+# ---------------------------------------------------------------------
 # Main export
 # ---------------------------------------------------------------------
 
@@ -296,6 +392,9 @@ def export_icons(output_dir: Path) -> None:
         write_svg(output_dir / f"volume_{level}.svg", body)
 
     write_svg(output_dir / "volume_muted.svg", make_volume_muted_icon())
+
+    # Power icon
+    write_svg(output_dir / "power.svg", make_power_icon())
 
 
 def main() -> int:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -14,7 +15,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pytpo.services.asset_paths import preferred_shared_asset_path
+
 from ..dbus import run_logout_command, run_poweroff_command, run_shutdown_command, run_suspend_command
+
+
+def _icon_path(name: str) -> str:
+    return str(preferred_shared_asset_path(f"icons/{name}"))
 
 
 class FooterSection(QWidget):
@@ -53,6 +60,8 @@ class FooterSection(QWidget):
 
         self.power_button = QToolButton(self)
         self.power_button.setText("Power")
+        self.power_button.setIcon(QIcon(_icon_path("power.svg")))
+        self.power_button.setIconSize(QSize(16, 16))
         self.power_button.setPopupMode(QToolButton.InstantPopup)
         self.power_menu = QMenu(self)
         self.power_button.setMenu(self.power_menu)
