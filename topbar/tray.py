@@ -982,15 +982,23 @@ class StatusNotifierTrayArea(QWidget):
             self._layout.removeWidget(button)
             button.deleteLater()
 
-        for item_id in ordered_ids:
-            LOGGER.debug("Creating tray button for %s via TrayDiscovery", item_id)
-            existing = self._buttons.pop(item_id, None)
-            if existing is not None:
-                self._layout.removeWidget(existing)
-                existing.deleteLater()
-            button = item_map[item_id].create_button(self, icon_size=20, button_size=28)
-            self._buttons[item_id] = button
-            self._layout.addWidget(button)
+        for index, item_id in enumerate(ordered_ids):
+            button = self._buttons.get(item_id)
+            if button is None:
+                LOGGER.debug("Creating tray button for %s via TrayDiscovery", item_id)
+                button = item_map[item_id].create_button(self, icon_size=20, button_size=28)
+                self._buttons[item_id] = button
+                self._layout.insertWidget(index, button)
+                continue
+
+            update_item = getattr(button, "update_item", None)
+            if callable(update_item):
+                update_item(item_map[item_id])
+
+            current_index = self._layout.indexOf(button)
+            if current_index != index:
+                self._layout.removeWidget(button)
+                self._layout.insertWidget(index, button)
 
         status_parts: list[str] = []
         if self._local_watcher is not None:

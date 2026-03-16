@@ -51,6 +51,7 @@ exclude = ["tests*", "test_projects*"]
 [tool.setuptools.data-files]
 "share/pytpo/icons" = [
     "icons/*.png",
+    "icons/*.svg",
 ]
 "share/pytpo/themes" = [
     "themes/*.qss",

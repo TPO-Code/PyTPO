@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QRect
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .debug import log_dock_debug
@@ -59,7 +60,7 @@ class X11DockWindowManager:
             return
 
         effective_rect = QRect(window_rect) if window_rect is not None else QRect(self._widget.frameGeometry())
-        screen_rect = self._screen_geometry()
+        screen_rect = self._screen_geometry(effective_rect)
         reservation = build_bottom_strut_reservation(
             window_rect=effective_rect,
             screen_rect=screen_rect,
@@ -101,8 +102,12 @@ class X11DockWindowManager:
             strut_partial=reservation.strut_partial,
         )
 
-    def _screen_geometry(self) -> QRect:
-        screen = self._widget.screen()
+    def _screen_geometry(self, window_rect: QRect | None = None) -> QRect:
+        screen = None
+        if window_rect is not None and not window_rect.isNull():
+            screen = QGuiApplication.screenAt(window_rect.center())
+        if screen is None:
+            screen = self._widget.screen()
         if screen is None:
             screen = QApplication.primaryScreen()
         return screen.geometry() if screen is not None else QRect()

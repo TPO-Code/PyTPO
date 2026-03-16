@@ -3,22 +3,43 @@ from __future__ import annotations
 import sys
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Slot
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Slot
+from PySide6.QtGui import QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
     QMessageBox,
-    QPushButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from pytpo.services.asset_paths import preferred_shared_asset_path
+
 from .connectivity import ConnectivitySection
 from .footer import FooterSection
 from .media_container import MediaContainer
 from .sound import SoundSection
+from .service import VolumeService, WifiService
+
+_WIFI_ICON_NAMES = {
+    0: "internet_0.svg",
+    1: "internet_1.svg",
+    2: "internet_2.svg",
+    3: "internet_3.svg",
+    4: "internet_4.svg",
+}
+_VOLUME_ICON_NAMES = {
+    "muted": "volume_muted.svg",
+    "low": "volume_1.svg",
+    "medium": "volume_2.svg",
+    "high": "volume_3.svg",
+}
+
+
+def _icon_path(name: str) -> str:
+    return str(preferred_shared_asset_path(f"icons/{name}"))
 
 
 class SystemMenuContent(QWidget):
@@ -171,15 +192,28 @@ class SystemMenuButton(QToolButton):
             parent=self.window(),
         )
 
-        self.setText("Menu")
+        self._wifi_service = WifiService()
+        self._volume_service = VolumeService()
+
         self.setAutoRaise(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedHeight(28)
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setIconSize(QSize(48, 28))
 
         self.clicked.connect(self._toggle_panel)
         self.installEventFilter(self)
         if self.window() is not None:
             self.window().installEventFilter(self)
+
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(2000)
+        self._update_timer.timeout.connect(self._update_label)
+        self._update_timer.start()
+
+        # Perform the first label setup immediately upon initialization
+        self._update_label()
 
     def eventFilter(self, watched: QWidget, event) -> bool:
         if self._panel.isVisible() and event.type() in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
@@ -189,6 +223,85 @@ class SystemMenuButton(QToolButton):
     @Slot()
     def _toggle_panel(self) -> None:
         self._panel.toggle(self)
+
+    @Slot()
+    def _update_label(self) -> None:
+        current_network = next((net for net in self._wifi_service.visible_networks() if net.in_use), None)
+        wifi_level = self._wifi_icon_level(current_network.signal if current_network is not None else None)
+
+        vol_pct = self._volume_service.volume_percent()
+        is_muted = self._volume_service.is_muted()
+        volume_icon_name = self._volume_icon_name(vol_pct, is_muted)
+
+        vol_str = f"{vol_pct}%" if vol_pct is not None else "--%"
+        if is_muted:
+            vol_str = "Muted"
+
+        self.setIcon(self._build_status_icon(wifi_level, volume_icon_name))
+        self.setText("⏻")
+
+        wifi_tooltip = (
+            f"Wi-Fi: {current_network.ssid} ({current_network.signal}%)"
+            if current_network is not None
+            else "Wi-Fi: disconnected"
+        )
+        self.setToolTip(f"{wifi_tooltip}\nVolume: {vol_str}")
+
+    def _build_status_icon(self, wifi_level: int, volume_icon_name: str) -> QIcon:
+        canvas_size = self.iconSize()
+        pixmap = QPixmap(canvas_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        icon_size = QSize(20, 20)
+        icon_y = max(0, (canvas_size.height() - icon_size.height()) // 2)
+
+        painter = QPainter(pixmap)
+        try:
+            wifi_icon = self._tinted_icon_pixmap(_WIFI_ICON_NAMES[wifi_level], icon_size)
+            volume_icon = self._tinted_icon_pixmap(volume_icon_name, icon_size)
+            painter.drawPixmap(0, icon_y, wifi_icon)
+            painter.drawPixmap(26, icon_y, volume_icon)
+        finally:
+            painter.end()
+
+        return QIcon(pixmap)
+
+    def _tinted_icon_pixmap(self, icon_name: str, icon_size: QSize) -> QPixmap:
+        source = QIcon(_icon_path(icon_name)).pixmap(icon_size)
+        if source.isNull():
+            return source
+
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(tinted)
+        try:
+            painter.drawPixmap(0, 0, source)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), self.palette().color(QPalette.ColorRole.ButtonText))
+        finally:
+            painter.end()
+        return tinted
+
+    @staticmethod
+    def _wifi_icon_level(signal: int | None) -> int:
+        if signal is None or signal <= 0:
+            return 0
+        if signal < 25:
+            return 1
+        if signal < 50:
+            return 2
+        if signal < 75:
+            return 3
+        return 4
+
+    @staticmethod
+    def _volume_icon_name(volume_percent: int | None, is_muted: bool | None) -> str:
+        if is_muted or volume_percent is None or volume_percent <= 0:
+            return _VOLUME_ICON_NAMES["muted"]
+        if volume_percent <= 33:
+            return _VOLUME_ICON_NAMES["low"]
+        if volume_percent <= 66:
+            return _VOLUME_ICON_NAMES["medium"]
+        return _VOLUME_ICON_NAMES["high"]
 
 
 def preview_main() -> int:
@@ -211,17 +324,15 @@ def preview_main() -> int:
     subtitle.setStyleSheet("color: #d5dddf;")
     layout.addWidget(subtitle)
 
-    anchor_button = QPushButton("Open Control Center", preview_host)
-    layout.addWidget(anchor_button, alignment=Qt.AlignLeft)
-
-    preview_host.setStyleSheet("background: #34393c;")
-
-    panel = TopBarSystemMenuPanel(
+    # Note: If previewing standalone, you can still test the new button look directly
+    anchor_button = SystemMenuButton(
         open_terminal=lambda: QMessageBox.information(preview_host, "Preview", "Terminal preview action triggered."),
         open_dock=lambda: QMessageBox.information(preview_host, "Preview", "Dock preview action triggered."),
         parent=preview_host,
     )
-    anchor_button.clicked.connect(lambda checked=False: panel.toggle(anchor_button))
+    layout.addWidget(anchor_button, alignment=Qt.AlignLeft)
+
+    preview_host.setStyleSheet("background: #34393c;")
 
     preview_host.show()
     return app.exec()

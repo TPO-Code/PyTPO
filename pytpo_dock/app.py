@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication
 
 from pytpo.services.app_icons import shared_app_icon_path
@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
         visible=dock.isVisible(),
     )
 
-    screen = QApplication.primaryScreen()
+    screen = QGuiApplication.screenAt(QCursor.pos())
+    if screen is None:
+        screen = QApplication.primaryScreen()
     if screen is None:
         log_dock_debug("dock-no-primary-screen")
     else:
@@ -56,8 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             initializer()
         else:
             screen_geo = screen.geometry()
-            target_x = (screen_geo.width() - dock.width()) // 2
-            target_y = screen_geo.height()
+            target_x = screen_geo.x() + (screen_geo.width() - dock.width()) // 2
+            target_y = screen_geo.y() + screen_geo.height()
             dock.move(target_x, target_y)
             log_dock_debug(
                 "dock-initial-move",

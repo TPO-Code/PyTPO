@@ -6,7 +6,7 @@ import re
 import subprocess
 
 from PySide6.QtCore import QEasingCurve, QAbstractAnimation, QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QPixmap
+from PySide6.QtGui import QAction, QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QMenu, QToolButton, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
@@ -171,12 +171,22 @@ class CustomDock(QWidget):
             **fields,
         )
 
-    def _screen_geometry(self):
-        screen = QApplication.primaryScreen()
+    def _screen_geometry(self, *, prefer_cursor=False):
+        screen = None
+        if prefer_cursor:
+            screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = self.screen()
+        if screen is None:
+            frame_geometry = self.frameGeometry()
+            if not frame_geometry.isNull():
+                screen = QGuiApplication.screenAt(frame_geometry.center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
         return screen.geometry() if screen is not None else QRect()
 
     def ensure_hidden_window_mapped(self):
-        screen_geometry = self._screen_geometry()
+        screen_geometry = self._screen_geometry(prefer_cursor=True)
         if screen_geometry.isNull():
             return
         hidden_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
@@ -1115,10 +1125,12 @@ class CustomDock(QWidget):
 
     def check_mouse_proximity(self):
         pos = QCursor.pos()
-        screen_geometry = QApplication.primaryScreen().geometry()
-        trigger_area = screen_geometry.height() - 5
+        screen_geometry = self._screen_geometry(prefer_cursor=True)
+        if screen_geometry.isNull():
+            return
+        trigger_area = screen_geometry.bottom() - 4
 
-        if pos.y() >= trigger_area:
+        if screen_geometry.contains(pos) and pos.y() >= trigger_area:
             if not self.is_visible:
                 self.show_dock()
         else:
@@ -1151,7 +1163,7 @@ class CustomDock(QWidget):
         self._stop_animation()
         self.is_visible = True
 
-        screen_geometry = self._screen_geometry()
+        screen_geometry = self._screen_geometry(prefer_cursor=True)
         target_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
         target_y = self._visible_y(screen_geometry)
         animation_mode = self._visibility_animation_mode()
@@ -1235,7 +1247,7 @@ class CustomDock(QWidget):
         )
 
     def recenter(self):
-        screen_geometry = self._screen_geometry()
+        screen_geometry = self._screen_geometry(prefer_cursor=not self.is_visible)
         new_x = screen_geometry.x() + (screen_geometry.width() - self.width()) // 2
         if self.is_visible:
             new_y = self._visible_y(screen_geometry)

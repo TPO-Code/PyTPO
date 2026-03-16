@@ -93,6 +93,7 @@ install_apt_dependencies() {
     sudo apt-get update
     sudo apt-get install -y "${missing[@]}"
 
+}
 
 disable_conflicting_extension() {
     ensure_state_dir
