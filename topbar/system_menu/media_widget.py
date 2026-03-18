@@ -49,9 +49,9 @@ class MediaPlayerCard(QFrame):
         self.title_label.setWordWrap(True)
         root.addWidget(self.title_label)
 
-        self.detail_label = QLabel("", self)
-        self.detail_label.setObjectName("mediaPlayerDetail")
-        self.detail_label.setWordWrap(True)
+        #self.detail_label = QLabel("", self)
+        #self.detail_label.setObjectName("mediaPlayerDetail")
+        #self.detail_label.setWordWrap(True)
         root.addWidget(self.detail_label)
 
         volume_row = QHBoxLayout()

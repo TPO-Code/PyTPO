@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from PySide6.QtCore import Qt
@@ -11,8 +12,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .service import MediaSnapshot, MprisService
+from .service import MediaSnapshot, MprisService, PlayerInfo
 from .media_widget import MediaPlayerCard
+
+LOGGER = logging.getLogger("topbar.media")
 
 
 class MediaContainer(QWidget):
@@ -105,6 +108,71 @@ class MediaContainer(QWidget):
             self.media_empty_label.clear()
             self.media_empty_label.hide()
 
+    def _player_text(self, value: str | None) -> str:
+        return (value or "").strip()
+
+    def _player_status_key(self, info: PlayerInfo) -> str:
+        return self._player_text(info.status).lower()
+
+    def _same_logical_player(self, left: PlayerInfo, right: PlayerInfo) -> bool:
+        return (
+            self._player_text(left.identity) == self._player_text(right.identity)
+            and self._player_status_key(left) == self._player_status_key(right)
+            and self._player_text(left.title) == self._player_text(right.title)
+            and self._player_text(left.artist) == self._player_text(right.artist)
+            and self._player_text(left.album) == self._player_text(right.album)
+        )
+
+    def _player_score(self, info: PlayerInfo) -> tuple[int, int, int, int, int]:
+        status = self._player_status_key(info)
+        status_score = 2 if status == "playing" else 1 if status == "paused" else 0
+        metadata_score = sum(
+            1 for value in (info.title, info.artist, info.album) if self._player_text(value)
+        )
+        control_score = 1 if info.can_control else 0
+        volume_score = 1 if info.volume is not None else 0
+        instance_score = 1 if ".instance" in info.name else 0
+        return (
+            status_score,
+            metadata_score,
+            control_score,
+            volume_score,
+            instance_score,
+        )
+
+    def _pick_better_player(self, left: PlayerInfo, right: PlayerInfo) -> PlayerInfo:
+        return left if self._player_score(left) >= self._player_score(right) else right
+
+    def _dedupe_players(self, players: tuple[PlayerInfo, ...]) -> tuple[PlayerInfo, ...]:
+        vlc_base = next((player for player in players if player.name == "vlc"), None)
+        if vlc_base is None:
+            return players
+
+        vlc_instances = [player for player in players if player.name.startswith("vlc.instance")]
+        if not vlc_instances:
+            return players
+
+        kept: list[PlayerInfo] = []
+        dropped_names: set[str] = set()
+
+        for instance_player in vlc_instances:
+            if self._same_logical_player(vlc_base, instance_player):
+                preferred = self._pick_better_player(vlc_base, instance_player)
+                dropped = instance_player if preferred is vlc_base else vlc_base
+                dropped_names.add(dropped.name)
+                LOGGER.info(
+                    "Collapsed VLC duplicate alias: kept=%r dropped=%r",
+                    preferred.name,
+                    dropped.name,
+                )
+                break
+
+        for player in players:
+            if player.name not in dropped_names:
+                kept.append(player)
+
+        return tuple(kept)
+
     def refresh(self) -> None:
         if self._request_refresh is not None:
             self._request_refresh()
@@ -120,7 +188,7 @@ class MediaContainer(QWidget):
         )
 
     def apply_snapshot(self, snapshot: MediaSnapshot) -> None:
-        players = snapshot.players
+        players = self._dedupe_players(snapshot.players)
         active_players = {player.name for player in players}
         self._remove_missing_player_cards(active_players)
 
@@ -145,6 +213,14 @@ class MediaContainer(QWidget):
             self.media_scroll.hide()
             self.hide()
             return
+
+        LOGGER.info(
+            "Visible players: %s",
+            " || ".join(
+                f"name={info.name!r}, identity={info.identity!r}, status={info.status!r}"
+                for info in players
+            ),
+        )
 
         summary_bits = [f"{info.identity or info.name}: {info.status}" for info in players]
         self._set_summary_text(" | ".join(summary_bits))

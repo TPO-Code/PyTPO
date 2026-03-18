@@ -93,7 +93,7 @@ class TopBar(QWidget):
         layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 ## clock
         self.clock_btn = QPushButton()
-        self.clock_btn.setStyleSheet("color: #f1f1f1; margin-left: 10px;")
+        self.clock_btn.setStyleSheet("color: #f1f1f1; margin-left: 5x; border: 0px")
         self.clock_btn.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
         layout.addWidget(self.clock_btn, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
@@ -115,7 +115,7 @@ class TopBar(QWidget):
         self.status_notifier_watcher.itemsChanged.connect(self._refresh_runtime_status)
         self.notification_center.notificationsChanged.connect(self._refresh_runtime_status)
 
-        self.setStyleSheet("background: #5b5b5b; border-bottom: 1px solid #3d3d3d;")
+        self.setStyleSheet("background: #5b5b5b; border-bottom: 0px")
         self._last_status_text = ""
         self._refresh_runtime_status()
         QTimer.singleShot(0, self._claim_x11_tray_selection)

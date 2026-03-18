@@ -73,18 +73,6 @@ class SystemMenuContent(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(14)
 
-        header_layout = QVBoxLayout()
-        header_layout.setSpacing(3)
-        root.addLayout(header_layout)
-
-        title = QLabel("Control Center", self)
-        title.setObjectName("systemMenuTitle")
-        header_layout.addWidget(title)
-
-        subtitle = QLabel("Connectivity, sound, media, and session controls", self)
-        subtitle.setObjectName("systemMenuSubtitle")
-        header_layout.addWidget(subtitle)
-
         self.connectivity = ConnectivitySection(self, request_refresh=self.refresh_all)
         root.addWidget(self.connectivity)
 
