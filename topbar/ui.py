@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
-from PySide6.QtCore import QDateTime, Qt, QTimer, Slot
+from PySide6.QtCore import QDateTime, Qt, QTimer, Slot, QEvent, QDate
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +18,9 @@ from .dbus import launch_background_command, load_xlib
 from .notifications import NotificationCenter, NotificationCenterButton, NotificationServer
 from .system_menu import SystemMenuButton
 from .tray import StatusNotifierTrayArea, StatusNotifierWatcher, X11TraySelectionManager
+
+from PySide6.QtWidgets import QPushButton, QToolTip
+from topbar.calendar_popup import CalendarPopup
 
 LOGGER = logging.getLogger("topbar.ui")
 
@@ -88,11 +91,11 @@ class TopBar(QWidget):
             parent=self,
         )
         layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
-
-        self.clock_label = QLabel()
-        self.clock_label.setStyleSheet("color: #f1f1f1; margin-left: 10px;")
-        self.clock_label.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        layout.addWidget(self.clock_label, alignment=Qt.AlignRight | Qt.AlignVCenter)
+## clock
+        self.clock_btn = QPushButton()
+        self.clock_btn.setStyleSheet("color: #f1f1f1; margin-left: 10px;")
+        self.clock_btn.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        layout.addWidget(self.clock_btn, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock)
@@ -102,7 +105,13 @@ class TopBar(QWidget):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_runtime_status)
         self._status_timer.start(3000)
+        self.clock_btn.installEventFilter(self)
+        self.clock_btn.clicked.connect(self.show_calendar)
 
+        self.calendar_popup = CalendarPopup(self)
+        self.calendar_popup.calendar.clicked.connect(self.handle_date_selected)
+        self.update_date_tooltip()
+## Connections
         self.status_notifier_watcher.itemsChanged.connect(self._refresh_runtime_status)
         self.notification_center.notificationsChanged.connect(self._refresh_runtime_status)
 
@@ -114,8 +123,50 @@ class TopBar(QWidget):
 
     @Slot()
     def _update_clock(self) -> None:
-        self.clock_label.setText(QDateTime.currentDateTime().toString("h:mm:ss AP"))
+        self.clock_btn.setText(QDateTime.currentDateTime().toString("h:mm:ss AP"))
+        self.update_date_tooltip()
+    
+    def update_date_tooltip(self):
+        """Always show the real current date."""
+        self.clock_btn.setToolTip(QDate.currentDate().toString("dd/MM/yyyy"))
+        
 
+    def eventFilter(self, obj, event):
+        if obj == self.clock_btn:
+            if event.type() == QEvent.Type.Enter:
+                self.update_date_tooltip()
+                rect = self.clock_btn.rect()
+                pos = self.clock_btn.mapToGlobal(rect.center())
+                QToolTip.showText(pos, self.clock_btn.toolTip(), self.clock_btn, rect)
+            elif event.type() == QEvent.Type.Leave:
+                QToolTip.hideText()
+        return super().eventFilter(obj, event)
+
+    def handle_date_selected(self, date: QDate):
+        # Selection is temporary only. Do not store it.
+        print(f"User picked: {date.toString('dd/MM/yyyy')}")
+        self.calendar_popup.hide()
+
+    def show_calendar(self):
+        # Reset fully every time it opens.
+        self.calendar_popup.reset_for_open()
+
+        popup_size = self.calendar_popup.sizeHint()
+        button_rect = self.clock_btn.rect()
+        global_bottom_right = self.clock_btn.mapToGlobal(button_rect.bottomRight())
+
+        x_pos = global_bottom_right.x() - popup_size.width()
+        y_pos = global_bottom_right.y()
+
+        self.calendar_popup.move(x_pos, y_pos)
+        self.calendar_popup.show()
+
+    def changeEvent(self, event):
+        # Keep tooltip fresh if the app regains focus after date rollover.
+        if event.type() == QEvent.Type.ActivationChange:
+            self.update_date_tooltip()
+        super().changeEvent(event)
+    
     @Slot()
     def _claim_x11_tray_selection(self) -> None:
         self.x11_tray_selection_manager.claim()
