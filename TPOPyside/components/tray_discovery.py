@@ -175,6 +175,44 @@ def registered_item_ids(bus: QDBusConnection, watcher_service: str) -> list[str]
     return []
 
 
+def active_service_names(bus: QDBusConnection) -> set[str]:
+    bus_interface = bus.interface()
+    if bus_interface is None:
+        return set()
+    try:
+        reply = bus_interface.registeredServiceNames()
+    except Exception:
+        return set()
+    if not reply.isValid():
+        return set()
+    return {str(name).strip() for name in reply.value() if str(name).strip()}
+
+
+def item_is_alive(
+    bus: QDBusConnection,
+    service: str,
+    path: str,
+    active_services: set[str] | None = None,
+) -> bool:
+    if not service or not path:
+        return False
+    if active_services and service not in active_services:
+        return False
+
+    item_iface = QDBusInterface(service, path, ITEM_INTERFACE, bus)
+    if item_iface.isValid():
+        return True
+
+    properties = QDBusInterface(service, path, PROPERTIES_INTERFACE, bus)
+    if not properties.isValid():
+        return False
+
+    reply = properties.call("GetAll", ITEM_INTERFACE)
+    if reply.type() == QDBusMessage.ErrorMessage or not reply.arguments():
+        return False
+    return isinstance(dbus_to_python(reply.arguments()[0]), dict)
+
+
 def decode_icon_pixmaps(value: Any) -> QIcon:
     pixmaps = dbus_to_python(value)
     if not isinstance(pixmaps, (list, tuple)):
@@ -904,10 +942,13 @@ class TrayDiscovery:
             return []
 
         item_ids = registered_item_ids(self.bus, watcher_service)
+        active_services = active_service_names(self.bus)
         items: list[CompletedTrayItem] = []
 
         for item_id in item_ids:
             service, path = split_item_id(item_id)
+            if not item_is_alive(self.bus, service, path, active_services):
+                continue
             menu_path = str(call_property(self.bus, service, path, ITEM_INTERFACE, "Menu") or "").strip()
             item_is_menu = to_bool(
                 call_property(self.bus, service, path, ITEM_INTERFACE, "ItemIsMenu"),

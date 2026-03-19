@@ -32,17 +32,11 @@ class MediaContainer(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         self.media_title = QLabel("Media", self)
         self.media_title.setObjectName("systemMenuSectionTitle")
         root.addWidget(self.media_title)
-
-        self.media_summary = QLabel(self)
-        self.media_summary.setObjectName("systemMenuStatus")
-        self.media_summary.setWordWrap(True)
-        self.media_summary.hide()
-        root.addWidget(self.media_summary)
 
         self.media_empty_label = QLabel(self)
         self.media_empty_label.setObjectName("systemMenuMutedText")
@@ -55,7 +49,7 @@ class MediaContainer(QWidget):
         self.media_scroll.setFrameShape(QFrame.NoFrame)
         self.media_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.media_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.media_scroll.setMaximumHeight(250)
+        self.media_scroll.setMaximumHeight(260)
         self.media_scroll.setObjectName("mediaScroll")
         self.media_scroll.hide()
         root.addWidget(self.media_scroll)
@@ -63,7 +57,7 @@ class MediaContainer(QWidget):
         self.media_cards_host = QWidget(self)
         self.media_cards_layout = QVBoxLayout(self.media_cards_host)
         self.media_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.media_cards_layout.setSpacing(10)
+        self.media_cards_layout.setSpacing(8)
         self.media_cards_layout.addStretch(1)
         self.media_scroll.setWidget(self.media_cards_host)
 
@@ -73,10 +67,14 @@ class MediaContainer(QWidget):
         card = self.player_cards.get(name)
         if card is not None:
             return card
-
+    
         card = MediaPlayerCard(
             self.mpris.set_volume,
             self.mpris.command,
+            self.mpris.seek_relative,
+            self.mpris.set_position,
+            self.mpris.set_loop_status,
+            self.mpris.set_shuffle,
             self.refresh,
             self.media_cards_host,
         )
@@ -89,15 +87,6 @@ class MediaContainer(QWidget):
             card = self.player_cards.pop(name)
             self.media_cards_layout.removeWidget(card)
             card.deleteLater()
-
-    def _set_summary_text(self, text: str) -> None:
-        text = text.strip()
-        if text:
-            self.media_summary.setText(text)
-            self.media_summary.show()
-        else:
-            self.media_summary.clear()
-            self.media_summary.hide()
 
     def _set_empty_text(self, text: str) -> None:
         text = text.strip()
@@ -201,29 +190,16 @@ class MediaContainer(QWidget):
         if missing_dependencies:
             deps_text = ", ".join(missing_dependencies)
             self.media_title.show()
-            self._set_summary_text(f"Media integration is unavailable because {deps_text} is not installed.")
             self._set_empty_text(f"Install {deps_text} to enable media detection and controls.")
             self.media_scroll.hide()
             self.show()
             return
 
         if not players:
-            self._set_summary_text("")
             self._set_empty_text("")
             self.media_scroll.hide()
             self.hide()
             return
-
-        LOGGER.info(
-            "Visible players: %s",
-            " || ".join(
-                f"name={info.name!r}, identity={info.identity!r}, status={info.status!r}"
-                for info in players
-            ),
-        )
-
-        summary_bits = [f"{info.identity or info.name}: {info.status}" for info in players]
-        self._set_summary_text(" | ".join(summary_bits))
 
         for info in players:
             self._ensure_player_card(info.name).bind(info)

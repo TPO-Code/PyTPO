@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
 
 from pytpo.ui.icons.file_icon_provider import FileIconProvider
 
+
+_TREE_BOTTOM_CONTEXT_GAP_PX = 48
+
 class _FsNode:
     def __init__(
             self,
@@ -630,6 +633,7 @@ class FileSystemTreeWidget(QTreeView):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -767,6 +771,17 @@ class FileSystemTreeWidget(QTreeView):
         path = self._model.path_from_index(index) if index.isValid() else None
         self.pathContextMenuRequested.emit(path, event.globalPos())
         event.accept()
+
+    def updateGeometries(self) -> None:
+        super().updateGeometries()
+        vbar = self.verticalScrollBar()
+        if vbar is None:
+            return
+        try:
+            base_maximum = max(0, int(vbar.maximum()))
+        except Exception:
+            return
+        vbar.setMaximum(base_maximum + _TREE_BOTTOM_CONTEXT_GAP_PX)
 
     def _on_expanded(self, index: QModelIndex):
         if self._model.canFetchMore(index):

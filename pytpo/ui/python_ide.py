@@ -91,6 +91,7 @@ from pytpo.ui.widgets.file_system_tree import FileSystemTreeWidget
 from pytpo.ui.widgets.image_viewer import ImageViewerWidget
 from pytpo.ui.widgets.markdown_editor_tab import MarkdownEditorTab
 from pytpo.ui.widgets.sound_player_editor import SoundPlayerEditorWidget
+from pytpo.ui.widgets.svg_editor_tab import SvgEditorTab
 from TPOPyside.widgets.terminal_widget import TerminalWidget
 from pytpo.ui.widgets.problems_panel import ProblemsPanel
 from pytpo.ui.widgets.symbol_outline_panel import SymbolOutlinePanel
@@ -6813,7 +6814,40 @@ class PythonIDE(Window):
         wrapper = self._wrap_editor_in_markdown_tab(opened)
         return wrapper if isinstance(wrapper, MarkdownEditorTab) else None
 
-    def _open_image_viewer_tab(self, cpath: str, *, show_errors: bool) -> ImageViewerWidget | None:
+    @staticmethod
+    def _is_svg_file_path(path: str) -> bool:
+        return str(Path(path).suffix or "").strip().lower() == ".svg"
+
+    def _find_open_image_viewer_for_path(self, canonical_path: str) -> ImageViewerWidget | None:
+        target = self._canonical_path(canonical_path)
+        for widget in self._iter_open_document_widgets():
+            if not isinstance(widget, ImageViewerWidget):
+                continue
+            path = self._document_widget_path(widget)
+            if path and self._canonical_path(path) == target:
+                return widget
+        return None
+
+    def _find_open_svg_editor_tab_for_path(self, canonical_path: str) -> SvgEditorTab | None:
+        target = self._canonical_path(canonical_path)
+        for widget in self._iter_open_document_widgets():
+            if not isinstance(widget, SvgEditorTab):
+                continue
+            path = self._document_widget_path(widget)
+            if path and self._canonical_path(path) == target:
+                return widget
+        return None
+
+    def _open_image_viewer_tab(
+        self,
+        cpath: str,
+        *,
+        show_errors: bool,
+        target_tabs=None,
+    ) -> ImageViewerWidget | None:
+        existing = self._find_open_image_viewer_for_path(cpath)
+        if existing is not None:
+            return existing
         viewer = ImageViewerWidget(parent=self.editor_workspace)
         if not viewer.load_file(cpath):
             viewer.deleteLater()
@@ -6825,9 +6859,70 @@ class PythonIDE(Window):
                 )
             return None
         self._apply_image_viewer_background_to_widget(viewer)
-        tabs = self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+        tabs = target_tabs if target_tabs is not None else (
+            self.editor_workspace._current_tabs() or self.editor_workspace._ensure_one_main_tabs()
+        )
         tabs.add_editor(viewer)
         return viewer
+
+    def _wrap_editor_in_svg_tab(self, ed: EditorWidget) -> SvgEditorTab | None:
+        if not isinstance(ed, EditorWidget):
+            return None
+        parent = ed.parentWidget()
+        while parent is not None:
+            if isinstance(parent, SvgEditorTab):
+                return parent
+            parent = parent.parentWidget()
+
+        host_tabs = None
+        host_index = -1
+        for tabs in self.editor_workspace.all_tabs():
+            idx = tabs.indexOf(ed)
+            if idx < 0:
+                continue
+            host_tabs = tabs
+            host_index = idx
+            break
+        if host_tabs is None or host_index < 0:
+            return None
+
+        pinned = bool(getattr(ed, "_tab_pinned", False))
+        host_tabs.removeTab(host_index)
+        insert_at = max(0, min(host_index, host_tabs.count()))
+
+        wrapper = SvgEditorTab(editor=ed, parent=host_tabs)
+        wrapper.set_viewer_background(getattr(self, "editor_background_color", ""))
+        ed.show()
+        host_tabs.insertTab(insert_at, wrapper, "")
+        host_tabs._connect_widget_document_signal(wrapper)
+        if pinned:
+            setattr(wrapper, "_tab_pinned", True)
+        host_tabs._refresh_tab_title(wrapper)
+        host_tabs._reflow_pinned_tabs()
+        host_tabs.setCurrentWidget(wrapper)
+        wrapper.setFocus()
+        notify = getattr(self.editor_workspace, "notify_document_widgets_changed", None)
+        if callable(notify):
+            notify()
+        return wrapper
+
+    def _open_svg_editor_tab(self, cpath: str, *, show_errors: bool) -> SvgEditorTab | None:
+        existing = self._find_open_svg_editor_tab_for_path(cpath)
+        if existing is not None:
+            return existing
+        opened = self.editor_workspace.open_editor(
+            os.path.basename(cpath),
+            cpath,
+            font_size=self.font_size,
+            font_family=self.font_family,
+            show_errors=show_errors,
+        )
+        if not isinstance(opened, EditorWidget):
+            return None
+        if not self._configure_opened_code_editor(opened, cpath=cpath):
+            return None
+        wrapper = self._wrap_editor_in_svg_tab(opened)
+        return wrapper if isinstance(wrapper, SvgEditorTab) else None
 
     @staticmethod
     def _read_text_for_diff(path: str) -> str | None:
@@ -6975,6 +7070,21 @@ class PythonIDE(Window):
             if show_errors:
                 QMessageBox.warning(self, "Open Error", f"File is not readable:\n{cpath}")
             return None
+
+        if self._is_svg_file_path(cpath):
+            opened = self._open_svg_editor_tab(cpath, show_errors=show_errors)
+            if opened is None:
+                return None
+            self._track_widget_change_highlights(opened)
+            opened_editor = self._editor_from_document_widget(opened)
+            if isinstance(opened_editor, EditorWidget):
+                self._attach_editor_lint_hooks(opened_editor)
+            self._schedule_symbol_outline_refresh(immediate=True)
+            self._refresh_runtime_action_states()
+            self.spellcheck_manager.refresh_active_widget(immediate=True)
+            QTimer.singleShot(0, self.apply_default_layout)
+            QTimer.singleShot(80, self.apply_default_layout)
+            return opened
 
         existing = self._find_open_document_for_path(cpath)
         if existing:
@@ -7763,7 +7873,7 @@ class PythonIDE(Window):
                 self._apply_lint_visual_settings_to_editor(widget)
                 self._apply_editor_overview_settings_to_editor(widget)
                 self._apply_spellcheck_visual_settings_to_widget(widget)
-            elif isinstance(widget, (ImageViewerWidget, SoundPlayerEditorWidget)):
+            elif isinstance(widget, (ImageViewerWidget, SoundPlayerEditorWidget, SvgEditorTab)):
                 self._apply_image_viewer_background_to_widget(widget)
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._track_widget_change_highlights(self.commit_md_editor)

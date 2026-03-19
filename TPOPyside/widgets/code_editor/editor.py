@@ -1799,11 +1799,12 @@ class CodeEditor(QPlainTextEdit):
     def _occurrence_pattern_from_cursor(self) -> tuple[str, str, int]:
         cur = self.textCursor()
         selected = str(cur.selectedText() or "").replace("\u2029", "\n")
-        if selected and "\n" not in selected:
+        if selected:
             if len(selected) < 2:
                 return "", "", 0
             # Explicit text selection should match the exact selected substring
-            # (including partial identifier selections like "fil" in "filtered").
+            # (including partial identifier selections like "fil" in "filtered"
+            # and multi-line selections).
             return selected, re.escape(selected), 0
 
         token = self._identifier_token_under_cursor(cur)

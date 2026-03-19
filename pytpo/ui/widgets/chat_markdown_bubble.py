@@ -106,6 +106,7 @@ class ChatMarkdownBubble(QFrame):
         link_activated: Callable[[str], None] | None = None,
         role_label: str | None = None,
         item_count: int = 1,
+        diff_path_display: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__()
         self.role = role
@@ -114,6 +115,7 @@ class ChatMarkdownBubble(QFrame):
         self._item_count = max(1, int(item_count))
         self._text = ""
         self._link_activated = link_activated
+        self._diff_path_display = diff_path_display
         self._collapsible = role in {"tools", "diff"}
         self._collapsed = self._collapsible
         self._show_header = self._collapsible or bool(timestamp) or role != "assistant"
@@ -270,36 +272,62 @@ class ChatMarkdownBubble(QFrame):
         )
 
     def _diff_summary(self) -> tuple[str, int, int]:
+        return self._extract_diff_summary(
+            self._text,
+            diff_path_display=self._diff_path_display,
+        )
+
+    @staticmethod
+    def _extract_diff_summary(
+        text: str,
+        *,
+        diff_path_display: Callable[[str], str] | None = None,
+    ) -> tuple[str, int, int]:
         file_label = "(unknown file)"
         added = 0
         removed = 0
-        for raw in str(self._text or "").splitlines():
+        for raw in str(text or "").splitlines():
             line = str(raw)
             status_match = re.match(r"^[A-Z?]{1,2}\s+(.+)$", line.strip())
             if status_match is not None:
                 candidate = str(status_match.group(1) or "").strip()
                 if candidate:
-                    file_label = candidate
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
                     break
             if line.startswith("*** Update File: "):
                 candidate = line[len("*** Update File: ") :].strip()
                 if candidate:
-                    file_label = candidate
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
                     break
             if line.startswith("*** Add File: "):
                 candidate = line[len("*** Add File: ") :].strip()
                 if candidate:
-                    file_label = candidate
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
                     break
             if line.startswith("*** Delete File: "):
                 candidate = line[len("*** Delete File: ") :].strip()
                 if candidate:
-                    file_label = candidate
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
                     break
             if line.startswith("*** Move to: "):
                 candidate = line[len("*** Move to: ") :].strip()
                 if candidate:
-                    file_label = candidate
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
             if line.startswith("diff --git "):
                 parts = line.split()
                 if len(parts) >= 4:
@@ -307,15 +335,21 @@ class ChatMarkdownBubble(QFrame):
                     if candidate.startswith("b/"):
                         candidate = candidate[2:]
                     if candidate:
-                        file_label = candidate
+                        file_label = ChatMarkdownBubble._format_diff_path_label(
+                            candidate,
+                            diff_path_display=diff_path_display,
+                        )
                         break
             if line.startswith("+++ "):
                 candidate = line[4:].strip()
                 if candidate.startswith("b/"):
                     candidate = candidate[2:]
                 if candidate != "/dev/null" and candidate:
-                    file_label = candidate
-        for raw in str(self._text or "").splitlines():
+                    file_label = ChatMarkdownBubble._format_diff_path_label(
+                        candidate,
+                        diff_path_display=diff_path_display,
+                    )
+        for raw in str(text or "").splitlines():
             if raw.startswith("+++") or raw.startswith("---"):
                 continue
             if raw.startswith("+"):
@@ -326,7 +360,10 @@ class ChatMarkdownBubble(QFrame):
 
     def _render_html(self) -> str:
         if self.role == "diff":
-            return self._render_diff_html(self._text)
+            return self._render_diff_html(
+                self._text,
+                diff_path_display=self._diff_path_display,
+            )
         return self._render_markdown_html(self._text)
 
     @staticmethod
@@ -414,11 +451,98 @@ class ChatMarkdownBubble(QFrame):
         return bool(re.match(r"^\s{0,3}(?:```|~~~)", str(line or "")))
 
     @staticmethod
-    def _render_diff_html(text: str) -> str:
+    def _format_diff_path_label(
+        path_text: str,
+        *,
+        diff_path_display: Callable[[str], str] | None = None,
+    ) -> str:
+        candidate = str(path_text or "").strip()
+        if not candidate or not callable(diff_path_display):
+            return candidate
+        try:
+            display = str(diff_path_display(candidate) or "").strip()
+        except Exception:
+            return candidate
+        return display or candidate
+
+    @staticmethod
+    def _format_diff_path_token(
+        token: str,
+        *,
+        diff_path_display: Callable[[str], str] | None = None,
+    ) -> str:
+        raw = str(token or "")
+        for prefix in ("a/", "b/"):
+            if raw.startswith(prefix):
+                path = raw[len(prefix) :]
+                if path == "/dev/null":
+                    return raw
+                display = ChatMarkdownBubble._format_diff_path_label(
+                    path,
+                    diff_path_display=diff_path_display,
+                )
+                return f"{prefix}{display}" if display else raw
+        return ChatMarkdownBubble._format_diff_path_label(
+            raw,
+            diff_path_display=diff_path_display,
+        )
+
+    @staticmethod
+    def _display_diff_line(
+        raw: str,
+        *,
+        diff_path_display: Callable[[str], str] | None = None,
+    ) -> str:
+        line = str(raw or "")
+        for prefix in (
+            "*** Update File: ",
+            "*** Add File: ",
+            "*** Delete File: ",
+            "*** Move to: ",
+            "+++ ",
+            "--- ",
+        ):
+            if not line.startswith(prefix):
+                continue
+            return prefix + ChatMarkdownBubble._format_diff_path_token(
+                line[len(prefix) :].strip(),
+                diff_path_display=diff_path_display,
+            )
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                parts[2] = ChatMarkdownBubble._format_diff_path_token(
+                    parts[2],
+                    diff_path_display=diff_path_display,
+                )
+                parts[3] = ChatMarkdownBubble._format_diff_path_token(
+                    parts[3],
+                    diff_path_display=diff_path_display,
+                )
+                return " ".join(parts)
+        status_match = re.match(r"^([A-Z?]{1,2}\s+)(.+)$", line.strip())
+        if status_match is not None:
+            return str(status_match.group(1) or "") + ChatMarkdownBubble._format_diff_path_label(
+                str(status_match.group(2) or ""),
+                diff_path_display=diff_path_display,
+            )
+        return line
+
+    @staticmethod
+    def _render_diff_html(
+        text: str,
+        *,
+        diff_path_display: Callable[[str], str] | None = None,
+    ) -> str:
         lines = str(text or "").splitlines()
         rendered: list[str] = []
         for raw in lines:
-            escaped = html.escape(raw)
+            escaped = html.escape(
+                ChatMarkdownBubble._display_diff_line(
+                    raw,
+                    diff_path_display=diff_path_display,
+                )
+            )
             style = "color: #e6edf3;"
             if raw.startswith("+") and not raw.startswith("+++"):
                 style = "color: #b5cea8; background-color: #17361f;"

@@ -37,5 +37,36 @@ class ChatMarkdownBubbleMarkdownTests(unittest.TestCase):
         self.assertIn("1. literal", html)
 
 
+class ChatMarkdownBubbleDiffTests(unittest.TestCase):
+    @staticmethod
+    def _relative_display(path_text: str) -> str:
+        return str(path_text).removeprefix("/repo/")
+
+    def test_diff_summary_formats_absolute_path_for_display(self) -> None:
+        label, added, removed = ChatMarkdownBubble._extract_diff_summary(
+            "*** Update File: /repo/src/example.py\n- old\n+ new\n",
+            diff_path_display=self._relative_display,
+        )
+        self.assertEqual(label, "src/example.py")
+        self.assertEqual(added, 1)
+        self.assertEqual(removed, 1)
+
+    def test_render_diff_html_formats_diff_headers_for_display(self) -> None:
+        html = ChatMarkdownBubble._render_diff_html(
+            "\n".join(
+                [
+                    "diff --git a//repo/src/example.py b//repo/src/example.py",
+                    "--- a//repo/src/example.py",
+                    "+++ b//repo/src/example.py",
+                ]
+            ),
+            diff_path_display=self._relative_display,
+        )
+        self.assertIn("diff --git a/src/example.py b/src/example.py", html)
+        self.assertIn("--- a/src/example.py", html)
+        self.assertIn("+++ b/src/example.py", html)
+        self.assertNotIn("/repo/src/example.py", html)
+
+
 if __name__ == "__main__":
     unittest.main()

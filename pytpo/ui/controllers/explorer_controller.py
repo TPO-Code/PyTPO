@@ -927,7 +927,11 @@ class ExplorerController:
             self._show_tree_error("Create Folder", "Target directory does not exist.")
             return
 
-        name = self._prompt_simple_name("New Folder", "Folder name:")
+        name = self._prompt_simple_name(
+            "New Folder",
+            "Folder name:",
+            allow_path_separators=True,
+        )
         if name is None:
             return
 

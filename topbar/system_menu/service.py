@@ -227,11 +227,20 @@ class PlayerInfo:
     artist: str = ""
     album: str = ""
     volume: float | None = None
-    can_play: bool = True
-    can_pause: bool = True
-    can_go_next: bool = True
-    can_go_previous: bool = True
-    can_control: bool = True
+
+    can_play: bool = False
+    can_pause: bool = False
+    can_go_next: bool = False
+    can_go_previous: bool = False
+    can_control: bool = False
+    can_seek: bool = False
+
+    position_seconds: float | None = None
+    length_seconds: float | None = None
+    track_id: str = ""
+
+    loop_status: str = "None"
+    shuffle: bool | None = None
 
 
 class MprisService:
@@ -293,11 +302,12 @@ class MprisService:
     def get_capabilities(self, player: str) -> dict[str, bool]:
         if not self._gdbus:
             return {
-                "can_play": True,
-                "can_pause": True,
-                "can_go_next": True,
-                "can_go_previous": True,
-                "can_control": True,
+                "can_play": False,
+                "can_pause": False,
+                "can_go_next": False,
+                "can_go_previous": False,
+                "can_control": False,
+                "can_seek": False,
             }
 
         props = {
@@ -306,6 +316,7 @@ class MprisService:
             "can_go_next": "CanGoNext",
             "can_go_previous": "CanGoPrevious",
             "can_control": "CanControl",
+            "can_seek": "CanSeek",
         }
         capabilities: dict[str, bool] = {}
         for key, prop in props.items():
@@ -320,6 +331,51 @@ class MprisService:
             if len(parts) >= 2:
                 return parts[1]
         return player
+
+    def get_position_seconds(self, player: str) -> float | None:
+        code, out, _ = self._playerctl_command(player, "position")
+        if code != 0 or not out.strip():
+            return None
+        try:
+            return float(out.strip())
+        except ValueError:
+            return None
+
+    def get_metadata_value(self, player: str, key: str) -> str:
+        code, out, _ = self._playerctl_command(player, "metadata", key)
+        if code != 0:
+            return ""
+        return out.strip()
+
+    def get_track_length_seconds(self, player: str) -> float | None:
+        raw = self.get_metadata_value(player, "mpris:length")
+        if not raw:
+            return None
+        try:
+            return max(0.0, float(raw) / 1_000_000.0)
+        except ValueError:
+            return None
+
+    def get_track_id(self, player: str) -> str:
+        return self.get_metadata_value(player, "mpris:trackid")
+
+    def get_loop_status(self, player: str) -> str:
+        code, out, _ = self._playerctl_command(player, "loop")
+        if code != 0:
+            return "None"
+        value = out.strip()
+        return value if value in {"None", "Track", "Playlist"} else "None"
+
+    def get_shuffle(self, player: str) -> bool | None:
+        code, out, _ = self._playerctl_command(player, "shuffle")
+        if code != 0:
+            return None
+        value = out.strip().lower()
+        if value == "on":
+            return True
+        if value == "off":
+            return False
+        return None
 
     def get_player(self, player: str) -> PlayerInfo:
         info = PlayerInfo(name=player)
@@ -355,6 +411,13 @@ class MprisService:
 
         for key, value in self.get_capabilities(player).items():
             setattr(info, key, value)
+
+        info.position_seconds = self.get_position_seconds(player)
+        info.length_seconds = self.get_track_length_seconds(player)
+        info.track_id = self.get_track_id(player)
+        info.loop_status = self.get_loop_status(player)
+        info.shuffle = self.get_shuffle(player)
+
         return info
 
     def command(self, player: str, *args: str) -> bool:
@@ -364,6 +427,37 @@ class MprisService:
     def set_volume(self, player: str, value: float) -> bool:
         clamped = max(0.0, min(1.0, value))
         return self.command(player, "volume", f"{clamped:.3f}")
+
+    def stop(self, player: str) -> bool:
+        return self.command(player, "stop")
+
+    def seek_relative(self, player: str, delta_seconds: float) -> bool:
+        if not self._playerctl:
+            return False
+
+        sign = "+" if delta_seconds >= 0 else "-"
+        magnitude = abs(float(delta_seconds))
+        code, _, _ = self._playerctl_command(player, "position", f"{magnitude:.3f}{sign}")
+        return code == 0
+
+    def set_position(self, player: str, position_seconds: float) -> bool:
+        if not self._playerctl:
+            return False
+
+        clamped = max(0.0, float(position_seconds))
+        code, _, _ = self._playerctl_command(player, "position", f"{clamped:.3f}")
+        return code == 0
+
+    def set_loop_status(self, player: str, value: str) -> bool:
+        normalized = value.strip().capitalize()
+        if normalized not in {"None", "Track", "Playlist"}:
+            return False
+        code, _, _ = self._playerctl_command(player, "loop", normalized)
+        return code == 0
+
+    def set_shuffle(self, player: str, enabled: bool) -> bool:
+        code, _, _ = self._playerctl_command(player, "shuffle", "On" if enabled else "Off")
+        return code == 0
 
 
 def collect_system_menu_snapshot() -> SystemMenuSnapshot:

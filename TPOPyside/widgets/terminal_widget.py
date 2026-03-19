@@ -9,6 +9,7 @@ import struct
 import signal
 import copy
 import re
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +21,7 @@ from PySide6.QtCore import Qt
 import pyte
 from pyte.screens import HistoryScreen, Screen
 from pyte import modes
+from wcwidth import wcwidth
 
 # ============================ Colors & Utilities ============================
 
@@ -245,6 +247,184 @@ class _TerminalByteStream(pyte.ByteStream):
     )
 
 
+class _WrapTrackingMixin:
+    def __init__(self, *args, **kwargs) -> None:
+        self._wrapped_rows: set[int] = set()
+        super().__init__(*args, **kwargs)
+
+    def is_row_wrapped(self, row_idx: int) -> bool:
+        try:
+            return int(row_idx) in self._wrapped_rows
+        except Exception:
+            return False
+
+    def _set_wrapped_rows(self, rows: set[int]) -> None:
+        limit = max(0, int(getattr(self, "lines", 0)))
+        self._wrapped_rows = {int(row) for row in rows if 0 <= int(row) < limit}
+
+    def _shift_rows_up(self, top: int, bottom: int, count: int = 1) -> None:
+        amount = max(1, int(count or 1))
+        updated: set[int] = set()
+        for row in self._wrapped_rows:
+            if row < top or row > bottom:
+                updated.add(row)
+                continue
+            next_row = row - amount
+            if top <= next_row <= bottom:
+                updated.add(next_row)
+        self._set_wrapped_rows(updated)
+
+    def _shift_rows_down(self, top: int, bottom: int, count: int = 1) -> None:
+        amount = max(1, int(count or 1))
+        updated: set[int] = set()
+        for row in self._wrapped_rows:
+            if row < top or row > bottom:
+                updated.add(row)
+                continue
+            next_row = row + amount
+            if top <= next_row <= bottom:
+                updated.add(next_row)
+        self._set_wrapped_rows(updated)
+
+    def draw(self, data: str) -> None:
+        data = data.translate(self.g1_charset if self.charset else self.g0_charset)
+
+        for char in data:
+            char_width = wcwidth(char)
+            if self.cursor.x == self.columns:
+                if modes.DECAWM in self.mode:
+                    self._wrapped_rows.add(int(self.cursor.y))
+                    self.dirty.add(self.cursor.y)
+                    self.carriage_return()
+                    self.linefeed()
+                elif char_width > 0:
+                    self.cursor.x -= char_width
+
+            if modes.IRM in self.mode and char_width > 0:
+                self.insert_characters(char_width)
+
+            line = self.buffer[self.cursor.y]
+            if char_width == 1:
+                line[self.cursor.x] = self.cursor.attrs._replace(data=char)
+            elif char_width == 2:
+                line[self.cursor.x] = self.cursor.attrs._replace(data=char)
+                if self.cursor.x + 1 < self.columns:
+                    line[self.cursor.x + 1] = self.cursor.attrs._replace(data="")
+            elif char_width == 0 and unicodedata.combining(char):
+                if self.cursor.x:
+                    last = line[self.cursor.x - 1]
+                    normalized = unicodedata.normalize("NFC", last.data + char)
+                    line[self.cursor.x - 1] = last._replace(data=normalized)
+                elif self.cursor.y:
+                    last = self.buffer[self.cursor.y - 1][self.columns - 1]
+                    normalized = unicodedata.normalize("NFC", last.data + char)
+                    self.buffer[self.cursor.y - 1][self.columns - 1] = last._replace(data=normalized)
+            else:
+                break
+
+            if char_width > 0:
+                self.cursor.x = min(self.cursor.x + char_width, self.columns)
+
+        self.dirty.add(self.cursor.y)
+
+    def index(self) -> None:
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        scrolled = self.cursor.y == bottom
+        super().index()
+        if scrolled:
+            self._shift_rows_up(top, bottom)
+
+    def reverse_index(self) -> None:
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        scrolled = self.cursor.y == top
+        super().reverse_index()
+        if scrolled:
+            self._shift_rows_down(top, bottom)
+
+    def insert_lines(self, count: Optional[int] = None) -> None:
+        amount = max(1, int(count or 1))
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        cursor_row = int(self.cursor.y)
+        super().insert_lines(count)
+        if top <= cursor_row <= bottom:
+            kept: set[int] = set()
+            for row in self._wrapped_rows:
+                if row < cursor_row or row > bottom:
+                    kept.add(row)
+                    continue
+                next_row = row + amount
+                if cursor_row <= next_row <= bottom:
+                    kept.add(next_row)
+            self._set_wrapped_rows(kept)
+
+    def delete_lines(self, count: Optional[int] = None) -> None:
+        amount = max(1, int(count or 1))
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        cursor_row = int(self.cursor.y)
+        super().delete_lines(count)
+        if top <= cursor_row <= bottom:
+            kept: set[int] = set()
+            for row in self._wrapped_rows:
+                if row < cursor_row or row > bottom:
+                    kept.add(row)
+                    continue
+                next_row = row - amount
+                if cursor_row <= next_row <= bottom:
+                    kept.add(next_row)
+            self._set_wrapped_rows(kept)
+
+    def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
+        if how in {2, 3}:
+            self._wrapped_rows.clear()
+        elif how == 0:
+            self._set_wrapped_rows({row for row in self._wrapped_rows if row < int(self.cursor.y)})
+        elif how == 1:
+            self._set_wrapped_rows({row for row in self._wrapped_rows if row > int(self.cursor.y)})
+        super().erase_in_display(how, *args, **kwargs)
+
+    def erase_in_line(self, how: int = 0, private: bool = False) -> None:
+        self._wrapped_rows.discard(int(self.cursor.y))
+        super().erase_in_line(how, private=private)
+
+    def resize(self, lines: Optional[int] = None, columns: Optional[int] = None) -> None:
+        old_lines = int(self.lines)
+        super().resize(lines=lines, columns=columns)
+        new_lines = int(self.lines)
+        if new_lines >= old_lines:
+            self._set_wrapped_rows(set(self._wrapped_rows))
+            return
+        drop = max(0, old_lines - new_lines)
+        self._set_wrapped_rows({row - drop for row in self._wrapped_rows if row >= drop})
+
+    def reset(self) -> None:
+        super().reset()
+        self._wrapped_rows.clear()
+
+
+class _ReflowableScreen(_WrapTrackingMixin, Screen):
+    pass
+
+
+class _ReflowableHistoryScreen(_WrapTrackingMixin, HistoryScreen):
+    def index(self) -> None:
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        scrolled = self.cursor.y == bottom
+        if scrolled:
+            self.history.top.append((self.buffer[top], self.is_row_wrapped(top)))
+        Screen.index(self)
+        if scrolled:
+            self._shift_rows_up(top, bottom)
+
+    def reverse_index(self) -> None:
+        top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
+        scrolled = self.cursor.y == top
+        if scrolled:
+            self.history.bottom.append((self.buffer[bottom], self.is_row_wrapped(bottom)))
+        Screen.reverse_index(self)
+        if scrolled:
+            self._shift_rows_down(top, bottom)
+
+
 class _TerminalScreenMux:
     """Provide xterm-like alternate-screen behavior on top of pyte screens."""
 
@@ -256,8 +436,8 @@ class _TerminalScreenMux:
             history: int,
             private_mode_callback: Optional[Callable[[int, bool], None]] = None,
     ) -> None:
-        self._main = HistoryScreen(columns, lines, history=history)
-        self._alt = Screen(columns, lines)
+        self._main = _ReflowableHistoryScreen(columns, lines, history=history)
+        self._alt = _ReflowableScreen(columns, lines)
         self._main.set_mode(modes.DECAWM)
         self._alt.set_mode(modes.DECAWM)
         self._active = self._main
@@ -472,6 +652,12 @@ class _TerminalScreenMux:
         self._main.resize(*args, **kwargs)
         self._alt.resize(*args, **kwargs)
 
+    def is_row_wrapped(self, row_idx: int) -> bool:
+        checker = getattr(self._active, "is_row_wrapped", None)
+        if callable(checker):
+            return bool(checker(row_idx))
+        return False
+
     def reset(self) -> None:
         self._main.reset()
         self._alt.reset()
@@ -636,6 +822,8 @@ class TerminalWidget(QtWidgets.QWidget):
         # Emulator + stream
         self._screen = self._create_screen(self._virt_cols, self._virt_rows)
         self._stream = _TerminalByteStream(self._screen)
+        self._display_rows_cache_cols = -1
+        self._display_rows_cache: list[dict] = []
     
         # Seed child size before first paint; a deferred sync aligns to actual viewport geometry.
         self._set_winsize(self._virt_rows, self._virt_cols)
@@ -1168,6 +1356,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._rebuild_with_lines(cols, rows, self._snapshot_all_lines())
         self._set_winsize(rows, cols)
         self._set_view_offset(self._view_offset, repaint=False)
+        self._invalidate_display_rows_cache()
         self.update()
 
     def _flush_pending_geometry_sync(self) -> None:
@@ -1186,26 +1375,7 @@ class TerminalWidget(QtWidgets.QWidget):
         self._geometry_sync_timer.start(delay)
 
     def _snapshot_all_lines(self) -> list[str]:
-        """Oldest→newest: history strings + live buffer rows (trimmed)."""
-        out = []
-        hist_sequences = self._history_sequences()
-        for entry in self._iter_history_entries(hist_sequences):
-            out.append(self._history_entry_to_text(entry))
-        cols = int(self._screen.columns)
-        rows = int(self._screen.lines)
-        live_rows = max(0, min(rows, self._live_rows()))
-        for r in range(live_rows):
-            row = self._screen.buffer.get(r, {})
-            last = -1
-            chars = []
-            for c in range(cols):
-                cell = row.get(c)
-                ch = cell.data if cell and cell.data else " "
-                chars.append(ch)
-                if ch != " ":
-                    last = c
-            out.append("".join(chars[:last + 1]) if last >= 0 else "")
-        return out
+        return [str(record.get("source_line") or "") for record in self._logical_line_records()]
 
     def _history_sequences(self) -> tuple[Sequence, ...]:
         """Return sequences representing stored history rows."""
@@ -1294,6 +1464,193 @@ class TerminalWidget(QtWidgets.QWidget):
         if isinstance(data, (int, float, bool)):
             return ""
         return ""
+
+    def _history_entry_to_row(self, entry):
+        data = entry
+        if isinstance(data, tuple) and data:
+            data = data[0]
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            row: dict[int, object] = {}
+            for idx, item in enumerate(data):
+                if hasattr(item, "data"):
+                    row[idx] = item
+            return row if row else None
+        return None
+
+    @staticmethod
+    def _history_entry_wrapped(entry) -> bool:
+        if isinstance(entry, tuple) and len(entry) > 1:
+            return bool(entry[1])
+        return False
+
+    def _row_cells_from_mapping(self, row_dict: dict) -> list[object | None]:
+        if not isinstance(row_dict, dict) or not row_dict:
+            return []
+        try:
+            max_col = max(int(col) for col in row_dict.keys()) + 1
+        except Exception:
+            max_col = int(getattr(self._screen, "columns", 0))
+        eff_len = self._row_effective_len(row_dict, max(max_col, int(getattr(self._screen, "columns", 0))))
+        if eff_len <= 0:
+            return []
+        return [row_dict.get(col_idx) for col_idx in range(eff_len)]
+
+    @staticmethod
+    def _cells_to_text(cells: Sequence[object | None]) -> str:
+        parts: list[str] = []
+        for cell in cells:
+            data = getattr(cell, "data", None) if cell is not None else None
+            if isinstance(data, str):
+                parts.append(data)
+            else:
+                parts.append(" ")
+        return "".join(parts).rstrip()
+
+    def _invalidate_display_rows_cache(self) -> None:
+        self._display_rows_cache_cols = -1
+        self._display_rows_cache = []
+
+    def _logical_line_records(self) -> list[dict]:
+        screen = getattr(self, "_screen", None)
+        if screen is None:
+            return []
+
+        raw_rows: list[dict] = []
+        hist_sequences = self._history_sequences()
+        for entry in self._iter_history_entries(hist_sequences):
+            row = self._history_entry_to_row(entry)
+            cells = self._row_cells_from_mapping(row) if row is not None else []
+            text = self._cells_to_text(cells) if cells else self._history_entry_to_text(entry)
+            raw_rows.append(
+                {
+                    "cells": cells,
+                    "text": text,
+                    "wrapped": self._history_entry_wrapped(entry),
+                    "cursor_col": None,
+                }
+            )
+
+        live_rows = max(0, min(int(screen.lines), self._live_rows()))
+        cursor = getattr(screen, "cursor", None)
+        cursor_row = int(getattr(cursor, "y", -1)) if cursor is not None else -1
+        cursor_col = int(getattr(cursor, "x", 0)) if cursor is not None else 0
+        for row_idx in range(live_rows):
+            row = screen.buffer.get(row_idx, {})
+            cells = self._row_cells_from_mapping(row)
+            raw_rows.append(
+                {
+                    "cells": cells,
+                    "text": self._cells_to_text(cells),
+                    "wrapped": bool(getattr(screen, "is_row_wrapped", lambda _idx: False)(row_idx)),
+                    "cursor_col": cursor_col if row_idx == cursor_row else None,
+                }
+            )
+
+        logical: list[dict] = []
+        current: dict | None = None
+        for raw in raw_rows:
+            if current is None:
+                current = {
+                    "cells": list(raw["cells"]),
+                    "source_line": str(raw["text"] or ""),
+                    "cursor_col": raw["cursor_col"],
+                }
+            else:
+                current["cells"].extend(raw["cells"])
+                current["source_line"] = f"{current['source_line']}{str(raw['text'] or '')}"
+                if raw["cursor_col"] is not None:
+                    current["cursor_col"] = len(current["cells"]) - len(raw["cells"]) + int(raw["cursor_col"])
+
+            if not raw["wrapped"]:
+                logical.append(current)
+                current = None
+
+        if current is not None:
+            logical.append(current)
+        return logical
+
+    def _display_row_records(self) -> list[dict]:
+        vis_cols = max(1, int(self._visible_cols()))
+        if self._display_rows_cache_cols == vis_cols and self._display_rows_cache:
+            return self._display_rows_cache
+
+        rows: list[dict] = []
+        for source_index, line in enumerate(self._logical_line_records()):
+            cells = list(line.get("cells") or [])
+            source_line = str(line.get("source_line") or "")
+            cursor_col = line.get("cursor_col")
+
+            if cells:
+                total_cols = max(1, len(cells), int(cursor_col) + 1 if cursor_col is not None else 0)
+                padded_cells = list(cells) + [None] * max(0, total_cols - len(cells))
+                for start in range(0, total_cols, vis_cols):
+                    chunk_cells = padded_cells[start:start + vis_cols]
+                    rows.append(
+                        {
+                            "global_row": len(rows),
+                            "source_index": source_index,
+                            "source_line": source_line,
+                            "display_text": self._cells_to_text(chunk_cells),
+                            "cells": chunk_cells,
+                            "chunk_start": start,
+                            "cursor_col": (
+                                int(cursor_col) - start
+                                if cursor_col is not None and start <= int(cursor_col) < start + len(chunk_cells)
+                                else None
+                            ),
+                        }
+                    )
+                continue
+
+            if not source_line:
+                rows.append(
+                    {
+                        "global_row": len(rows),
+                        "source_index": source_index,
+                        "source_line": "",
+                        "display_text": "",
+                        "cells": [],
+                        "chunk_start": 0,
+                        "cursor_col": 0 if cursor_col == 0 else None,
+                    }
+                )
+                continue
+
+            for start in range(0, len(source_line), vis_cols):
+                chunk = source_line[start:start + vis_cols]
+                rows.append(
+                    {
+                        "global_row": len(rows),
+                        "source_index": source_index,
+                        "source_line": source_line,
+                        "display_text": chunk,
+                        "cells": [],
+                        "chunk_start": start,
+                        "cursor_col": (
+                            int(cursor_col) - start
+                            if cursor_col is not None and start <= int(cursor_col) < start + len(chunk)
+                            else None
+                        ),
+                    }
+                )
+
+        if not rows:
+            rows.append(
+                {
+                    "global_row": 0,
+                    "source_index": 0,
+                    "source_line": "",
+                    "display_text": "",
+                    "cells": [],
+                    "chunk_start": 0,
+                    "cursor_col": 0,
+                }
+            )
+        self._display_rows_cache_cols = vis_cols
+        self._display_rows_cache = rows
+        return rows
 
     def _create_screen(self, cols: int, rows: int) -> _TerminalScreenMux:
         return _TerminalScreenMux(
@@ -1421,13 +1778,7 @@ class TerminalWidget(QtWidgets.QWidget):
     def _max_view_offset(self, vis_rows: Optional[int] = None) -> int:
         if vis_rows is None:
             vis_rows = self._visible_rows()
-        screen = getattr(self, "_screen", None)
-        if screen is None:
-            return 0
-        hist_len = self._history_length()
-        screen_rows = max(1, int(getattr(screen, "lines", 0)))
-        total_rows = hist_len + screen_rows
-        return max(0, total_rows - vis_rows)
+        return max(0, len(self._display_row_records()) - int(vis_rows))
 
     def _on_private_mode_changed(self, mode: int, enabled: bool) -> None:
         try:
@@ -1465,6 +1816,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._trace_event("PTY_IN", data=data)
             self.outputReceived.emit(bytes(data))
             self._stream.feed(data)
+            self._invalidate_display_rows_cache()
 
             if self._view_offset == 0:
                 self._ensure_bottom()
@@ -1591,30 +1943,13 @@ class TerminalWidget(QtWidgets.QWidget):
                 viewport_rect,
             )
 
-            emu_rows, emu_cols = self._screen.lines, self._screen.columns
             vis_cols = self._visible_cols()
             vis_rows = self._visible_rows()
-
-            hist_sequences = self._history_sequences()
-            hist_len = self._history_length(hist_sequences)
-            screen_rows = max(1, int(self._screen.lines))
-            total_rows = hist_len + screen_rows
-            if self._view_offset == 0:
-                live_rows = max(1, self._live_rows())
-                view_top = hist_len + max(0, live_rows - vis_rows)
-            else:
-                view_top = max(0, total_rows - vis_rows - self._view_offset)
+            visible_rows = self._visible_row_records()
             traceback_row_flags = self._visible_traceback_row_flags()
-
             show_cursor = self._cursor_visible and self._view_offset == 0
-            cursor = getattr(self._screen, "cursor", None)
-            cursor_target_row = cursor.y if (show_cursor and cursor is not None) else None
-            cursor_target_col = cursor.x if (show_cursor and cursor is not None) else None
             cursor_vis_row = None
             cursor_vis_col = None
-
-            def row_effective_len(row_dict: dict) -> int:
-                return self._row_effective_len(row_dict, emu_cols)
 
             sel_active = self._sel_start is not None and self._sel_end is not None
             if sel_active:
@@ -1624,13 +1959,13 @@ class TerminalWidget(QtWidgets.QWidget):
             else:
                 sel_c1 = sel_r1 = sel_c2 = sel_r2 = 0
 
-            def selection_bounds_for_row(row_idx: int):
+            def selection_bounds_for_row(row_idx: int, global_row: int):
                 if not sel_active or vis_cols <= 0:
                     return None
-                if row_idx < sel_r1 or row_idx > sel_r2:
+                if global_row < sel_r1 or global_row > sel_r2:
                     return None
-                start_col = sel_c1 if row_idx == sel_r1 else 0
-                end_col = sel_c2 if row_idx == sel_r2 else vis_cols - 1
+                start_col = sel_c1 if global_row == sel_r1 else 0
+                end_col = sel_c2 if global_row == sel_r2 else vis_cols - 1
                 if end_col < start_col:
                     return None
                 start_col = max(0, min(start_col, vis_cols - 1))
@@ -1639,8 +1974,8 @@ class TerminalWidget(QtWidgets.QWidget):
                     return None
                 return start_col, end_col
 
-            def paint_selection_row(row_idx: int, y_base: int):
-                bounds = selection_bounds_for_row(row_idx)
+            def paint_selection_row(row_idx: int, global_row: int, y_base: int):
+                bounds = selection_bounds_for_row(row_idx, global_row)
                 if not bounds:
                     return
                 start_col, end_col = bounds
@@ -1650,194 +1985,56 @@ class TerminalWidget(QtWidgets.QWidget):
             def is_traceback_row(row_idx: int) -> bool:
                 return 0 <= row_idx < len(traceback_row_flags) and bool(traceback_row_flags[row_idx])
 
-            def history_entry_to_row(entry):
-                data = entry
-                if isinstance(data, tuple) and data:
-                    data = data[0]
-                if isinstance(data, dict):
-                    return data
-                if isinstance(data, list):
-                    row: dict[int, object] = {}
-                    for idx, item in enumerate(data):
-                        if hasattr(item, "data"):
-                            row[idx] = item
-                    return row if row else None
-                return None
-
             y = 0
-            display_row = 0
-
-            for row_i in range(emu_rows):
+            for display_row, row_data in enumerate(visible_rows):
                 if y >= vis_rows * self._cell_h:
                     break
 
-                global_i = view_top + row_i
-                if global_i < hist_len:
-                    entry = self._history_entry_at(global_i, hist_sequences)
-                    hist_row = history_entry_to_row(entry)
-                    if hist_row is not None:
-                        eff_len = row_effective_len(hist_row)
-                        row_display_base = display_row
-                        if eff_len == 0:
-                            paint_selection_row(row_display_base, y)
-                            p.setPen(self._link_color if is_traceback_row(row_display_base) else self._fg_default)
-                            p.drawText(0, y + self._baseline, "")
-                            y += self._cell_h
-                            display_row += 1
+                global_row = int(row_data.get("global_row") or display_row)
+                paint_selection_row(display_row, global_row, y)
+                row_cells = list(row_data.get("cells") or [])
+                if row_cells:
+                    for col_idx, cell in enumerate(row_cells):
+                        if col_idx >= vis_cols or cell is None:
                             continue
+                        bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
+                        if getattr(cell, "reverse", False):
+                            bg = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
+                        if bg != self._bg_default:
+                            p.fillRect(col_idx * self._cell_w, y, self._cell_w, self._cell_h, bg)
 
-                        max_vis_cols = max(1, vis_cols)
-                        wrapped_rows = max(1, (eff_len + max_vis_cols - 1) // max_vis_cols)
+                    for col_idx, cell in enumerate(row_cells):
+                        if col_idx >= vis_cols or cell is None:
+                            continue
+                        ch = getattr(cell, "data", None)
+                        if ch in {None, ""}:
+                            continue
+                        fg = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
+                        bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
+                        if getattr(cell, "reverse", False):
+                            fg, bg = bg, fg
+                        if getattr(cell, "bold", False):
+                            f = QtGui.QFont(self.font())
+                            f.setBold(True)
+                            p.setFont(f)
+                        else:
+                            p.setFont(self.font())
+                        sel_bounds = selection_bounds_for_row(display_row, global_row)
+                        if sel_bounds and sel_bounds[0] <= col_idx <= sel_bounds[1]:
+                            p.setPen(self._sel_fg)
+                        else:
+                            p.setPen(self._link_color if is_traceback_row(display_row) else fg)
+                        p.drawText(col_idx * self._cell_w, y + self._baseline, str(ch))
+                else:
+                    p.setPen(self._link_color if is_traceback_row(display_row) else self._fg_default)
+                    p.setFont(self.font())
+                    p.drawText(0, y + self._baseline, str(row_data.get("display_text") or ""))
 
-                        for col_idx in range(eff_len):
-                            cell = hist_row.get(col_idx)
-                            if not cell:
-                                continue
-                            bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
-                            if getattr(cell, "reverse", False):
-                                fg_tmp = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
-                                bg = fg_tmp
-                            if bg != self._bg_default:
-                                wrap_row_offset = col_idx // max_vis_cols
-                                wrap_col = col_idx % max_vis_cols
-                                y_base = y + wrap_row_offset * self._cell_h
-                                p.fillRect(wrap_col * self._cell_w, y_base, self._cell_w, self._cell_h, bg)
-
-                        for wrap_row_offset in range(wrapped_rows):
-                            paint_selection_row(row_display_base + wrap_row_offset, y + wrap_row_offset * self._cell_h)
-
-                        for col_idx in range(eff_len):
-                            cell = hist_row.get(col_idx)
-                            ch = (getattr(cell, "data", None) if cell else None) or " "
-                            if ch == " " and not cell:
-                                continue
-
-                            fg = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
-                            bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
-                            if getattr(cell, "reverse", False):
-                                fg, bg = bg, fg
-
-                            if getattr(cell, "bold", False):
-                                f = QtGui.QFont(self.font())
-                                f.setBold(True)
-                                p.setFont(f)
-                            else:
-                                p.setFont(self.font())
-
-                            wrap_row_offset = col_idx // max_vis_cols
-                            wrap_col = col_idx % max_vis_cols
-                            y_base = y + wrap_row_offset * self._cell_h
-                            display_idx = row_display_base + wrap_row_offset
-                            sel_bounds = selection_bounds_for_row(display_idx)
-                            if sel_bounds and sel_bounds[0] <= wrap_col <= sel_bounds[1]:
-                                p.setPen(self._sel_fg)
-                            else:
-                                p.setPen(self._link_color if is_traceback_row(display_idx) else fg)
-                            p.drawText(wrap_col * self._cell_w, y_base + self._baseline, ch)
-
-                        y += wrapped_rows * self._cell_h
-                        display_row = row_display_base + wrapped_rows
-                        continue
-
-                    text = self._history_entry_to_text(entry)
-                    if not text:
-                        paint_selection_row(display_row, y)
-                        p.setPen(self._link_color if is_traceback_row(display_row) else self._fg_default)
-                        p.drawText(0, y + self._baseline, "")
-                        y += self._cell_h
-                        display_row += 1
-                        continue
-
-                    idx = 0
-                    text_len = len(text)
-                    while True:
-                        chunk = text[idx:idx + vis_cols] if vis_cols > 0 else text[idx:]
-                        paint_selection_row(display_row, y)
-                        p.setPen(self._link_color if is_traceback_row(display_row) else self._fg_default)
-                        p.drawText(0, y + self._baseline, chunk)
-                        y += self._cell_h
-                        display_row += 1
-                        if vis_cols <= 0 or idx + vis_cols >= text_len:
-                            break
-                        idx += vis_cols
-                    continue
-
-                buf_row = global_i - hist_len
-                row = self._screen.buffer.get(buf_row, {})
-                eff_len = row_effective_len(row)
-                row_display_base = display_row
-
-                if eff_len == 0:
-                    paint_selection_row(row_display_base, y)
-                    p.setPen(self._link_color if is_traceback_row(row_display_base) else self._fg_default)
-                    p.drawText(0, y + self._baseline, "")
-                    y += self._cell_h
-                    display_row += 1
-                    continue
-
-                max_vis_cols = max(1, vis_cols)
-                cursor_col_for_row = None
-                if cursor_target_row is not None and cursor_target_col is not None and buf_row == cursor_target_row:
-                    cursor_col_for_row = max(0, cursor_target_col)
-                span_len = eff_len
-                if cursor_col_for_row is not None:
-                    span_len = max(span_len, cursor_col_for_row + 1)
-                wrapped_rows = max(1, (span_len + max_vis_cols - 1) // max_vis_cols)
-
-                for col_idx in range(eff_len):
-                    cell = row.get(col_idx)
-                    if not cell:
-                        continue
-                    bg = qcolor_from_pyte(cell.bg, self._bg_default)
-                    if getattr(cell, "reverse", False):
-                        fg_tmp = qcolor_from_pyte(cell.fg, self._fg_default)
-                        bg = fg_tmp
-                    if bg != self._bg_default:
-                        wrap_row_offset = col_idx // max_vis_cols
-                        wrap_col = col_idx % max_vis_cols
-                        y_base = y + wrap_row_offset * self._cell_h
-                        p.fillRect(wrap_col * self._cell_w, y_base, self._cell_w, self._cell_h, bg)
-
-                for wrap_row_offset in range(wrapped_rows):
-                    paint_selection_row(row_display_base + wrap_row_offset, y + wrap_row_offset * self._cell_h)
-
-                for col_idx in range(eff_len):
-                    cell = row.get(col_idx)
-                    ch = (cell.data if cell and cell.data else " ")
-                    if ch == " " and not cell:
-                        continue
-
-                    fg = qcolor_from_pyte(getattr(cell, "fg", None), self._fg_default)
-                    bg = qcolor_from_pyte(getattr(cell, "bg", None), self._bg_default)
-                    if getattr(cell, "reverse", False):
-                        fg, bg = bg, fg
-
-                    if getattr(cell, "bold", False):
-                        f = QtGui.QFont(self.font())
-                        f.setBold(True)
-                        p.setFont(f)
-                    else:
-                        p.setFont(self.font())
-
-                    wrap_row_offset = col_idx // max_vis_cols
-                    wrap_col = col_idx % max_vis_cols
-                    y_base = y + wrap_row_offset * self._cell_h
-                    display_idx = row_display_base + wrap_row_offset
-                    sel_bounds = selection_bounds_for_row(display_idx)
-                    if sel_bounds and sel_bounds[0] <= wrap_col <= sel_bounds[1]:
-                        p.setPen(self._sel_fg)
-                    else:
-                        p.setPen(self._link_color if is_traceback_row(display_idx) else fg)
-                    p.drawText(wrap_col * self._cell_w, y_base + self._baseline, ch)
-
-                y += wrapped_rows * self._cell_h
-                display_row = row_display_base + wrapped_rows
-
-                if cursor_col_for_row is not None and cursor_vis_row is None:
-                    wrap_row_offset = cursor_col_for_row // max_vis_cols
-                    wrap_col = cursor_col_for_row % max_vis_cols
-                    cursor_vis_row = row_display_base + wrap_row_offset
-                    cursor_vis_col = wrap_col
+                row_cursor = row_data.get("cursor_col")
+                if self._cursor_visible and self._view_offset == 0 and row_cursor is not None:
+                    cursor_vis_row = display_row
+                    cursor_vis_col = int(row_cursor)
+                y += self._cell_h
 
             if show_cursor and cursor_vis_row is not None and cursor_vis_col is not None:
                 vis_y = cursor_vis_row * self._cell_h
@@ -2029,60 +2226,35 @@ class TerminalWidget(QtWidgets.QWidget):
         return col, row
 
     def _visible_row_records(self) -> list[dict]:
-        vis_cols = self._visible_cols()
         vis_rows = self._visible_rows()
-        if vis_cols <= 0 or vis_rows <= 0:
+        if vis_rows <= 0:
             return []
-
-        emu_rows = int(self._screen.lines)
-        hist_sequences = self._history_sequences()
-        hist_len = self._history_length(hist_sequences)
-        total_rows = hist_len + max(1, emu_rows)
+        rows = self._display_row_records()
         if self._view_offset == 0:
-            live_rows = max(1, self._live_rows())
-            view_top = hist_len + max(0, live_rows - vis_rows)
+            start = max(0, len(rows) - vis_rows)
         else:
-            view_top = max(0, total_rows - vis_rows - self._view_offset)
+            start = max(0, len(rows) - vis_rows - int(self._view_offset))
+        return rows[start:start + vis_rows]
 
-        out: list[dict] = []
-        for row_i in range(emu_rows):
-            if len(out) >= vis_rows:
-                break
-            global_i = view_top + row_i
-            if global_i < hist_len:
-                full_text = self._history_entry_to_text(self._history_entry_at(global_i, hist_sequences))
-            else:
-                buf_row = global_i - hist_len
-                row = self._screen.buffer.get(buf_row, {})
-                eff_len = self._row_effective_len(row, int(self._screen.columns))
-                chars: list[str] = []
-                for col_idx in range(eff_len):
-                    cell = row.get(col_idx)
-                    chars.append(cell.data if cell and cell.data else " ")
-                full_text = "".join(chars)
+    def _display_row_index_for_view_row(self, view_row: int) -> int:
+        rows = self._display_row_records()
+        if not rows:
+            return 0
+        visible_rows = self._visible_row_records()
+        if not visible_rows:
+            return max(0, min(len(rows) - 1, int(view_row)))
+        clamped = max(0, min(int(view_row), len(visible_rows) - 1))
+        try:
+            return int(visible_rows[clamped].get("global_row") or 0)
+        except Exception:
+            return clamped
 
-            if not full_text:
-                out.append({"display_text": "", "source_line": ""})
-                continue
-
-            idx = 0
-            text_len = len(full_text)
-            while True:
-                out.append(
-                    {
-                        "display_text": full_text[idx:idx + vis_cols],
-                        "source_line": full_text,
-                    }
-                )
-                if len(out) >= vis_rows:
-                    break
-                if idx + vis_cols >= text_len:
-                    break
-                idx += vis_cols
-        return out
+    def _buffer_cell_pos_from_event(self, e: QtGui.QMouseEvent) -> tuple[int, int]:
+        col, view_row = self._cell_pos_from_event(e)
+        return col, self._display_row_index_for_view_row(view_row)
 
     def _traceback_target_from_row(self, row: int) -> Optional[tuple[str, int, int]]:
-        rows = self._visible_row_records()
+        rows = self._display_row_records()
         if row < 0 or row >= len(rows):
             return None
 
@@ -2167,7 +2339,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._report_mouse(e, pressed=True)
         else:
             if e.button() == Qt.MouseButton.LeftButton:
-                pos = self._cell_pos_from_event(e)
+                pos = self._buffer_cell_pos_from_event(e)
                 self._sel_start = pos
                 self._sel_end = pos
                 self._selecting = True
@@ -2183,7 +2355,7 @@ class TerminalWidget(QtWidgets.QWidget):
             self._report_mouse(e, pressed=False)
         else:
             if e.button() == Qt.MouseButton.LeftButton and self._selecting:
-                pos = self._cell_pos_from_event(e)
+                pos = self._buffer_cell_pos_from_event(e)
                 clicked_without_drag = self._sel_start == pos
                 self._sel_end = pos
                 self._selecting = False
@@ -2205,12 +2377,12 @@ class TerminalWidget(QtWidgets.QWidget):
         else:
             if self._selecting:
                 scrolled = self._autoscroll_selection(float(e.position().y()))
-                pos = self._cell_pos_from_event(e)
+                pos = self._buffer_cell_pos_from_event(e)
                 if scrolled or self._sel_end != pos:
                     self._sel_end = pos
                     self.update()
             else:
-                _, row = self._cell_pos_from_event(e)
+                _, row = self._buffer_cell_pos_from_event(e)
                 self._update_traceback_hover_cursor(row)
 
     def leaveEvent(self, e: QtCore.QEvent):
@@ -2283,37 +2455,31 @@ class TerminalWidget(QtWidgets.QWidget):
         if (r1, c1) > (r2, c2):
             c1, r1, c2, r2 = c2, r2, c1, r1
 
-        vis_cols = self._visible_cols()
-        hist_sequences = self._history_sequences()
-        hist_len = self._history_length(hist_sequences)
-        vis_rows = self._visible_rows()
-        total_rows = hist_len + max(1, int(self._screen.lines))
-        if self._view_offset == 0:
-            live_rows = max(1, self._live_rows())
-            view_top = hist_len + max(0, live_rows - vis_rows)
-        else:
-            view_top = max(0, total_rows - vis_rows - self._view_offset)
+        rows = self._display_row_records()
+        if not rows:
+            return
 
-        lines = []
+        parts: list[str] = []
+        previous_source = None
         for vr in range(r1, r2 + 1):
-            global_i = view_top + vr
-            if global_i < hist_len:
-                entry = self._history_entry_at(global_i, hist_sequences)
-                s = self._history_entry_to_text(entry)
-                part = s[c1:(c2+1)] if r1 == r2 else (s[c1:] if vr == r1 else (s[:c2+1] if vr == r2 else s))
-                lines.append(part)
+            if vr < 0 or vr >= len(rows):
+                continue
+            row = rows[vr]
+            text = str(row.get("display_text") or "")
+            if r1 == r2:
+                part = text[c1:c2 + 1]
+            elif vr == r1:
+                part = text[c1:]
+            elif vr == r2:
+                part = text[:c2 + 1]
             else:
-                buf_row = global_i - hist_len
-                row = self._screen.buffer.get(buf_row, {})
-                chars = []
-                for col_idx in range(self._screen.columns):
-                    cell = row.get(col_idx)
-                    ch = cell.data if cell and cell.data else " "
-                    chars.append(ch)
-                s = "".join(chars).rstrip()
-                part = s[c1:(c2+1)] if r1 == r2 else (s[c1:] if vr == r1 else (s[:c2+1] if vr == r2 else s))
-                lines.append(part)
-        QtGui.QGuiApplication.clipboard().setText("\n".join(lines))
+                part = text
+            source_index = row.get("source_index")
+            if parts and source_index != previous_source:
+                parts.append("\n")
+            parts.append(part)
+            previous_source = source_index
+        QtGui.QGuiApplication.clipboard().setText("".join(parts))
 
     # -------- Scrolling & Resize --------
     def _ensure_bottom(self):

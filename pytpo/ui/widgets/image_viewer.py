@@ -7,9 +7,12 @@ import os
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QByteArray, QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QImageReader, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import (
+    QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
@@ -34,9 +37,11 @@ class _ImageGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setAlignment(Qt.AlignCenter)
         self.setRenderHint(QPainter.Antialiasing, False)
+        self.setRenderHint(QPainter.TextAntialiasing, False)
         self.setRenderHint(QPainter.SmoothPixmapTransform, False)
         self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
 
     def is_fit_mode(self) -> bool:
         return self._fit_mode
@@ -138,11 +143,12 @@ class ImageViewerWidget(QWidget):
         self.editor_id = str(uuid.uuid4())
         self.file_path: str | None = None
         self._background_color = QColor()
+        self._image_width = 0
+        self._image_height = 0
+        self._is_vector_image = False
+        self._svg_renderer: QSvgRenderer | None = None
 
         self._scene = QGraphicsScene(self)
-        self._pixmap_item = QGraphicsPixmapItem()
-        self._pixmap_item.setTransformationMode(Qt.FastTransformation)
-        self._scene.addItem(self._pixmap_item)
 
         self._view = _ImageGraphicsView(self)
         self._view.setScene(self._scene)
@@ -170,6 +176,9 @@ class ImageViewerWidget(QWidget):
         clean = str(path).strip() if isinstance(path, str) and path.strip() else None
         self.file_path = str(Path(clean).resolve()) if clean else None
 
+    def is_vector_image(self) -> bool:
+        return bool(self._is_vector_image)
+
     def fit_to_view(self) -> None:
         self._view.fit_to_scene()
 
@@ -196,14 +205,48 @@ class ImageViewerWidget(QWidget):
             f"#PyTPOImageViewerStatus{{background:{bg_hex};}}"
         )
 
-    def load_file(self, path: str) -> bool:
-        target = str(path or "").strip()
-        if not target:
-            return False
-        cpath = str(Path(target).resolve())
-        if not os.path.exists(cpath):
-            return False
+    @staticmethod
+    def _is_svg_path(path: str) -> bool:
+        return str(Path(path).suffix or "").strip().lower() == ".svg"
 
+    def _replace_scene_item(self, item: QGraphicsItem, *, width: int, height: int, is_vector: bool) -> None:
+        self._scene.clear()
+        self._scene.addItem(item)
+        self._scene.setSceneRect(item.boundingRect())
+        self._image_width = max(0, int(width))
+        self._image_height = max(0, int(height))
+        self._is_vector_image = bool(is_vector)
+
+    def _load_svg_renderer(self, renderer: QSvgRenderer) -> bool:
+        if renderer is None or not renderer.isValid():
+            return False
+        item = QGraphicsSvgItem()
+        item.setSharedRenderer(renderer)
+        try:
+            item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+        except Exception:
+            pass
+        view_box = renderer.viewBoxF()
+        if view_box.isEmpty():
+            default_size = renderer.defaultSize()
+            width = int(default_size.width())
+            height = int(default_size.height())
+        else:
+            width = int(round(view_box.width()))
+            height = int(round(view_box.height()))
+        self._replace_scene_item(
+            item,
+            width=width,
+            height=height,
+            is_vector=True,
+        )
+        self._svg_renderer = renderer
+        return True
+
+    def _load_svg_file(self, cpath: str) -> bool:
+        return self._load_svg_renderer(QSvgRenderer(cpath))
+
+    def _load_raster_file(self, cpath: str) -> bool:
         reader = QImageReader(cpath)
         reader.setAutoTransform(True)
         image = reader.read()
@@ -214,20 +257,49 @@ class ImageViewerWidget(QWidget):
         if pixmap.isNull():
             return False
 
-        self._pixmap_item.setPixmap(pixmap)
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        item = QGraphicsPixmapItem(pixmap)
+        item.setTransformationMode(Qt.FastTransformation)
+        self._replace_scene_item(
+            item,
+            width=int(pixmap.width()),
+            height=int(pixmap.height()),
+            is_vector=False,
+        )
+        self._svg_renderer = None
+        return True
+
+    def load_svg_text(self, svg_text: str, *, file_path: str | None = None) -> bool:
+        data = QByteArray(str(svg_text or "").encode("utf-8"))
+        if not self._load_svg_renderer(QSvgRenderer(data)):
+            return False
+        if file_path is not None:
+            self.set_file_path(file_path)
+        self.fit_to_view()
+        self._refresh_status_text()
+        return True
+
+    def load_file(self, path: str) -> bool:
+        target = str(path or "").strip()
+        if not target:
+            return False
+        cpath = str(Path(target).resolve())
+        if not os.path.exists(cpath):
+            return False
+        loaded = self._load_svg_file(cpath) if self._is_svg_path(cpath) else self._load_raster_file(cpath)
+        if not loaded:
+            return False
         self.set_file_path(cpath)
         self.fit_to_view()
         self._refresh_status_text()
         return True
 
     def _refresh_status_text(self, *_args) -> None:
-        pixmap = self._pixmap_item.pixmap()
-        if pixmap.isNull() or not self.file_path:
+        if self._image_width <= 0 or self._image_height <= 0 or not self.file_path:
             self._status_label.setText("No image loaded")
             return
-        width = int(pixmap.width())
-        height = int(pixmap.height())
         zoom = int(round(self._view.current_zoom_percent()))
         mode = "fit" if self._view.is_fit_mode() else "custom"
-        self._status_label.setText(f"{width}x{height} px | {zoom}% | {mode}")
+        suffix = " | vector" if self._is_vector_image else ""
+        self._status_label.setText(
+            f"{self._image_width}x{self._image_height} px | {zoom}% | {mode}{suffix}"
+        )

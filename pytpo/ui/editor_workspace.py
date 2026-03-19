@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QMimeData, QPoint, QRect, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QMimeData, QPoint, QRect, QTimer, Signal
 from PySide6.QtGui import QDrag, QFontDatabase, QBrush, QColor, QPen, QPainter, QTextDocument, QTextCursor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -824,6 +824,7 @@ class EditorTabs(QTabWidget):
         idx = self.addTab(ed, _widget_display_name(ed))
         self.setCurrentIndex(idx)
         ed.setFocus()
+        self._set_embedded_workspace_drag_forwarding(ed, enabled=True)
         self._connect_widget_document_signal(ed)
         self._refresh_tab_title(ed)
         self._reflow_pinned_tabs()
@@ -866,10 +867,113 @@ class EditorTabs(QTabWidget):
     def removeTab(self, index: int) -> None:
         widget = self.widget(index)
         self._disconnect_widget_document_signal(widget)
+        self._set_embedded_workspace_drag_forwarding(widget, enabled=False)
         super().removeTab(index)
         notify = getattr(self.workspace, "notify_document_widgets_changed", None)
         if callable(notify):
             notify()
+
+    @staticmethod
+    def _iter_embedded_drag_forward_widgets(widget: QWidget | None) -> list[QWidget]:
+        if not isinstance(widget, QWidget):
+            return []
+        seen: set[int] = set()
+        result: list[QWidget] = []
+        for candidate in [widget, *widget.findChildren(QWidget)]:
+            key = int(id(candidate))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(candidate)
+        return result
+
+    def _set_embedded_workspace_drag_forwarding(self, widget: QWidget | None, *, enabled: bool) -> None:
+        if not _is_workspace_document_widget(widget):
+            return
+        if isinstance(_as_editor_widget(widget), EditorWidget):
+            return
+        for candidate in self._iter_embedded_drag_forward_widgets(widget):
+            try:
+                candidate.removeEventFilter(self)
+            except Exception:
+                pass
+            if enabled:
+                try:
+                    if candidate.property("_workspace_prev_accept_drops") is None:
+                        candidate.setProperty(
+                            "_workspace_prev_accept_drops",
+                            bool(candidate.acceptDrops()),
+                        )
+                    candidate.setAcceptDrops(True)
+                except Exception:
+                    pass
+                try:
+                    candidate.installEventFilter(self)
+                except Exception:
+                    pass
+                continue
+            try:
+                previous = candidate.property("_workspace_prev_accept_drops")
+                if previous is not None:
+                    candidate.setAcceptDrops(bool(previous))
+                    candidate.setProperty("_workspace_prev_accept_drops", None)
+            except Exception:
+                pass
+
+    def eventFilter(self, watched: object, event: object) -> bool:
+        if isinstance(watched, QWidget):
+            handled = self._handle_embedded_workspace_drag_event(watched, event)
+            if handled is not None:
+                return handled
+        return super().eventFilter(watched, event)
+
+    def _handle_embedded_workspace_drag_event(self, watched: QWidget, event: object) -> bool | None:
+        event_type_getter = getattr(event, "type", None)
+        event_type = event_type_getter() if callable(event_type_getter) else None
+        if event_type not in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.DragLeave,
+            QEvent.Type.Drop,
+        ):
+            return None
+
+        mime_getter = getattr(event, "mimeData", None)
+        if not callable(mime_getter):
+            return None
+        mime = mime_getter()
+        if not isinstance(mime, QMimeData) or not mime.hasFormat(MIME_EDITOR_TAB):
+            return None
+
+        if event_type == QEvent.Type.DragLeave:
+            self._hide_overlay()
+            accept = getattr(event, "accept", None)
+            if callable(accept):
+                accept()
+            return True
+
+        pos_getter = getattr(event, "position", None)
+        if not callable(pos_getter):
+            return None
+        pos = pos_getter()
+        point = pos.toPoint() if hasattr(pos, "toPoint") else QPoint()
+        mapped = watched.mapTo(self, point)
+        zone = self._compute_zone(mapped)
+        self._show_overlay(zone)
+
+        if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            accept_proposed = getattr(event, "acceptProposedAction", None)
+            if callable(accept_proposed):
+                accept_proposed()
+            return True
+
+        editor_id, file_path = _decode_editor_drag_payload(bytes(mime.data(MIME_EDITOR_TAB)))
+        self._hide_overlay()
+        self._handle_drop_with_zone(editor_id, zone, mapped, file_path=file_path)
+        accept_proposed = getattr(event, "acceptProposedAction", None)
+        if callable(accept_proposed):
+            accept_proposed()
+        return True
 
     def _refresh_tab_title(self, ed: QWidget):
         idx = self.indexOf(ed)

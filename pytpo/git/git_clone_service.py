@@ -61,7 +61,7 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
             raise GitCloneError("Invalid repository URL.", kind="invalid_url")
         if not parsed.netloc:
             raise GitCloneError("Invalid repository URL.", kind="invalid_url")
-        clean_path = parsed.path.rstrip("/")
+        clean_path = _normalize_repo_http_path(parsed.netloc, parsed.path)
         folder = _derive_folder_name_from_repo_path(clean_path)
         normalized = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
         return ParsedRepoUrl(normalized_url=normalized, folder_name=folder)
@@ -91,6 +91,25 @@ def _derive_folder_name_from_repo_path(path_text: str) -> str:
     if any(ch in segment for ch in "\\/:*?\"<>|"):
         raise GitCloneError("Invalid repository URL.", kind="invalid_url")
     return segment
+
+
+def _normalize_repo_http_path(netloc: str, path: str) -> str:
+    clean_path = str(path or "").strip().rstrip("/")
+    if not clean_path:
+        raise GitCloneError("Invalid repository URL.", kind="invalid_url")
+
+    host = str(netloc or "").rsplit("@", 1)[-1].split(":", 1)[0].strip().lower()
+    parts = [part for part in clean_path.split("/") if part]
+    if host != "github.com" or len(parts) < 2:
+        return clean_path
+
+    owner = str(parts[0] or "").strip()
+    repo = str(parts[1] or "").strip()
+    if not owner or not repo:
+        raise GitCloneError("Invalid repository URL.", kind="invalid_url")
+    if not repo.lower().endswith(".git"):
+        repo = f"{repo}.git"
+    return f"/{owner}/{repo}"
 
 
 class GitCloneService:

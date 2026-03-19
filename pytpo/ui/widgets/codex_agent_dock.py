@@ -2249,6 +2249,7 @@ class CodexAgentDockWidget(QWidget):
             link_activated=self._on_bubble_link_activated,
             role_label=_ROLE_LABELS.get(role, role.title()),
             item_count=entry.item_count,
+            diff_path_display=self._display_changed_path if role == "diff" else None,
         )
         self._apply_bubble_theme(bubble)
         bubble.sizeHintChanged.connect(self._on_transcript_bubble_size_hint_changed)

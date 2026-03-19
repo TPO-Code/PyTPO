@@ -167,6 +167,7 @@ class WorkspaceController(QObject):
                 notifier(saved_path)
             except Exception:
                 pass
+        self._reload_non_text_views_for_path(saved_path, exclude_widget=ed)
 
     def _external_file_signature(self, path: str) -> tuple[bool, int, int] | None:
         try:
@@ -217,6 +218,66 @@ class WorkspaceController(QObject):
 
             self._handle_external_file_change(path, sig)
 
+    def _open_document_widgets_for_path(self, path: str) -> list[object]:
+        target = self._canonical_path(path)
+        matches: list[object] = []
+        seen_widgets: set[int] = set()
+        for widget in self._iter_open_document_widgets():
+            widget_path = self._document_widget_path(widget)
+            if not widget_path:
+                continue
+            if self._canonical_path(widget_path) != target:
+                continue
+            key = int(id(widget))
+            if key in seen_widgets:
+                continue
+            seen_widgets.add(key)
+            matches.append(widget)
+        return matches
+
+    def _refresh_widget_tab_title(self, widget: object) -> None:
+        for tabs in self.editor_workspace.all_tabs():
+            idx = tabs.indexOf(widget)
+            if idx >= 0:
+                tabs._refresh_tab_title(widget)
+                return
+
+    def _reload_documentless_widget_from_disk(self, widget: object, path: str) -> bool:
+        loader = getattr(widget, "load_file", None)
+        if callable(loader):
+            try:
+                loaded = bool(loader(path))
+            except Exception:
+                return False
+            if not loaded:
+                return False
+        elif callable(getattr(widget, "setPlainText", None)):
+            try:
+                widget.setPlainText(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                return False
+        else:
+            return False
+        self._refresh_widget_tab_title(widget)
+        if self._is_tdoc_related_path(path):
+            self._schedule_tdoc_validation(path, delay_ms=0)
+        return True
+
+    def _reload_non_text_views_for_path(self, path: str, *, exclude_widget: object | None = None) -> None:
+        for widget in self._open_document_widgets_for_path(path):
+            if widget is exclude_widget:
+                continue
+            refresh_preview = getattr(widget, "refresh_preview_from_source", None)
+            if callable(refresh_preview):
+                try:
+                    refresh_preview()
+                except Exception:
+                    pass
+                continue
+            if callable(getattr(widget, "document", None)):
+                continue
+            self._reload_documentless_widget_from_disk(widget, path)
+
     def _handle_external_file_change(self, path: str, sig: tuple[bool, int, int]) -> None:
         is_project_config = self._is_project_config_path(path)
         exists = bool(sig[0])
@@ -226,22 +287,22 @@ class WorkspaceController(QObject):
                 self._queue_project_config_reload(source="project.json removed on disk", honor_open_editors=True)
             return
 
-        widget = self._find_open_document_for_path(path)
-        if widget is None:
+        widgets = self._open_document_widgets_for_path(path)
+        if not widgets:
             if is_project_config:
                 self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
             return
 
-        doc_getter = getattr(widget, "document", None)
-        if not callable(doc_getter):
-            return
-        try:
-            doc = doc_getter()
-            modified = bool(doc.isModified())
-        except Exception:
-            return
-
-        if modified:
+        for widget in widgets:
+            doc_getter = getattr(widget, "document", None)
+            if not callable(doc_getter):
+                continue
+            try:
+                modified = bool(doc_getter().isModified())
+            except Exception:
+                continue
+            if not modified:
+                continue
             previous_conflict = self._external_conflict_signatures.get(path)
             if previous_conflict != sig:
                 self.ide.statusBar().showMessage(
@@ -251,79 +312,90 @@ class WorkspaceController(QObject):
             self._external_conflict_signatures[path] = sig
             return
 
+        disk_text: str | None = None
+        disk_text_loaded = False
         self._external_conflict_signatures.pop(path, None)
-        try:
-            disk_text = Path(path).read_text(encoding="utf-8")
-        except Exception:
-            return
 
-        serialize = getattr(widget, "serialized_text", None)
-        if callable(serialize):
-            try:
-                current_text = str(serialize())
-            except Exception:
-                current_text = ""
-        else:
-            to_plain = getattr(widget, "toPlainText", None)
-            try:
-                current_text = str(to_plain()) if callable(to_plain) else ""
-            except Exception:
-                current_text = ""
+        reloaded_any = False
+        refreshed_doc_keys: set[str] = set()
+        for widget in widgets:
+            doc_getter = getattr(widget, "document", None)
+            if not callable(doc_getter):
+                reloaded_any = self._reload_documentless_widget_from_disk(widget, path) or reloaded_any
+                continue
 
-        if current_text == disk_text:
             try:
-                doc.setModified(False)
+                doc = doc_getter()
             except Exception:
-                pass
+                continue
+
             code_editor = self._editor_from_document_widget(widget)
             if isinstance(code_editor, EditorWidget):
-                self._refresh_editor_title(code_editor)
-            change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
-            notifier = getattr(change_highlights, "notify_file_reloaded", None)
-            if callable(notifier):
-                try:
-                    notifier(path)
-                except Exception:
-                    pass
-            if is_project_config:
-                self._queue_project_config_reload(source="project.json changed on disk", honor_open_editors=True)
-            return
+                doc_key = self._doc_key_for_editor(code_editor)
+                if doc_key in refreshed_doc_keys:
+                    continue
+                refreshed_doc_keys.add(doc_key)
 
-        code_editor = self._editor_from_document_widget(widget)
-        if isinstance(code_editor, EditorWidget):
-            cursor = code_editor.textCursor()
-            v_scroll = code_editor.verticalScrollBar().value()
-            h_scroll = code_editor.horizontalScrollBar().value()
-            code_editor.setPlainText(disk_text)
-            code_editor.document().setModified(False)
-            code_editor.setTextCursor(cursor)
-            code_editor.verticalScrollBar().setValue(v_scroll)
-            code_editor.horizontalScrollBar().setValue(h_scroll)
-            self._refresh_editor_title(code_editor)
-            self._attach_editor_lint_hooks(code_editor)
-            self._request_lint_for_editor(code_editor, reason="open", include_source_if_modified=False)
-        else:
-            loader = getattr(widget, "load_file", None)
-            if callable(loader):
+            if not disk_text_loaded:
                 try:
-                    loaded = bool(loader(path))
+                    disk_text = Path(path).read_text(encoding="utf-8")
                 except Exception:
-                    return
-                if not loaded:
-                    return
-            elif callable(getattr(widget, "setPlainText", None)):
+                    break
+                disk_text_loaded = True
+
+            serialize = getattr(widget, "serialized_text", None)
+            if callable(serialize):
                 try:
-                    widget.setPlainText(disk_text)
+                    current_text = str(serialize())
+                except Exception:
+                    current_text = ""
+            else:
+                to_plain = getattr(widget, "toPlainText", None)
+                try:
+                    current_text = str(to_plain()) if callable(to_plain) else ""
+                except Exception:
+                    current_text = ""
+
+            if current_text == str(disk_text or ""):
+                try:
                     doc.setModified(False)
                 except Exception:
-                    return
-            for tabs in self.editor_workspace.all_tabs():
-                idx = tabs.indexOf(widget)
-                if idx >= 0:
-                    tabs._refresh_tab_title(widget)
-                    break
-            if self._is_tdoc_related_path(path):
-                self._schedule_tdoc_validation(path, delay_ms=0)
+                    pass
+                if isinstance(code_editor, EditorWidget):
+                    self._refresh_editor_title(code_editor)
+                else:
+                    self._refresh_widget_tab_title(widget)
+                reloaded_any = True
+                continue
+
+            if isinstance(code_editor, EditorWidget):
+                cursor = code_editor.textCursor()
+                v_scroll = code_editor.verticalScrollBar().value()
+                h_scroll = code_editor.horizontalScrollBar().value()
+                try:
+                    code_editor.setPlainText(str(disk_text or ""))
+                    code_editor.document().setModified(False)
+                    code_editor.setTextCursor(cursor)
+                    code_editor.verticalScrollBar().setValue(v_scroll)
+                    code_editor.horizontalScrollBar().setValue(h_scroll)
+                except Exception:
+                    continue
+                self._refresh_editor_title(code_editor)
+                self._attach_editor_lint_hooks(code_editor)
+                self._request_lint_for_editor(code_editor, reason="open", include_source_if_modified=False)
+            else:
+                try:
+                    widget.setPlainText(str(disk_text or ""))
+                    doc.setModified(False)
+                except Exception:
+                    continue
+                self._refresh_widget_tab_title(widget)
+                if self._is_tdoc_related_path(path):
+                    self._schedule_tdoc_validation(path, delay_ms=0)
+            reloaded_any = True
+
+        if not reloaded_any:
+            return
         self.ide.statusBar().showMessage(f"Reloaded from disk: {os.path.basename(path)}", 1800)
         change_highlights = getattr(self.ide, "editor_change_highlight_service", None)
         notifier = getattr(change_highlights, "notify_file_reloaded", None)

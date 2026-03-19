@@ -193,15 +193,17 @@ class ExecutionController:
 
         if self._is_cpp_runnable_file(file_path):
             if self._run_cpp_cmake_pipeline(file_path, status_prefix="Running", run_executable=True):
+                self._remember_run_current_file_target()
                 return
             return
 
         if self._is_rust_runnable_file(file_path):
-            self._run_default_rust_context(file_path=file_path, status_prefix="Running")
+            if self._run_default_rust_context(file_path=file_path, status_prefix="Running"):
+                self._remember_run_current_file_target()
             return
 
         if self._is_python_runnable_file(file_path):
-            self._run_python_script_in_terminal(
+            if self._run_python_script_in_terminal(
                 script_path=file_path,
                 interpreter=str(self.resolve_interpreter(file_path) or "").strip(),
                 working_directory=str(self.resolve_run_in(file_path) or os.path.dirname(file_path) or self.project_root),
@@ -209,11 +211,13 @@ class ExecutionController:
                 environment={},
                 session_label=os.path.basename(file_path) or file_path,
                 session_key=file_path,
-            )
+            ):
+                self._remember_run_current_file_target()
             return
 
         self.console_run_manager.run_file(file_path)
         self._show_terminal_dock()
+        self._remember_run_current_file_target()
         self.ide.statusBar().showMessage(f"Running {os.path.basename(file_path)}", 1500)
 
     def has_python_run_configs(self) -> bool:
@@ -381,7 +385,7 @@ class ExecutionController:
             return names[0]
         return ""
 
-    def set_active_python_run_config(self, config_name: str) -> bool:
+    def set_active_python_run_config(self, config_name: str, *, announce: bool = True) -> bool:
         name = str(config_name or "").strip()
         if name:
             names = {item.lower() for item in self.python_run_config_names()}
@@ -393,10 +397,11 @@ class ExecutionController:
         except Exception:
             return False
         self.ide._refresh_runtime_settings_from_manager()
-        if name:
-            self.ide.statusBar().showMessage(f"Active Python run config: {name}", 2200)
-        else:
-            self.ide.statusBar().showMessage("Python run target: current file", 2200)
+        if announce:
+            if name:
+                self.ide.statusBar().showMessage(f"Active Python run config: {name}", 2200)
+            else:
+                self.ide.statusBar().showMessage("Python run target: current file", 2200)
         return True
 
     def set_active_python_debug_config(self, config_name: str) -> bool:
@@ -729,7 +734,7 @@ class ExecutionController:
             return names[0]
         return ""
 
-    def set_active_rust_run_config(self, config_name: str) -> bool:
+    def set_active_rust_run_config(self, config_name: str, *, announce: bool = True) -> bool:
         name = str(config_name or "").strip()
         if name:
             names = {item.lower() for item in self.rust_run_config_names()}
@@ -741,11 +746,18 @@ class ExecutionController:
         except Exception:
             return False
         self.ide._refresh_runtime_settings_from_manager()
-        if name:
-            self.ide.statusBar().showMessage(f"Active Cargo config: {name}", 2200)
-        else:
-            self.ide.statusBar().showMessage("Cargo run target: current context", 2200)
+        if announce:
+            if name:
+                self.ide.statusBar().showMessage(f"Active Cargo config: {name}", 2200)
+            else:
+                self.ide.statusBar().showMessage("Cargo run target: current context", 2200)
         return True
+
+    def _remember_run_current_file_target(self) -> None:
+        if self.active_python_run_config_name():
+            self.set_active_python_run_config("", announce=False)
+        if self.active_rust_run_config_name():
+            self.set_active_rust_run_config("", announce=False)
 
     def run_named_rust_config(self, config_name: str, *, set_active: bool = False) -> bool:
         name = str(config_name or "").strip()
