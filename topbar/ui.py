@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .constants import NOTIFICATIONS_SERVICE, WATCHER_SERVICES
 from .dbus import launch_background_command, load_xlib
+from .focus import X11FocusController
 from .notifications import NotificationCenter, NotificationCenterButton, NotificationServer
 from .system_menu import SystemMenuButton
 from .tray import StatusNotifierTrayArea, StatusNotifierWatcher, X11TraySelectionManager
@@ -63,17 +64,24 @@ class TopBar(QWidget):
         screen = QApplication.primaryScreen()
         width = screen.geometry().width() if screen else 1200
         self.setGeometry(0, 0, width, 35)
+        self.focus_controller = X11FocusController(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 0, 15, 0)
 
         self.workspaces_label = QLabel("Workspaces: 1 2 3")
+        self.workspaces_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.workspaces_label.setStyleSheet("color: #f1f1f1; font-weight: 600;")
         layout.addWidget(self.workspaces_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
         layout.addStretch(1)
 
         tray_area_started = time.perf_counter()
-        self.tray_area = StatusNotifierTrayArea(self.status_notifier_watcher, self.x11_tray_selection_manager, self)
+        self.tray_area = StatusNotifierTrayArea(
+            self.status_notifier_watcher,
+            self.x11_tray_selection_manager,
+            self.focus_controller,
+            self,
+        )
         LOGGER.info("startup timing: StatusNotifierTrayArea initialized in %.1f ms", (time.perf_counter() - tray_area_started) * 1000.0)
         layout.addWidget(self.tray_area, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
@@ -88,6 +96,7 @@ class TopBar(QWidget):
         self.menu_button = SystemMenuButton(
             open_terminal=self._open_terminal,
             open_dock=self._open_dock_panel,
+            focus_controller=self.focus_controller,
             parent=self,
         )
         layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
@@ -110,6 +119,7 @@ class TopBar(QWidget):
 
         self.calendar_popup = CalendarPopup(self)
         self.calendar_popup.calendar.clicked.connect(self.handle_date_selected)
+        self.calendar_popup.popupHidden.connect(self._restore_previous_focus)
         self.update_date_tooltip()
 ## Connections
         self.status_notifier_watcher.itemsChanged.connect(self._refresh_runtime_status)
@@ -161,11 +171,20 @@ class TopBar(QWidget):
         self.calendar_popup.move(x_pos, y_pos)
         self.calendar_popup.show()
 
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._restore_previous_focus()
+
     def changeEvent(self, event):
         # Keep tooltip fresh if the app regains focus after date rollover.
         if event.type() == QEvent.Type.ActivationChange:
             self.update_date_tooltip()
         super().changeEvent(event)
+
+    @Slot()
+    def _restore_previous_focus(self) -> None:
+        self.focus_controller.restore_last_external_window_soon(0)
     
     @Slot()
     def _claim_x11_tray_selection(self) -> None:
@@ -193,7 +212,7 @@ class TopBar(QWidget):
         if status_text != self._last_status_text:
             LOGGER.info(status_text)
             self._last_status_text = status_text
-        self.setToolTip(status_text)
+        self.setToolTip("")
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -53,6 +53,7 @@ from .dbus import (
     unwrap_busctl_json,
     virtual_object_mode_name,
 )
+from .focus import X11FocusController
 
 LOGGER = logging.getLogger("topbar.tray")
 FALLBACK_ITEM_SCAN_RETRY_SECONDS = 15.0
@@ -943,6 +944,7 @@ class StatusNotifierTrayArea(QWidget):
         self,
         watcher: StatusNotifierWatcher | None = None,
         tray_selection_manager: X11TraySelectionManager | None = None,
+        focus_controller: X11FocusController | None = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -954,6 +956,7 @@ class StatusNotifierTrayArea(QWidget):
         self._watcher_props: QDBusInterface | None = None
         self._buttons: dict[str, QToolButton] = {}
         self._fallback_item_cache: dict[str, tuple[str | None, float]] = {}
+        self._focus_controller = focus_controller
 
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self._layout = QHBoxLayout(self)
@@ -986,7 +989,12 @@ class StatusNotifierTrayArea(QWidget):
             button = self._buttons.get(item_id)
             if button is None:
                 LOGGER.debug("Creating tray button for %s via TrayDiscovery", item_id)
-                button = item_map[item_id].create_button(self, icon_size=20, button_size=28)
+                button = item_map[item_id].create_button(
+                    self,
+                    icon_size=20,
+                    button_size=28,
+                    on_qmenu_closed=self._restore_focus_after_tray_menu,
+                )
                 self._buttons[item_id] = button
                 self._layout.insertWidget(index, button)
                 continue
@@ -1007,6 +1015,10 @@ class StatusNotifierTrayArea(QWidget):
         if self._tray_selection_manager is not None:
             status_parts.append(self._tray_selection_manager.status_text())
         self.setToolTip("\n".join(status_parts))
+
+    def _restore_focus_after_tray_menu(self) -> None:
+        if self._focus_controller is not None:
+            self._focus_controller.restore_last_external_window_soon(0)
 
     def _remote_registered_items(self) -> list[str]:
         if self._watcher_props is None or not self._watcher_props.isValid():

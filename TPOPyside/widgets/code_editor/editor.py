@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins as py_builtins
+from bisect import bisect_right
 from collections import OrderedDict
 import concurrent.futures
 import inspect
@@ -284,6 +285,8 @@ class CodeEditor(QPlainTextEdit):
         self._fold_selection_adjusting = False
         self._fold_repair_immediate_pending = False
         self._fold_gutter_width = 14
+        self._line_number_area_width_cache: int | None = None
+        self._scroll_contents_active = False
         self.use_tabs = False
         self.indent_width = 4  # spaces per indent level
         self.smart_paste_reindent_enabled = True
@@ -608,6 +611,7 @@ class CodeEditor(QPlainTextEdit):
 
     def setFont(self, font) -> None:
         super().setFont(font)
+        self._line_number_area_width_cache = None
         if hasattr(self, "lineNumberArea") and isinstance(self.lineNumberArea, QWidget):
             self.lineNumberArea.setFont(self.font())
             self.lineNumberArea.update()
@@ -790,6 +794,7 @@ class CodeEditor(QPlainTextEdit):
             doc.markContentsDirty(0, max(0, doc.characterCount()))
         except Exception:
             pass
+        self._update_folded_scrollbar_range()
         self.viewport().update()
         self.lineNumberArea.update()
         self._apply_viewport_margins()
@@ -1048,6 +1053,29 @@ class CodeEditor(QPlainTextEdit):
             top = bottom
             bottom = top + self.blockBoundingRect(block).height()
         return -1
+
+    def _update_folded_scrollbar_range(self) -> None:
+        bar = self.verticalScrollBar()
+        if bar is None:
+            return
+
+        if self._folded_starts:
+            visible_blocks = 0
+            block = self.document().firstBlock()
+            while block.isValid():
+                if block.isVisible():
+                    visible_blocks += 1
+                block = block.next()
+            page_step = max(1, int(bar.pageStep()))
+            target_max = max(0, visible_blocks - page_step)
+        else:
+            page_step = max(1, int(bar.pageStep()))
+            target_max = max(0, int(self.blockCount()) - page_step)
+
+        if int(bar.maximum()) != target_max:
+            bar.setMaximum(target_max)
+        if int(bar.value()) > target_max:
+            bar.setValue(target_max)
 
     def update_completion_ui_settings(self, completion_cfg: dict):
         cfg = completion_cfg if isinstance(completion_cfg, dict) else {}
@@ -1642,17 +1670,21 @@ class CodeEditor(QPlainTextEdit):
     def _apply_viewport_margins(self):
         top_margin = self._search_top_margin()
         right_margin = self.overviewMarkerAreaWidth()
-        self.setViewportMargins(self.lineNumberAreaWidth(), top_margin, right_margin, 0)
+        line_margin = self.lineNumberAreaWidth()
+        margins = (int(line_margin), int(top_margin), int(right_margin), 0)
+        if getattr(self, "_applied_viewport_margins", None) != margins:
+            self.setViewportMargins(*margins)
+            self._applied_viewport_margins = margins
         if hasattr(self, "lineNumberArea") and isinstance(self.lineNumberArea, QWidget):
             cr = self.contentsRect()
-            self.lineNumberArea.setGeometry(
-                QRect(
-                    cr.left(),
-                    cr.top() + top_margin,
-                    self.lineNumberAreaWidth(),
-                    max(0, cr.height() - top_margin),
-                )
+            target = QRect(
+                cr.left(),
+                cr.top() + top_margin,
+                int(line_margin),
+                max(0, cr.height() - top_margin),
             )
+            if self.lineNumberArea.geometry() != target:
+                self.lineNumberArea.setGeometry(target)
         if hasattr(self, "overviewMarkerArea") and isinstance(self.overviewMarkerArea, QWidget):
             self._position_overview_marker_area()
 
@@ -1664,14 +1696,11 @@ class CodeEditor(QPlainTextEdit):
             self.overviewMarkerArea.hide()
             return
         vp = self.viewport().geometry()
-        self.overviewMarkerArea.setGeometry(
-            QRect(
-                vp.right() + self._theme_overview_gap(),
-                vp.top(),
-                width,
-                max(0, vp.height()),
-            )
-        )
+        x = vp.right() + self._theme_overview_gap()
+        y = vp.top()
+        height = max(0, vp.height())
+        target = QRect(x, y, width, height)
+        self.overviewMarkerArea.setGeometry(target)
         self.overviewMarkerArea.show()
         self.overviewMarkerArea.raise_()
 
@@ -2319,6 +2348,10 @@ class CodeEditor(QPlainTextEdit):
             return 10
 
     def updateLineNumberAreaWidth(self, _):
+        width = int(self.lineNumberAreaWidth())
+        if self._line_number_area_width_cache == width:
+            return
+        self._line_number_area_width_cache = width
         self._apply_viewport_margins()
         self._refresh_overview_marker_area()
 
@@ -2351,9 +2384,15 @@ class CodeEditor(QPlainTextEdit):
         QTimer.singleShot(0, self._apply_viewport_margins)
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
-        super().scrollContentsBy(dx, dy)
-        if dx != 0 or dy != 0:
-            self.viewport().update()
+        if self._scroll_contents_active:
+            return
+        self._scroll_contents_active = True
+        try:
+            super().scrollContentsBy(dx, dy)
+            if dx != 0 or dy != 0:
+                self.viewport().update()
+        finally:
+            self._scroll_contents_active = False
 
     def paintEvent(self, event):
         background_painter = QPainter(self.viewport())
@@ -2495,12 +2534,13 @@ class CodeEditor(QPlainTextEdit):
         content_h = int(self.overviewMarkerArea.height())
         if content_h <= 0:
             return
-        total_lines = max(1, int(self.blockCount()))
+        visible_lines = self._overview_visible_line_numbers()
+        total_lines = max(1, len(visible_lines))
         marker_w = max(2, int(self.overviewMarkerArea.width()) - 2)
         x = 1
         self._paint_overview_line_set(
             painter,
-            self._overview_change_region_lines_for_layer("uncommitted"),
+            self._overview_display_lines(self._overview_change_region_lines_for_layer("uncommitted"), visible_lines),
             color=QColor(self._change_region_uncommitted_color),
             x=x,
             width=marker_w,
@@ -2509,7 +2549,7 @@ class CodeEditor(QPlainTextEdit):
         )
         self._paint_overview_line_set(
             painter,
-            self._overview_change_region_lines_for_layer("dirty"),
+            self._overview_display_lines(self._overview_change_region_lines_for_layer("dirty"), visible_lines),
             color=QColor(self._change_region_dirty_color),
             x=x,
             width=marker_w,
@@ -2518,7 +2558,7 @@ class CodeEditor(QPlainTextEdit):
         )
         self._paint_overview_line_set(
             painter,
-            self._overview_occurrence_lines,
+            self._overview_display_lines(self._overview_occurrence_lines, visible_lines),
             color=QColor(str(self._overview_cfg.get("occurrence_color", "#66A86A"))),
             x=x,
             width=marker_w,
@@ -2527,7 +2567,7 @@ class CodeEditor(QPlainTextEdit):
         )
         self._paint_overview_line_set(
             painter,
-            self._overview_search_lines,
+            self._overview_display_lines(self._overview_search_lines, visible_lines),
             color=QColor(str(self._overview_cfg.get("search_color", "#4A8FD8"))),
             x=x,
             width=marker_w,
@@ -2536,7 +2576,7 @@ class CodeEditor(QPlainTextEdit):
         )
         self._paint_overview_line_set(
             painter,
-            self._overview_active_search_lines,
+            self._overview_display_lines(self._overview_active_search_lines, visible_lines),
             color=QColor(str(self._overview_cfg.get("search_active_color", "#D6A853"))),
             x=x,
             width=marker_w,
@@ -2549,7 +2589,7 @@ class CodeEditor(QPlainTextEdit):
                 continue
             self._paint_overview_line_set(
                 painter,
-                lines,
+                self._overview_display_lines(lines, visible_lines),
                 color=self._lint_underline_color(severity),
                 x=x,
                 width=marker_w,
@@ -2589,9 +2629,11 @@ class CodeEditor(QPlainTextEdit):
         h = max(1, int(self.overviewMarkerArea.height()))
         y = int(event.position().y()) if hasattr(event, "position") else int(event.pos().y())
         y = max(0, min(y, h - 1))
-        line_count = max(1, int(self.blockCount()))
+        visible_lines = self._overview_visible_line_numbers()
+        line_count = max(1, len(visible_lines))
         ratio = float(y) / float(max(1, h - 1))
-        line_no = int(round(ratio * float(max(0, line_count - 1)))) + 1
+        visible_index = int(round(ratio * float(max(0, line_count - 1))))
+        line_no = int(visible_lines[max(0, min(visible_index, line_count - 1))])
         block = self.document().findBlockByNumber(max(0, line_no - 1))
         if not block.isValid():
             event.ignore()
@@ -2610,6 +2652,33 @@ class CodeEditor(QPlainTextEdit):
                 continue
             out.add(max(1, int(line)))
         return out
+
+    def _overview_visible_line_numbers(self) -> list[int]:
+        visible_lines: list[int] = []
+        block = self.document().firstBlock()
+        while block.isValid():
+            if block.isVisible():
+                visible_lines.append(int(block.blockNumber()) + 1)
+            block = block.next()
+        if not visible_lines:
+            return [1]
+        return visible_lines
+
+    def _overview_display_lines(self, lines: set[int], visible_lines: list[int]) -> set[int]:
+        if not lines or not visible_lines:
+            return set()
+
+        visible_lookup = {line_no: idx + 1 for idx, line_no in enumerate(visible_lines)}
+        max_line = max(1, int(self.blockCount()))
+        display_lines: set[int] = set()
+        for raw_line in lines:
+            line_no = max(1, min(int(raw_line), max_line))
+            visible_index = visible_lookup.get(line_no)
+            if visible_index is None:
+                visible_pos = max(0, bisect_right(visible_lines, line_no) - 1)
+                visible_index = visible_pos + 1
+            display_lines.add(int(visible_index))
+        return display_lines
 
     def _refresh_overview_marker_area(self) -> None:
         if hasattr(self, "overviewMarkerArea") and isinstance(self.overviewMarkerArea, QWidget):

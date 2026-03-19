@@ -30,6 +30,17 @@ class SoundSnapshot:
     available: bool
     volume_percent: int | None
     is_muted: bool | None
+    streams: tuple["AudioStreamInfo", ...] = ()
+
+
+@dataclass(frozen=True)
+class AudioStreamInfo:
+    stream_id: int
+    app_name: str
+    title: str
+    icon_name: str
+    volume_percent: int | None
+    is_muted: bool | None
 
 
 @dataclass(frozen=True)
@@ -137,7 +148,140 @@ class VolumeService:
     def available(self) -> bool:
         return any((self._wpctl, self._pactl, self._amixer))
 
+    def has_pactl(self) -> bool:
+        return bool(self._pactl)
+
+    def pactl_path(self) -> str:
+        return str(self._pactl or "")
+
+    @staticmethod
+    def _parse_first_percent(text: str) -> int | None:
+        match = re.search(r"(\d+)%", text or "")
+        if not match:
+            return None
+        return max(0, min(100, int(match.group(1))))
+
+    @staticmethod
+    def _split_pactl_sections(text: str, header_prefix: str) -> list[list[str]]:
+        sections: list[list[str]] = []
+        current: list[str] = []
+        for raw_line in (text or "").splitlines():
+            line = raw_line.rstrip()
+            if line.startswith(header_prefix):
+                if current:
+                    sections.append(current)
+                current = [line]
+                continue
+            if current:
+                current.append(line)
+        if current:
+            sections.append(current)
+        return sections
+
+    @staticmethod
+    def _unquote_pactl_value(value: str) -> str:
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            return value[1:-1]
+        return value
+
+    @classmethod
+    def _extract_percent_values_from_json(cls, value) -> list[int]:
+        values: list[int] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"value_percent", "volume_percent"}:
+                    percent = cls._parse_first_percent(str(child))
+                    if percent is not None:
+                        values.append(percent)
+                values.extend(cls._extract_percent_values_from_json(child))
+            return values
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                values.extend(cls._extract_percent_values_from_json(child))
+            return values
+        percent = cls._parse_first_percent(str(value))
+        if percent is not None:
+            values.append(percent)
+        return values
+
+    @classmethod
+    def _volume_percent_from_json(cls, value) -> int | None:
+        percents = cls._extract_percent_values_from_json(value)
+        if not percents:
+            return None
+        return max(0, min(100, round(sum(percents) / len(percents))))
+
+    @staticmethod
+    def _bool_from_json(value) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        lowered = str(value or "").strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+        return None
+
+    def default_sink_name(self) -> str | None:
+        if not self._pactl:
+            return None
+        code, out, _ = run_command([self._pactl, "get-default-sink"])
+        if code != 0:
+            return None
+        return out.strip() or None
+
+    def _default_sink_state_from_pactl(self) -> tuple[int | None, bool | None]:
+        if not self._pactl:
+            return None, None
+
+        default_name = self.default_sink_name()
+        if not default_name:
+            return None, None
+
+        code, out, _ = run_command([self._pactl, "--format=json", "list", "sinks"], timeout=3.0)
+        if code == 0 and out:
+            try:
+                payload = json.loads(out)
+            except Exception:
+                payload = None
+            if isinstance(payload, list):
+                for item in payload:
+                    if str(item.get("name") or "").strip() != default_name:
+                        continue
+                    percent = self._volume_percent_from_json(item.get("volume"))
+                    muted = self._bool_from_json(item.get("mute"))
+                    return percent, muted
+
+        code, out, _ = run_command([self._pactl, "list", "sinks"], timeout=3.0)
+        if code != 0:
+            return None, None
+
+        for section in self._split_pactl_sections(out, "Sink #"):
+            section_name = next(
+                (line.split(":", 1)[1].strip() for line in section if line.strip().startswith("Name:")),
+                "",
+            )
+            if section_name != default_name:
+                continue
+
+            percent: int | None = None
+            muted: bool | None = None
+            for line in section:
+                stripped = line.strip()
+                if stripped.startswith("Volume:") and percent is None:
+                    percent = self._parse_first_percent(stripped)
+                elif stripped.startswith("Mute:"):
+                    muted = stripped.split(":", 1)[1].strip().lower() == "yes"
+            return percent, muted
+
+        return None, None
+
     def volume_percent(self) -> int | None:
+        percent, _muted = self._default_sink_state_from_pactl()
+        if percent is not None:
+            return percent
+
         if self._wpctl:
             code, out, _ = run_command([self._wpctl, "get-volume", "@DEFAULT_AUDIO_SINK@"])
             if code == 0:
@@ -162,6 +306,10 @@ class VolumeService:
         return None
 
     def is_muted(self) -> bool | None:
+        _percent, muted = self._default_sink_state_from_pactl()
+        if muted is not None:
+            return muted
+
         if self._wpctl:
             code, out, _ = run_command([self._wpctl, "get-volume", "@DEFAULT_AUDIO_SINK@"])
             if code == 0:
@@ -210,6 +358,128 @@ class VolumeService:
             return code == 0
 
         return False
+
+    def application_streams(self) -> list[AudioStreamInfo]:
+        if not self._pactl:
+            return []
+
+        code, out, _ = run_command([self._pactl, "list", "sink-inputs"], timeout=3.0)
+        if code == 0 and out:
+            streams: list[AudioStreamInfo] = []
+            for section in self._split_pactl_sections(out, "Sink Input #"):
+                header = section[0].strip()
+                match = re.match(r"Sink Input #(\d+)", header)
+                if not match:
+                    continue
+
+                stream_id = int(match.group(1))
+                muted: bool | None = None
+                volume_percent: int | None = None
+                props: dict[str, str] = {}
+
+                for line in section[1:]:
+                    stripped = line.strip()
+                    if stripped.startswith("Mute:"):
+                        muted = stripped.split(":", 1)[1].strip().lower() == "yes"
+                        continue
+                    if stripped.startswith("Volume:") and volume_percent is None:
+                        volume_percent = self._parse_first_percent(stripped)
+                        continue
+                    if "=" not in stripped:
+                        continue
+                    key, value = stripped.split("=", 1)
+                    props[key.strip()] = self._unquote_pactl_value(value.strip())
+
+                app_name = (
+                    props.get("application.name")
+                    or props.get("media.name")
+                    or props.get("application.process.binary")
+                    or f"Stream {stream_id}"
+                )
+                title = props.get("media.title") or props.get("media.name") or ""
+                if title == app_name:
+                    title = ""
+                icon_name = props.get("application.icon_name") or props.get("media.icon_name") or ""
+
+                streams.append(
+                    AudioStreamInfo(
+                        stream_id=stream_id,
+                        app_name=app_name.strip(),
+                        title=title.strip(),
+                        icon_name=icon_name.strip(),
+                        volume_percent=volume_percent,
+                        is_muted=muted,
+                    )
+                )
+
+            streams.sort(key=lambda item: (item.app_name.lower(), item.title.lower(), item.stream_id))
+            return streams
+
+        code, out, _ = run_command([self._pactl, "--format=json", "list", "sink-inputs"], timeout=3.0)
+        if code != 0 or not out:
+            return []
+
+        try:
+            payload = json.loads(out)
+        except Exception:
+            return []
+
+        if not isinstance(payload, list):
+            return []
+
+        streams: list[AudioStreamInfo] = []
+        for item in payload:
+            stream_id = int(item.get("index", -1))
+            if stream_id < 0:
+                continue
+            props = item.get("properties")
+            if not isinstance(props, dict):
+                props = {}
+
+            app_name = (
+                str(props.get("application.name") or "")
+                or str(props.get("media.name") or "")
+                or str(props.get("application.process.binary") or "")
+                or f"Stream {stream_id}"
+            )
+            title = str(props.get("media.title") or props.get("media.name") or "").strip()
+            if title == app_name:
+                title = ""
+            icon_name = str(props.get("application.icon_name") or props.get("media.icon_name") or "").strip()
+            streams.append(
+                AudioStreamInfo(
+                    stream_id=stream_id,
+                    app_name=app_name.strip(),
+                    title=title,
+                    icon_name=icon_name,
+                    volume_percent=self._volume_percent_from_json(item.get("volume")),
+                    is_muted=self._bool_from_json(item.get("mute")),
+                )
+            )
+
+        streams.sort(key=lambda item: (item.app_name.lower(), item.title.lower(), item.stream_id))
+        return streams
+
+    def set_stream_volume_percent(self, stream_id: int, percent: int) -> bool:
+        if not self._pactl or stream_id < 0:
+            return False
+        clamped = max(0, min(100, int(percent)))
+        code, _, _ = run_command([self._pactl, "set-sink-input-volume", str(stream_id), f"{clamped}%"])
+        return code == 0
+
+    def toggle_stream_mute(self, stream_id: int) -> bool:
+        if not self._pactl or stream_id < 0:
+            return False
+        code, _, _ = run_command([self._pactl, "set-sink-input-mute", str(stream_id), "toggle"])
+        return code == 0
+
+    def sound_snapshot(self) -> SoundSnapshot:
+        return SoundSnapshot(
+            available=self.available(),
+            volume_percent=self.volume_percent(),
+            is_muted=self.is_muted(),
+            streams=tuple(self.application_streams()),
+        )
 
     def open_settings(self) -> bool:
         for cmd in (["pavucontrol"], ["gnome-control-center", "sound"], ["gnome-control-center"]):
@@ -299,6 +569,17 @@ class MprisService:
         )
         return out if code == 0 else ""
 
+    @staticmethod
+    def _parse_gdbus_bool(output: str) -> bool | None:
+        lowered = str(output or "").strip().lower()
+        if not lowered:
+            return None
+        if re.search(r"\btrue\b", lowered):
+            return True
+        if re.search(r"\bfalse\b", lowered):
+            return False
+        return None
+
     def get_capabilities(self, player: str) -> dict[str, bool]:
         if not self._gdbus:
             return {
@@ -321,7 +602,7 @@ class MprisService:
         capabilities: dict[str, bool] = {}
         for key, prop in props.items():
             out = self._gdbus_get(player, "org.mpris.MediaPlayer2.Player", prop)
-            capabilities[key] = "<true>" in out.lower()
+            capabilities[key] = bool(self._parse_gdbus_bool(out))
         return capabilities
 
     def get_identity(self, player: str) -> str:
@@ -489,11 +770,7 @@ def collect_system_menu_snapshot() -> SystemMenuSnapshot:
         bluetooth_adapter_present=bluetooth_adapter_present,
         bluetooth_powered=bluetooth_powered,
     )
-    sound = SoundSnapshot(
-        available=volume.available(),
-        volume_percent=volume.volume_percent(),
-        is_muted=volume.is_muted(),
-    )
+    sound = volume.sound_snapshot()
     media = MediaSnapshot(
         playerctl_missing=mpris.playerctl_missing,
         gdbus_missing=mpris.gdbus_missing,

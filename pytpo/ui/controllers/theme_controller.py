@@ -56,6 +56,43 @@ from pytpo.ui.theme_runtime import (
     set_settings_color_swatch_size,
 )
 
+_GLOBAL_SCROLLBAR_BUTTONLESS_QSS = """
+QScrollBar:vertical {
+    margin-top: 0px;
+    margin-bottom: 0px;
+}
+
+QScrollBar:horizontal {
+    margin-left: 0px;
+    margin-right: 0px;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+    margin: 0px;
+    border: none;
+    background: transparent;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0px;
+    margin: 0px;
+    border: none;
+    background: transparent;
+}
+
+QScrollBar::up-arrow:vertical,
+QScrollBar::down-arrow:vertical,
+QScrollBar::left-arrow:horizontal,
+QScrollBar::right-arrow:horizontal {
+    width: 0px;
+    height: 0px;
+    background: transparent;
+}
+"""
+
 
 class ThemeController:
     def __init__(self, ide):
@@ -136,6 +173,18 @@ class ThemeController:
 
     def _read_legacy_stylesheet(self, theme_path: Path) -> str:
         return theme_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _append_global_stylesheet_overrides(stylesheet: str) -> str:
+        base = str(stylesheet or "").rstrip()
+        override = _GLOBAL_SCROLLBAR_BUTTONLESS_QSS.strip()
+        if not override:
+            return base
+        if override in base:
+            return base
+        if not base:
+            return override
+        return f"{base}\n\n{override}"
 
     def _apply_stylesheet_with_fallback(self, *, theme_path: Path) -> tuple[str, dict[str, Any] | None]:
         try:
@@ -380,13 +429,12 @@ class ThemeController:
 
         resolved = self._resolve_theme_path(self.ide.theme_name)
         if resolved is None:
-            app.setStyleSheet(self._fallback_stylesheet())
+            app.setStyleSheet(self._append_global_stylesheet_overrides(self._fallback_stylesheet()))
             return
 
         resolved_name, theme_path = resolved
         stylesheet, tokens = self._apply_stylesheet_with_fallback(theme_path=theme_path)
-
-        app.setStyleSheet(stylesheet)
+        app.setStyleSheet(self._append_global_stylesheet_overrides(stylesheet))
         swatch_width, swatch_height = self._settings_color_swatch_size(tokens)
         swatch_width, swatch_height = set_settings_color_swatch_size(
             width=swatch_width,

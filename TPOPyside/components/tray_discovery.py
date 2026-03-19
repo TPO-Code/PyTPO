@@ -5,7 +5,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QByteArray, QPoint, QSize, Qt
 from PySide6.QtDBus import (
@@ -835,10 +835,20 @@ class CompletedTrayItem:
         menu.clear()
         self._populate_qmenu(menu, node)
 
-    def show_best_menu_at_global(self, global_pos: QPoint, parent: QWidget | None = None) -> tuple[bool, str]:
+    def show_best_menu_at_global(
+        self,
+        global_pos: QPoint,
+        parent: QWidget | None = None,
+        *,
+        on_qmenu_closed: Callable[[], None] | None = None,
+    ) -> tuple[bool, str]:
         menu, error = self.build_qmenu(parent)
         if menu is not None and not menu.isEmpty():
-            menu.exec(global_pos)
+            try:
+                menu.exec(global_pos)
+            finally:
+                if on_qmenu_closed is not None:
+                    on_qmenu_closed()
             return True, ""
 
         ok, native_error = self.show_native_menu_at_global(global_pos)
@@ -852,8 +862,16 @@ class CompletedTrayItem:
         parent: QWidget | None = None,
         icon_size: int = 22,
         button_size: int = 30,
+        *,
+        on_qmenu_closed: Callable[[], None] | None = None,
     ) -> QToolButton:
-        return CompletedTrayItemButton(self, parent=parent, icon_size=icon_size, button_size=button_size)
+        return CompletedTrayItemButton(
+            self,
+            parent=parent,
+            icon_size=icon_size,
+            button_size=button_size,
+            on_qmenu_closed=on_qmenu_closed,
+        )
 
 
 class CompletedTrayItemButton(QToolButton):
@@ -863,9 +881,11 @@ class CompletedTrayItemButton(QToolButton):
         parent: QWidget | None = None,
         icon_size: int = 22,
         button_size: int = 30,
+        on_qmenu_closed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.item = item
+        self._on_qmenu_closed = on_qmenu_closed
 
         self.setAutoRaise(True)
         self.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -904,17 +924,17 @@ class CompletedTrayItemButton(QToolButton):
         global_pos = event.globalPosition().toPoint()
 
         if event.button() == Qt.RightButton:
-            self.item.show_best_menu_at_global(global_pos, self)
+            self.item.show_best_menu_at_global(global_pos, self, on_qmenu_closed=self._on_qmenu_closed)
             event.accept()
             return
 
         if event.button() == Qt.LeftButton:
             if self.item.item_is_menu:
-                self.item.show_best_menu_at_global(global_pos, self)
+                self.item.show_best_menu_at_global(global_pos, self, on_qmenu_closed=self._on_qmenu_closed)
             else:
                 ok, _ = self.item.activate_at_global(global_pos)
                 if not ok:
-                    self.item.show_best_menu_at_global(global_pos, self)
+                    self.item.show_best_menu_at_global(global_pos, self, on_qmenu_closed=self._on_qmenu_closed)
             event.accept()
             return
 

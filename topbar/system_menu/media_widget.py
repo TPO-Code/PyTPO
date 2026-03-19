@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import time
 from typing import Callable
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QTimer, Qt, Slot
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,21 +44,33 @@ class MediaPlayerCard(QFrame):
         self._player_name = ""
         self._volume_syncing = False
         self._position_syncing = False
+        self._volume_dragging = False
+        self._position_dragging = False
         self._last_nonzero_volume = 0.5
         self._position_seconds: float | None = None
         self._length_seconds: float | None = None
+        self._track_id = ""
         self._loop_status: str = "None"
         self._shuffle: bool | None = None
+        self._position_pending_seconds: float | None = None
+        self._position_pending_track_id = ""
+        self._position_hold_until = 0.0
+        self._volume_pending_percent: int | None = None
+        self._volume_hold_until = 0.0
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh_callback)
 
         self.setObjectName("mediaPlayerCard")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(6)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(4)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(8)
+        header_row.setSpacing(6)
         root.addLayout(header_row)
 
         self.identity_label = QLabel("Player", self)
@@ -84,54 +98,52 @@ class MediaPlayerCard(QFrame):
 
         self.transport_row = QHBoxLayout()
         self.transport_row.setContentsMargins(0, 0, 0, 0)
-        self.transport_row.setSpacing(6)
+        self.transport_row.setSpacing(4)
         root.addLayout(self.transport_row)
 
-        self.prev_button = QPushButton("⏮", self)
-        self.play_button = QPushButton("▶", self)
-        self.pause_button = QPushButton("⏸", self)
-        self.play_pause_button = QPushButton("⏯", self)
-        self.stop_button = QPushButton("⏹", self)
-        self.next_button = QPushButton("⏭", self)
+        self.prev_button = QToolButton(self)
+        self.seek_back_button = QToolButton(self)
+        self.play_pause_button = QToolButton(self)
+        self.seek_forward_button = QToolButton(self)
+        self.stop_button = QToolButton(self)
+        self.next_button = QToolButton(self)
+
+        self.prev_button.setText("⏮")
+        self.seek_back_button.setText("⏪")
+        self.play_pause_button.setText("⏯")
+        self.seek_forward_button.setText("⏩")
+        self.stop_button.setText("⏹")
+        self.next_button.setText("⏭")
+        self.prev_button.setToolTip("Previous")
+        self.seek_back_button.setToolTip("Back 10 seconds")
+        self.play_pause_button.setToolTip("Play/Pause")
+        self.seek_forward_button.setToolTip("Forward 10 seconds")
+        self.stop_button.setToolTip("Stop")
+        self.next_button.setToolTip("Next")
 
         self._transport_buttons = [
             self.prev_button,
-            self.play_button,
-            self.pause_button,
+            self.seek_back_button,
             self.play_pause_button,
+            self.seek_forward_button,
             self.stop_button,
             self.next_button,
         ]
         for button in self._transport_buttons:
-            button.setMinimumHeight(28)
+            button.setAutoRaise(True)
+            button.setFixedSize(26, 24)
             self.transport_row.addWidget(button)
 
         self.prev_button.clicked.connect(lambda: self._invoke("previous"))
-        self.play_button.clicked.connect(lambda: self._invoke("play"))
-        self.pause_button.clicked.connect(lambda: self._invoke("pause"))
+        self.seek_back_button.clicked.connect(lambda: self._seek_relative(-self.SEEK_STEP_SECONDS))
         self.play_pause_button.clicked.connect(lambda: self._invoke("play-pause"))
+        self.seek_forward_button.clicked.connect(lambda: self._seek_relative(self.SEEK_STEP_SECONDS))
         self.stop_button.clicked.connect(lambda: self._invoke("stop"))
         self.next_button.clicked.connect(lambda: self._invoke("next"))
 
-        self.seek_row = QHBoxLayout()
-        self.seek_row.setContentsMargins(0, 0, 0, 0)
-        self.seek_row.setSpacing(6)
-        root.addLayout(self.seek_row)
-
-        self.seek_back_button = QPushButton("−10s", self)
-        self.seek_forward_button = QPushButton("+10s", self)
-        self.seek_back_button.setMinimumHeight(28)
-        self.seek_forward_button.setMinimumHeight(28)
-        self.seek_row.addWidget(self.seek_back_button)
-        self.seek_row.addWidget(self.seek_forward_button)
-        self.seek_row.addStretch(1)
-
-        self.seek_back_button.clicked.connect(lambda: self._seek_relative(-self.SEEK_STEP_SECONDS))
-        self.seek_forward_button.clicked.connect(lambda: self._seek_relative(self.SEEK_STEP_SECONDS))
-
         self.position_row = QHBoxLayout()
         self.position_row.setContentsMargins(0, 0, 0, 0)
-        self.position_row.setSpacing(6)
+        self.position_row.setSpacing(4)
         root.addLayout(self.position_row)
 
         self.position_label = QLabel("0:00", self)
@@ -153,13 +165,13 @@ class MediaPlayerCard(QFrame):
 
         self.options_row = QHBoxLayout()
         self.options_row.setContentsMargins(0, 0, 0, 0)
-        self.options_row.setSpacing(6)
+        self.options_row.setSpacing(4)
         root.addLayout(self.options_row)
 
         self.loop_button = QPushButton("Loop: Off", self)
         self.shuffle_button = QPushButton("Shuffle: Off", self)
-        self.loop_button.setMinimumHeight(28)
-        self.shuffle_button.setMinimumHeight(28)
+        self.loop_button.setMinimumHeight(24)
+        self.shuffle_button.setMinimumHeight(24)
         self.options_row.addWidget(self.loop_button)
         self.options_row.addWidget(self.shuffle_button)
         self.options_row.addStretch(1)
@@ -169,7 +181,7 @@ class MediaPlayerCard(QFrame):
 
         self.volume_row = QHBoxLayout()
         self.volume_row.setContentsMargins(0, 0, 0, 0)
-        self.volume_row.setSpacing(6)
+        self.volume_row.setSpacing(4)
         root.addLayout(self.volume_row)
 
         self.volume_label = QLabel("Vol", self)
@@ -185,10 +197,11 @@ class MediaPlayerCard(QFrame):
         self.volume_row.addWidget(self.volume_value_label)
 
         self.mute_button = QPushButton("Mute", self)
-        self.mute_button.setMinimumHeight(28)
+        self.mute_button.setMinimumHeight(24)
         self.volume_row.addWidget(self.mute_button)
 
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.volume_slider.sliderPressed.connect(self._on_volume_slider_pressed)
         self.volume_slider.sliderReleased.connect(self._commit_volume)
         self.mute_button.clicked.connect(self._toggle_mute)
 
@@ -196,8 +209,14 @@ class MediaPlayerCard(QFrame):
         self._player_name = info.name
         self._position_seconds = info.position_seconds
         self._length_seconds = info.length_seconds
+        previous_track_id = self._track_id
+        self._track_id = info.track_id or ""
         self._loop_status = info.loop_status or "None"
         self._shuffle = info.shuffle
+
+        if previous_track_id and self._track_id != previous_track_id:
+            self._position_pending_seconds = None
+            self._position_pending_track_id = ""
 
         identity = (info.identity or info.name or "Player").strip()
         status = (info.status or "").strip()
@@ -224,42 +243,35 @@ class MediaPlayerCard(QFrame):
             self.meta_label.clear()
             self.meta_label.hide()
 
-        can_control = bool(info.can_control)
+        control_fallback = bool(info.track_id or title or artist or album) and status.lower() in {"playing", "paused"}
+        can_control = bool(info.can_control) or control_fallback
+        transport_fallback = can_control and control_fallback
 
-        show_prev = can_control and bool(info.can_go_previous)
-        show_next = can_control and bool(info.can_go_next)
-        show_play = can_control and bool(info.can_play)
-        show_pause = can_control and bool(info.can_pause)
-        show_stop = can_control and (show_play or show_pause or status.lower() in {"playing", "paused", "stopped"})
+        show_prev = can_control and (bool(info.can_go_previous) or transport_fallback)
+        show_next = can_control and (bool(info.can_go_next) or transport_fallback)
+        show_play_pause = can_control and (
+            bool(info.can_play)
+            or bool(info.can_pause)
+            or status.lower() in {"playing", "paused", "stopped"}
+        )
+        show_stop = False
 
-        self.prev_button.setVisible(show_prev)
-        self.next_button.setVisible(show_next)
-        self.stop_button.setVisible(show_stop)
-
-        if show_play and show_pause:
-            self.play_button.hide()
-            self.pause_button.hide()
-            self.play_pause_button.show()
-            if status.lower() == "playing":
-                self.play_pause_button.setText("⏸")
-                self.play_pause_button.setToolTip("Pause")
-            else:
-                self.play_pause_button.setText("▶")
-                self.play_pause_button.setToolTip("Play")
-        else:
-            self.play_pause_button.hide()
-            self.play_button.setVisible(show_play)
-            self.pause_button.setVisible(show_pause)
-            self.play_button.setToolTip("Play")
-            self.pause_button.setToolTip("Pause")
-
-        any_transport_visible = any(button.isVisible() for button in self._transport_buttons)
+        can_seek = can_control and (bool(info.can_seek) or bool(info.length_seconds and info.length_seconds > 0))
+        any_transport_visible = show_prev or show_next or show_play_pause or can_seek or show_stop
         self._set_layout_visible(self.transport_row, any_transport_visible)
 
-        can_seek = can_control and bool(info.can_seek)
+        self.prev_button.setVisible(show_prev)
         self.seek_back_button.setVisible(can_seek)
+        self.next_button.setVisible(show_next)
         self.seek_forward_button.setVisible(can_seek)
-        self._set_layout_visible(self.seek_row, can_seek)
+        self.stop_button.setVisible(show_stop)
+        self.play_pause_button.setVisible(show_play_pause)
+        if status.lower() == "playing":
+            self.play_pause_button.setText("⏸")
+            self.play_pause_button.setToolTip("Pause")
+        else:
+            self.play_pause_button.setText("▶")
+            self.play_pause_button.setToolTip("Play")
 
         self._position_syncing = True
         try:
@@ -270,14 +282,18 @@ class MediaPlayerCard(QFrame):
                 and info.length_seconds > 0
             )
             if has_position:
-                ratio = max(0.0, min(1.0, info.position_seconds / info.length_seconds))
-                slider_value = int(round(ratio * self.POSITION_SLIDER_MAX))
                 self.position_slider.setEnabled(True)
-                self.position_slider.setValue(slider_value)
-                self.position_label.setText(self._format_time(info.position_seconds))
                 self.duration_label.setText(self._format_time(info.length_seconds))
                 self._set_layout_visible(self.position_row, True)
+                if not self._position_dragging:
+                    display_seconds = self._display_position_seconds(info)
+                    ratio = max(0.0, min(1.0, display_seconds / info.length_seconds))
+                    slider_value = int(round(ratio * self.POSITION_SLIDER_MAX))
+                    self.position_slider.setValue(slider_value)
+                    self.position_label.setText(self._format_time(display_seconds))
             else:
+                self._position_pending_seconds = None
+                self._position_pending_track_id = ""
                 self.position_slider.setEnabled(False)
                 self.position_slider.setValue(0)
                 self.position_label.setText("0:00")
@@ -287,20 +303,20 @@ class MediaPlayerCard(QFrame):
             self._position_syncing = False
 
         show_loop = can_control
+        show_shuffle = can_control and info.shuffle is not None
+        self._set_layout_visible(self.options_row, show_loop or show_shuffle)
         self.loop_button.setVisible(show_loop)
         if show_loop:
             self.loop_button.setText(f"Loop: {self._loop_label(self._loop_status)}")
 
-        show_shuffle = can_control and info.shuffle is not None
         self.shuffle_button.setVisible(show_shuffle)
         if show_shuffle:
             self.shuffle_button.setText("Shuffle: On" if info.shuffle else "Shuffle: Off")
 
-        self._set_layout_visible(self.options_row, show_loop or show_shuffle)
-
         self._volume_syncing = True
         try:
             if info.volume is None:
+                self._volume_pending_percent = None
                 self.volume_slider.setEnabled(False)
                 self.mute_button.setEnabled(False)
                 self.volume_slider.setValue(0)
@@ -309,14 +325,16 @@ class MediaPlayerCard(QFrame):
                 self._set_layout_visible(self.volume_row, False)
             else:
                 percent = max(0, min(100, int(round(info.volume * 100.0))))
+                display_percent = self._display_volume_percent(percent)
                 self.volume_slider.setEnabled(True)
                 self.mute_button.setEnabled(True)
-                self.volume_slider.setValue(percent)
-                self.volume_value_label.setText(f"{percent}%")
-                self.mute_button.setText("Unmute" if percent == 0 else "Mute")
+                if not self._volume_dragging:
+                    self.volume_slider.setValue(display_percent)
+                self.volume_value_label.setText(f"{display_percent}%")
+                self.mute_button.setText("Unmute" if display_percent == 0 else "Mute")
                 self._set_layout_visible(self.volume_row, True)
-                if percent > 0:
-                    self._last_nonzero_volume = max(0.01, info.volume)
+                if display_percent > 0:
+                    self._last_nonzero_volume = max(0.01, display_percent / 100.0)
         finally:
             self._volume_syncing = False
 
@@ -345,21 +363,94 @@ class MediaPlayerCard(QFrame):
             return "Playlist"
         return "Off"
 
+    def _schedule_refresh(self, delay_ms: int) -> None:
+        self._refresh_timer.start(max(0, int(delay_ms)))
+
+    def _display_position_seconds(self, info: PlayerInfo) -> float:
+        if self._position_dragging and self._length_seconds and self._length_seconds > 0:
+            ratio = max(0.0, min(1.0, self.position_slider.value() / self.POSITION_SLIDER_MAX))
+            return ratio * self._length_seconds
+
+        pending_seconds = self._active_pending_position_seconds(info)
+        if pending_seconds is not None:
+            return pending_seconds
+        return max(0.0, float(info.position_seconds or 0.0))
+
+    def _active_pending_position_seconds(self, info: PlayerInfo) -> float | None:
+        pending_seconds = self._position_pending_seconds
+        if pending_seconds is None:
+            return None
+        if time.monotonic() >= self._position_hold_until:
+            self._position_pending_seconds = None
+            self._position_pending_track_id = ""
+            return None
+        if self._position_pending_track_id and info.track_id and info.track_id != self._position_pending_track_id:
+            self._position_pending_seconds = None
+            self._position_pending_track_id = ""
+            return None
+        if info.position_seconds is not None and abs(info.position_seconds - pending_seconds) <= 1.0:
+            self._position_pending_seconds = None
+            self._position_pending_track_id = ""
+            return None
+        return pending_seconds
+
+    def _set_local_position_preview(self, seconds: float) -> None:
+        self._position_seconds = seconds
+        if self._length_seconds is None or self._length_seconds <= 0:
+            return
+        ratio = max(0.0, min(1.0, seconds / self._length_seconds))
+        slider_value = int(round(ratio * self.POSITION_SLIDER_MAX))
+        self._position_syncing = True
+        try:
+            self.position_slider.setValue(slider_value)
+            self.position_label.setText(self._format_time(seconds))
+        finally:
+            self._position_syncing = False
+
+    def _display_volume_percent(self, remote_percent: int) -> int:
+        if self._volume_dragging:
+            return max(0, min(100, int(self.volume_slider.value())))
+
+        pending_percent = self._volume_pending_percent
+        if pending_percent is None:
+            return remote_percent
+        if time.monotonic() >= self._volume_hold_until:
+            self._volume_pending_percent = None
+            return remote_percent
+        if abs(remote_percent - pending_percent) <= 2:
+            self._volume_pending_percent = None
+            return remote_percent
+        return pending_percent
+
     def _invoke(self, command: str) -> None:
         if not self._player_name:
             return
         self._send_command(self._player_name, command)
-        self._refresh_callback()
+        self._schedule_refresh(180)
 
     def _seek_relative(self, delta_seconds: float) -> None:
         if not self._player_name:
             return
-        self._seek_relative_cb(self._player_name, delta_seconds)
-        self._refresh_callback()
+        if self._seek_relative_cb(self._player_name, delta_seconds):
+            base_seconds = self._position_pending_seconds
+            if base_seconds is None:
+                base_seconds = self._position_seconds
+            if base_seconds is not None:
+                target_seconds = max(0.0, base_seconds + float(delta_seconds))
+                if self._length_seconds is not None and self._length_seconds > 0:
+                    target_seconds = min(target_seconds, self._length_seconds)
+                self._position_pending_seconds = target_seconds
+                self._position_pending_track_id = self._track_id
+                self._position_hold_until = time.monotonic() + 1.2
+                self._set_local_position_preview(target_seconds)
+            self._schedule_refresh(320)
+            return
+        self._schedule_refresh(0)
 
     def _on_position_slider_pressed(self) -> None:
         # Prevent bind() updates from fighting the user's drag.
         self._position_syncing = False
+        self._position_dragging = True
 
     @Slot(int)
     def _on_position_changed(self, value: int) -> None:
@@ -371,6 +462,7 @@ class MediaPlayerCard(QFrame):
 
     @Slot()
     def _commit_position(self) -> None:
+        self._position_dragging = False
         if (
             not self._player_name
             or not self.position_slider.isEnabled()
@@ -381,8 +473,14 @@ class MediaPlayerCard(QFrame):
 
         ratio = max(0.0, min(1.0, self.position_slider.value() / self.POSITION_SLIDER_MAX))
         target_seconds = ratio * self._length_seconds
-        self._set_position_cb(self._player_name, target_seconds)
-        self._refresh_callback()
+        if self._set_position_cb(self._player_name, target_seconds):
+            self._position_pending_seconds = target_seconds
+            self._position_pending_track_id = self._track_id
+            self._position_hold_until = time.monotonic() + 1.2
+            self._set_local_position_preview(target_seconds)
+            self._schedule_refresh(320)
+            return
+        self._schedule_refresh(0)
 
     @Slot()
     def _cycle_loop(self) -> None:
@@ -399,7 +497,7 @@ class MediaPlayerCard(QFrame):
 
         if self._set_loop_status_cb(self._player_name, next_value):
             self._loop_status = next_value
-        self._refresh_callback()
+        self._schedule_refresh(180)
 
     @Slot()
     def _toggle_shuffle(self) -> None:
@@ -409,7 +507,7 @@ class MediaPlayerCard(QFrame):
         next_value = not self._shuffle
         if self._set_shuffle_cb(self._player_name, next_value):
             self._shuffle = next_value
-        self._refresh_callback()
+        self._schedule_refresh(180)
 
     @Slot(int)
     def _on_volume_changed(self, value: int) -> None:
@@ -420,14 +518,23 @@ class MediaPlayerCard(QFrame):
         self.mute_button.setText("Unmute" if clamped == 0 else "Mute")
 
     @Slot()
+    def _on_volume_slider_pressed(self) -> None:
+        self._volume_dragging = True
+
+    @Slot()
     def _commit_volume(self) -> None:
+        self._volume_dragging = False
         if self._volume_syncing or not self._player_name or not self.volume_slider.isEnabled():
             return
         value = max(0, min(100, int(self.volume_slider.value())))
         if value > 0:
             self._last_nonzero_volume = value / 100.0
-        self._set_volume(self._player_name, value / 100.0)
-        self._refresh_callback()
+        if self._set_volume(self._player_name, value / 100.0):
+            self._volume_pending_percent = value
+            self._volume_hold_until = time.monotonic() + 0.9
+            self._schedule_refresh(240)
+            return
+        self._schedule_refresh(0)
 
     @Slot()
     def _toggle_mute(self) -> None:
@@ -441,5 +548,18 @@ class MediaPlayerCard(QFrame):
         else:
             target = self._last_nonzero_volume if self._last_nonzero_volume > 0 else 0.5
 
-        self._set_volume(self._player_name, target)
-        self._refresh_callback()
+        if self._set_volume(self._player_name, target):
+            target_percent = max(0, min(100, int(round(target * 100.0))))
+            self._volume_pending_percent = target_percent
+            self._volume_hold_until = time.monotonic() + 0.9
+            self._volume_dragging = False
+            self._volume_syncing = True
+            try:
+                self.volume_slider.setValue(target_percent)
+                self.volume_value_label.setText(f"{target_percent}%")
+                self.mute_button.setText("Unmute" if target_percent == 0 else "Mute")
+            finally:
+                self._volume_syncing = False
+            self._schedule_refresh(240)
+            return
+        self._schedule_refresh(0)

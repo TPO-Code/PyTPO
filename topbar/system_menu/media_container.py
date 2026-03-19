@@ -32,7 +32,7 @@ class MediaContainer(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
         self.media_title = QLabel("Media", self)
         self.media_title.setObjectName("systemMenuSectionTitle")
@@ -57,7 +57,7 @@ class MediaContainer(QWidget):
         self.media_cards_host = QWidget(self)
         self.media_cards_layout = QVBoxLayout(self.media_cards_host)
         self.media_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.media_cards_layout.setSpacing(8)
+        self.media_cards_layout.setSpacing(6)
         self.media_cards_layout.addStretch(1)
         self.media_scroll.setWidget(self.media_cards_host)
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import math
 import sys
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QCursor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,11 +19,13 @@ from PySide6.QtWidgets import (
 
 from pytpo.services.asset_paths import preferred_shared_asset_path
 
+from topbar.focus import X11FocusController
+
 from .connectivity import ConnectivitySection
 from .footer import FooterSection
 from .media_container import MediaContainer
-from .sound import SoundSection
-from .service import SystemMenuSnapshot, VolumeService, WifiService, collect_system_menu_snapshot
+from .sound import SoundSection, shared_sound_backend
+from .service import SoundSnapshot, SystemMenuSnapshot, VolumeService, WifiService, collect_system_menu_snapshot
 
 _WIFI_ICON_NAMES = {
     0: "internet_0.svg",
@@ -70,8 +73,8 @@ class SystemMenuContent(QWidget):
         self._live_refresh_timer.timeout.connect(self.refresh_all)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(14)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
 
         self.connectivity = ConnectivitySection(self, request_refresh=self.refresh_all)
         root.addWidget(self.connectivity)
@@ -175,15 +178,23 @@ class SystemMenuContent(QWidget):
 
 
 class TopBarSystemMenuPanel(QFrame):
+    PROXIMITY_CLOSE_DISTANCE = 62
+
     def __init__(
         self,
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        focus_controller: X11FocusController | None = None,
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self._anchor: QWidget | None = None
+        self._tracking_app_events = False
+        self._focus_controller = focus_controller
+        self._proximity_timer = QTimer(self)
+        self._proximity_timer.setInterval(120)
+        self._proximity_timer.timeout.connect(self._hide_if_cursor_far)
 
         self.setObjectName("topbarSystemMenuPanel")
         self.setFixedWidth(400)
@@ -210,7 +221,6 @@ class TopBarSystemMenuPanel(QFrame):
         self.reposition(anchor)
         self.show()
         self.raise_()
-        self.refresh_all()
 
     def reposition(self, anchor: QWidget | None = None) -> None:
         anchor_widget = anchor or self._anchor
@@ -237,16 +247,122 @@ class TopBarSystemMenuPanel(QFrame):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._install_app_event_filter()
+        self._proximity_timer.start()
         self.content.start_live_refresh()
         self.refresh_all()
 
     def hideEvent(self, event) -> None:
+        self._remove_app_event_filter()
+        self._proximity_timer.stop()
         self.content.stop_live_refresh()
         super().hideEvent(event)
+        if self._focus_controller is not None:
+            self._focus_controller.restore_last_external_window_soon(0)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.WindowDeactivate:
+            QTimer.singleShot(0, self._hide_if_focus_lost)
+        return super().event(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: QWidget, event) -> bool:
+        if not self.isVisible():
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress:
+            global_pos_getter = getattr(event, "globalPosition", None)
+            if callable(global_pos_getter):
+                global_pos = global_pos_getter().toPoint()
+                if self._should_hide_for_global_pos(global_pos):
+                    self.hide()
+        return super().eventFilter(watched, event)
 
     def _on_content_snapshot_applied(self) -> None:
         if self.isVisible() and self._anchor is not None:
             self.reposition(self._anchor)
+
+    def _install_app_event_filter(self) -> None:
+        if self._tracking_app_events:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.installEventFilter(self)
+        self._tracking_app_events = True
+
+    def _remove_app_event_filter(self) -> None:
+        if not self._tracking_app_events:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._tracking_app_events = False
+
+    def _should_hide_for_global_pos(self, global_pos: QPoint) -> bool:
+        if self.frameGeometry().contains(global_pos):
+            return False
+        if self._anchor is not None and self._widget_global_rect(self._anchor).contains(global_pos):
+            return False
+        popup = QApplication.activePopupWidget()
+        if popup is not None and self._owns_widget(popup) and popup.frameGeometry().contains(global_pos):
+            return False
+        return True
+
+    def _hide_if_focus_lost(self) -> None:
+        if not self.isVisible():
+            return
+        popup = QApplication.activePopupWidget()
+        if popup is not None and self._owns_widget(popup):
+            return
+        active_window = QApplication.activeWindow()
+        if active_window is self or self._owns_widget(active_window):
+            return
+        self.hide()
+
+    def _hide_if_cursor_far(self) -> None:
+        if not self.isVisible():
+            return
+        popup = QApplication.activePopupWidget()
+        if popup is not None and self._owns_widget(popup):
+            return
+        cursor_pos = QCursor.pos()
+        if self._distance_to_rect(cursor_pos, self.frameGeometry()) <= self.PROXIMITY_CLOSE_DISTANCE:
+            return
+        if self._anchor is not None:
+            anchor_rect = self._widget_global_rect(self._anchor)
+            if self._distance_to_rect(cursor_pos, anchor_rect) <= self.PROXIMITY_CLOSE_DISTANCE:
+                return
+        self.hide()
+
+    @staticmethod
+    def _widget_global_rect(widget: QWidget) -> QRect:
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    @staticmethod
+    def _distance_to_rect(point: QPoint, rect: QRect) -> float:
+        dx = 0 if rect.left() <= point.x() <= rect.right() else min(
+            abs(point.x() - rect.left()),
+            abs(point.x() - rect.right()),
+        )
+        dy = 0 if rect.top() <= point.y() <= rect.bottom() else min(
+            abs(point.y() - rect.top()),
+            abs(point.y() - rect.bottom()),
+        )
+        return math.hypot(dx, dy)
+
+    def _owns_widget(self, widget: QWidget | None) -> bool:
+        current = widget
+        while current is not None:
+            if current is self:
+                return True
+            current = current.parentWidget()
+        return False
 
     def _apply_style(self) -> None:
         pass
@@ -258,17 +374,26 @@ class SystemMenuButton(QToolButton):
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        focus_controller: X11FocusController | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._panel = TopBarSystemMenuPanel(
             open_terminal=open_terminal,
             open_dock=open_dock,
+            focus_controller=focus_controller,
             parent=self.window(),
         )
 
-        self._wifi_service = WifiService()
-        self._volume_service = VolumeService()
+        self._sound_snapshot: SoundSnapshot | None = None
+        self._sound_backend = shared_sound_backend()
+        self._status_future: concurrent.futures.Future | None = None
+        self._status_refresh_requested_while_busy = False
+        self._status_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="topbar-status")
+        self._current_wifi_ssid: str | None = None
+        self._current_wifi_signal: int | None = None
+        self._current_volume_percent: int | None = None
+        self._current_is_muted: bool | None = None
 
         self.setAutoRaise(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -284,11 +409,18 @@ class SystemMenuButton(QToolButton):
 
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(2000)
-        self._update_timer.timeout.connect(self._update_label)
+        self._update_timer.timeout.connect(self._schedule_status_refresh)
         self._update_timer.start()
+        self._status_pump = QTimer(self)
+        self._status_pump.setInterval(40)
+        self._status_pump.timeout.connect(self._drain_status_future)
+        if self._sound_backend is not None:
+            self._sound_backend.snapshotChanged.connect(self._on_sound_snapshot_changed)
+        self.destroyed.connect(lambda *_args: self._shutdown_status_refresh())
 
-        # Perform the first label setup immediately upon initialization
+        # Render immediately with cached values, then refresh off the UI thread.
         self._update_label()
+        self._schedule_status_refresh()
 
     def eventFilter(self, watched: QWidget, event) -> bool:
         if self._panel.isVisible() and event.type() in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
@@ -299,13 +431,68 @@ class SystemMenuButton(QToolButton):
     def _toggle_panel(self) -> None:
         self._panel.toggle(self)
 
+    @staticmethod
+    def _fetch_button_status() -> tuple[str | None, int | None, int | None, bool | None]:
+        wifi = WifiService()
+        current_network = next((net for net in wifi.visible_networks() if net.in_use), None)
+        volume = VolumeService()
+        return (
+            current_network.ssid if current_network is not None else None,
+            current_network.signal if current_network is not None else None,
+            volume.volume_percent(),
+            volume.is_muted(),
+        )
+
+    def _schedule_status_refresh(self) -> None:
+        if self._status_future is not None:
+            self._status_refresh_requested_while_busy = True
+            return
+        try:
+            self._status_future = self._status_executor.submit(self._fetch_button_status)
+        except Exception:
+            self._status_future = None
+            return
+        if not self._status_pump.isActive():
+            self._status_pump.start()
+
+    def _drain_status_future(self) -> None:
+        future = self._status_future
+        if future is None:
+            self._status_pump.stop()
+            return
+        if not future.done():
+            return
+
+        self._status_future = None
+        self._status_pump.stop()
+        try:
+            wifi_ssid, wifi_signal, volume_percent, is_muted = future.result()
+        except Exception:
+            wifi_ssid, wifi_signal, volume_percent, is_muted = None, None, None, None
+
+        self._current_wifi_ssid = wifi_ssid
+        self._current_wifi_signal = wifi_signal
+        if self._sound_snapshot is None:
+            self._current_volume_percent = volume_percent
+            self._current_is_muted = is_muted
+        self._update_label()
+
+        if self._status_refresh_requested_while_busy:
+            self._status_refresh_requested_while_busy = False
+            self._schedule_status_refresh()
+
     @Slot()
     def _update_label(self) -> None:
-        current_network = next((net for net in self._wifi_service.visible_networks() if net.in_use), None)
-        wifi_level = self._wifi_icon_level(current_network.signal if current_network is not None else None)
+        wifi_signal = self._current_wifi_signal
+        wifi_level = self._wifi_icon_level(wifi_signal)
 
-        vol_pct = self._volume_service.volume_percent()
-        is_muted = self._volume_service.is_muted()
+        sound_snapshot = self._sound_snapshot
+        if sound_snapshot is not None:
+            vol_pct = sound_snapshot.volume_percent
+            is_muted = sound_snapshot.is_muted
+        else:
+            vol_pct = self._current_volume_percent
+            is_muted = self._current_is_muted
         volume_icon_name = self._volume_icon_name(vol_pct, is_muted)
 
         vol_str = f"{vol_pct}%" if vol_pct is not None else "--%"
@@ -316,11 +503,37 @@ class SystemMenuButton(QToolButton):
         self.setText("")
 
         wifi_tooltip = (
-            f"Wi-Fi: {current_network.ssid} ({current_network.signal}%)"
-            if current_network is not None
+            f"Wi-Fi: {self._current_wifi_ssid} ({wifi_signal}%)"
+            if self._current_wifi_ssid and wifi_signal is not None
             else "Wi-Fi: disconnected"
         )
         self.setToolTip(f"{wifi_tooltip}\nVolume: {vol_str}")
+
+    @Slot(object)
+    def _on_sound_snapshot_changed(self, snapshot: object) -> None:
+        if isinstance(snapshot, SoundSnapshot):
+            self._sound_snapshot = snapshot
+            self._current_volume_percent = snapshot.volume_percent
+            self._current_is_muted = snapshot.is_muted
+            self._update_label()
+
+    def _shutdown_status_refresh(self) -> None:
+        self._update_timer.stop()
+        self._status_pump.stop()
+        future = self._status_future
+        self._status_future = None
+        if future is not None:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        try:
+            self._status_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            try:
+                self._status_executor.shutdown(wait=False)
+            except Exception:
+                pass
 
     def _build_status_icon(self, wifi_level: int, volume_icon_name: str) -> QIcon:
         canvas_size = self.iconSize()

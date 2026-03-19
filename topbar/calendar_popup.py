@@ -1,8 +1,10 @@
-from PySide6.QtCore import QDate, QDateTime, QTimer, QTime, Qt
+from PySide6.QtCore import QDate, QDateTime, QTimer, QTime, Qt, Signal
 from PySide6.QtGui import QFont, QColor, QTextCharFormat
 from PySide6.QtWidgets import QCalendarWidget, QWidget, QVBoxLayout
 
 class CalendarPopup(QWidget):
+    popupHidden = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -124,3 +126,7 @@ class CalendarPopup(QWidget):
             msecs_until_midnight = 1000
 
         self._midnight_timer.start(msecs_until_midnight)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.popupHidden.emit()
