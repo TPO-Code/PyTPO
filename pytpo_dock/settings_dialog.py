@@ -59,6 +59,23 @@ def _normalize_color(value: Any, default: str) -> str:
     return color.name(QColor.HexRgb)
 
 
+def _normalize_choice(value: Any, default: str, *, allowed: set[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in allowed:
+        return default
+    return normalized
+
+
+def _normalize_image_path(value: Any, default: str) -> str:
+    image_path = str(value or "").strip()
+    if not image_path:
+        return ""
+    try:
+        return str(Path(image_path).expanduser())
+    except Exception:
+        return default
+
+
 @dataclass(slots=True)
 class DockVisualSettings:
     instance_indicator_mode: str = "dots"
@@ -81,35 +98,55 @@ class DockVisualSettings:
     border_width: int = 1
     border_radius: int = 18
     border_style: str = "solid"
+    preview_background_color: str = "#141414eb"
+    preview_background_image_path: str = ""
+    preview_background_image_opacity: int = 100
+    preview_background_image_fit: str = "cover"
+    preview_background_tint: str = "#00000000"
+    preview_border_color: str = "#ffffff23"
+    preview_border_width: int = 1
+    preview_border_radius: int = 14
+    preview_border_style: str = "solid"
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any] | None = None) -> "DockVisualSettings":
         raw = dict(values or {})
         defaults = cls()
-        indicator_mode = str(raw.get("instance_indicator_mode", defaults.instance_indicator_mode) or "").strip().lower()
-        if indicator_mode not in {"dots", "numbers"}:
-            indicator_mode = defaults.instance_indicator_mode
-
-        visibility_animation_mode = str(
-            raw.get("visibility_animation_mode", defaults.visibility_animation_mode) or ""
-        ).strip().lower()
-        if visibility_animation_mode not in {"fade", "slide"}:
-            visibility_animation_mode = defaults.visibility_animation_mode
-
-        image_fit = str(raw.get("background_image_fit", defaults.background_image_fit) or "").strip().lower()
-        if image_fit not in {"cover", "contain", "stretch", "tile", "center"}:
-            image_fit = defaults.background_image_fit
-
-        border_style = str(raw.get("border_style", defaults.border_style) or "").strip().lower()
-        if border_style not in {"solid", "dashed", "dotted"}:
-            border_style = defaults.border_style
-
-        image_path = str(raw.get("background_image_path", defaults.background_image_path) or "").strip()
-        if image_path:
-            try:
-                image_path = str(Path(image_path).expanduser())
-            except Exception:
-                image_path = defaults.background_image_path
+        indicator_mode = _normalize_choice(
+            raw.get("instance_indicator_mode", defaults.instance_indicator_mode),
+            defaults.instance_indicator_mode,
+            allowed={"dots", "numbers"},
+        )
+        visibility_animation_mode = _normalize_choice(
+            raw.get("visibility_animation_mode", defaults.visibility_animation_mode),
+            defaults.visibility_animation_mode,
+            allowed={"fade", "slide"},
+        )
+        image_fit = _normalize_choice(
+            raw.get("background_image_fit", defaults.background_image_fit),
+            defaults.background_image_fit,
+            allowed={"cover", "contain", "stretch", "tile", "center"},
+        )
+        border_style = _normalize_choice(
+            raw.get("border_style", defaults.border_style),
+            defaults.border_style,
+            allowed={"solid", "dashed", "dotted"},
+        )
+        preview_image_fit = _normalize_choice(
+            raw.get("preview_background_image_fit", defaults.preview_background_image_fit),
+            defaults.preview_background_image_fit,
+            allowed={"cover", "contain", "stretch", "tile", "center"},
+        )
+        preview_border_style = _normalize_choice(
+            raw.get("preview_border_style", defaults.preview_border_style),
+            defaults.preview_border_style,
+            allowed={"solid", "dashed", "dotted"},
+        )
+        image_path = _normalize_image_path(raw.get("background_image_path", defaults.background_image_path), defaults.background_image_path)
+        preview_image_path = _normalize_image_path(
+            raw.get("preview_background_image_path", defaults.preview_background_image_path),
+            defaults.preview_background_image_path,
+        )
 
         return cls(
             instance_indicator_mode=indicator_mode,
@@ -160,6 +197,39 @@ class DockVisualSettings:
             border_width=_clamp_int(raw.get("border_width"), defaults.border_width, minimum=0, maximum=12),
             border_radius=_clamp_int(raw.get("border_radius"), defaults.border_radius, minimum=0, maximum=48),
             border_style=border_style,
+            preview_background_color=_normalize_color(
+                raw.get("preview_background_color"),
+                defaults.preview_background_color,
+            ),
+            preview_background_image_path=preview_image_path,
+            preview_background_image_opacity=_clamp_int(
+                raw.get("preview_background_image_opacity"),
+                defaults.preview_background_image_opacity,
+                minimum=0,
+                maximum=100,
+            ),
+            preview_background_image_fit=preview_image_fit,
+            preview_background_tint=_normalize_color(
+                raw.get("preview_background_tint"),
+                defaults.preview_background_tint,
+            ),
+            preview_border_color=_normalize_color(
+                raw.get("preview_border_color"),
+                defaults.preview_border_color,
+            ),
+            preview_border_width=_clamp_int(
+                raw.get("preview_border_width"),
+                defaults.preview_border_width,
+                minimum=0,
+                maximum=12,
+            ),
+            preview_border_radius=_clamp_int(
+                raw.get("preview_border_radius"),
+                defaults.preview_border_radius,
+                minimum=0,
+                maximum=48,
+            ),
+            preview_border_style=preview_border_style,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -184,6 +254,15 @@ class DockVisualSettings:
             "border_width": self.border_width,
             "border_radius": self.border_radius,
             "border_style": self.border_style,
+            "preview_background_color": self.preview_background_color,
+            "preview_background_image_path": self.preview_background_image_path,
+            "preview_background_image_opacity": self.preview_background_image_opacity,
+            "preview_background_image_fit": self.preview_background_image_fit,
+            "preview_background_tint": self.preview_background_tint,
+            "preview_border_color": self.preview_border_color,
+            "preview_border_width": self.preview_border_width,
+            "preview_border_radius": self.preview_border_radius,
+            "preview_border_style": self.preview_border_style,
         }
 
 
@@ -594,6 +673,112 @@ def _build_schema() -> SettingsSchema:
                             ),
                         ],
                     ),
+                    SchemaSection(
+                        title="Preview Panel Background",
+                        description="Style the window preview panel with its own color, image, fit mode, and tint.",
+                        fields=[
+                            SchemaField(
+                                id="preview_background_color",
+                                key="preview_background_color",
+                                label="Preview background color",
+                                type="color",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_background_color,
+                            ),
+                            SchemaField(
+                                id="preview_background_image_path",
+                                key="preview_background_image_path",
+                                label="Preview background image",
+                                type="path_file",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_background_image_path,
+                                browse_provider_id="dock_preview_background_image",
+                                browse_caption="Select Preview Background Image",
+                                browse_file_filter=_IMAGE_FILTER,
+                                browse_button_text="Choose Image",
+                            ),
+                            SchemaField(
+                                id="preview_background_image_fit",
+                                key="preview_background_image_fit",
+                                label="Preview image fit",
+                                type="combo",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_background_image_fit,
+                                options=[
+                                    {"label": "Cover", "value": "cover"},
+                                    {"label": "Contain", "value": "contain"},
+                                    {"label": "Stretch", "value": "stretch"},
+                                    {"label": "Tile", "value": "tile"},
+                                    {"label": "Center", "value": "center"},
+                                ],
+                            ),
+                            SchemaField(
+                                id="preview_background_image_opacity",
+                                key="preview_background_image_opacity",
+                                label="Preview image opacity",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_background_image_opacity,
+                                min=0,
+                                max=100,
+                            ),
+                            SchemaField(
+                                id="preview_background_tint",
+                                key="preview_background_tint",
+                                label="Preview tint",
+                                type="color",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_background_tint,
+                            ),
+                        ],
+                    ),
+                    SchemaSection(
+                        title="Preview Panel Border",
+                        description="Tune the preview panel border color, thickness, corner radius, and line style.",
+                        fields=[
+                            SchemaField(
+                                id="preview_border_color",
+                                key="preview_border_color",
+                                label="Preview border color",
+                                type="color",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_border_color,
+                            ),
+                            SchemaField(
+                                id="preview_border_width",
+                                key="preview_border_width",
+                                label="Preview border width",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_border_width,
+                                min=0,
+                                max=12,
+                            ),
+                            SchemaField(
+                                id="preview_border_radius",
+                                key="preview_border_radius",
+                                label="Preview corner radius",
+                                type="spin",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_border_radius,
+                                min=0,
+                                max=48,
+                            ),
+                            SchemaField(
+                                id="preview_border_style",
+                                key="preview_border_style",
+                                label="Preview border style",
+                                type="combo",
+                                scope=DOCK_SCOPE,
+                                default=defaults.preview_border_style,
+                                options=[
+                                    {"label": "Solid", "value": "solid"},
+                                    {"label": "Dashed", "value": "dashed"},
+                                    {"label": "Dotted", "value": "dotted"},
+                                ],
+                            ),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -617,7 +802,10 @@ class DockSettingsDialog(SchemaSettingsDialog):
             tree_expanded_paths_key=DOCK_SETTINGS_TREE_EXPANDED_PATHS_KEY,
             tree_expanded_paths_scope=DOCK_SCOPE,
             field_factories={"dock_autostart_checkbox": _build_autostart_checkbox_binding},
-            browse_providers={"dock_background_image": self._browse_background_image},
+            browse_providers={
+                "dock_background_image": self._browse_background_image,
+                "dock_preview_background_image": self._browse_background_image,
+            },
         )
 
     def _browse_background_image(self, field: SchemaField, _dialog: SchemaSettingsDialog, current_text: str) -> str | None:

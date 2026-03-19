@@ -7,6 +7,34 @@ def ensure_xlib_available() -> None:
     _load_xlib()
 
 
+def pointer_buttons_pressed_via_xlib() -> bool | None:
+    try:
+        X, display = _load_xlib()
+        x_display = display.Display()
+    except Exception:
+        return None
+
+    try:
+        root = x_display.screen().root
+        pointer = root.query_pointer()
+        mask = int(getattr(pointer, "mask", 0) or 0)
+        button_mask = (
+            int(X.Button1Mask)
+            | int(X.Button2Mask)
+            | int(X.Button3Mask)
+            | int(X.Button4Mask)
+            | int(X.Button5Mask)
+        )
+        return bool(mask & button_mask)
+    except Exception:
+        return None
+    finally:
+        try:
+            x_display.close()
+        except Exception:
+            pass
+
+
 def list_windows_via_xlib() -> list[dict[str, Any]]:
     X, display = _load_xlib()
     try:

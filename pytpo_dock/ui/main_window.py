@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
 import subprocess
+import time
 
 from PySide6.QtCore import QEasingCurve, QAbstractAnimation, QEvent, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCursor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QGuiApplication, QPixmap
@@ -24,7 +26,7 @@ from ..settings_dialog import DockSettingsDialog, load_dock_settings
 from ..storage_paths import dock_pinned_apps_path, migrate_legacy_dock_storage
 from ..window_matching import finalize_window_records, match_threshold, runtime_group_path, score_window_match
 from ..x11_dock_window import X11DockWindowManager
-from ..xlib_window_source import list_windows_via_xlib
+from ..xlib_window_source import list_windows_via_xlib, pointer_buttons_pressed_via_xlib
 from ..x11_window_preview import X11WindowPreviewCapturer
 from .widgets import DockContainerFrame, DockItem, WindowPreview, apply_widget_opacity, build_settings_icon
 
@@ -57,7 +59,15 @@ class CustomDock(QWidget):
         self.pending_preview_item = None
         self.preview_host = QWidget(self)
         self.preview_host.setFixedSize(0, 0)
-        self.preview_popup = WindowPreview(self.preview_host)
+        preview_window_flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+        if platform_name == "xcb":
+            preview_window_flags |= Qt.X11BypassWindowManagerHint
+        self.preview_popup = WindowPreview()
+        self.preview_popup.setWindowFlags(preview_window_flags)
+        self.preview_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.preview_popup.setAttribute(Qt.WA_TranslucentBackground, True)
+        if platform_name == "xcb":
+            self.preview_popup.setAttribute(Qt.WA_X11DoNotAcceptFocus, True)
         self.preview_popup.hide()
         self.preview_popup_opacity = QGraphicsOpacityEffect(self.preview_popup)
         self.preview_popup_opacity.setOpacity(1.0)
@@ -65,7 +75,7 @@ class CustomDock(QWidget):
         self.preview_popup_fade = QPropertyAnimation(self.preview_popup_opacity, b"opacity", self)
         self.preview_popup_fade.setDuration(300)
         self.preview_popup_fade.setEasingCurve(QEasingCurve.InOutCubic)
-        self.preview_popup.hover_changed.connect(self.handle_preview_hover_changed)
+        self.preview_popup.interaction_started.connect(self.handle_preview_interaction_started)
         self.preview_popup.action_requested.connect(self.handle_preview_action)
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -76,7 +86,14 @@ class CustomDock(QWidget):
         self.settings_revealed = False
         self.preview_hover_active = False
         self.active_preview_item = None
+        self.active_preview_app_path = ""
         self.active_preview_anchor_rect = None
+        self.current_preview_entries = []
+        self.preview_refresh_grace_attempts = 0
+        self.preview_visibility_guard_deadline = 0.0
+        self.preview_item_activation_guard_deadline = 0.0
+        self._suppress_preview_restore = False
+        self._last_mouse_buttons = Qt.MouseButton.NoButton
         self._last_active_window_id = ""
         self.last_focused_windows = {}
         self.x11_preview_capturer = X11WindowPreviewCapturer()
@@ -137,10 +154,12 @@ class CustomDock(QWidget):
 
         self.main_layout.addWidget(self.preview_host, 0, Qt.AlignHCenter)
         self.main_layout.addWidget(self.container, 0, Qt.AlignHCenter)
+        self.preview_popup.installEventFilter(self)
+        self.installEventFilter(self)
 
         self.mouse_timer = QTimer(self)
         self.mouse_timer.timeout.connect(self.check_mouse_proximity)
-        self.mouse_timer.start(100)
+        self.mouse_timer.start(20)
 
         self.wm_timer = QTimer(self)
         self.wm_timer.timeout.connect(self.update_dock_items)
@@ -274,6 +293,7 @@ class CustomDock(QWidget):
         if not self.is_visible:
             self.show_dock()
         if self.preview_popup.isVisible() or self.pending_preview_item is not None:
+            self._log_preview_hide_reason("accept-app-drag")
             self.hide_preview()
         self.set_settings_revealed(False)
         self._set_drop_active(True)
@@ -283,6 +303,23 @@ class CustomDock(QWidget):
 
     def eventFilter(self, watched, event):
         event_type = event.type()
+        if watched in {self, self.preview_popup} and event_type in {
+            QEvent.Hide,
+            QEvent.Close,
+            QEvent.WindowDeactivate,
+            QEvent.FocusOut,
+        }:
+            if self._has_active_preview_state() and not getattr(self, "_suppress_preview_restore", False):
+                if self._preview_visibility_guard_active():
+                    QTimer.singleShot(0, self._restore_preview_visibility_if_guarded)
+                else:
+                    self._log_preview_hide_reason(
+                        "event-filter-focus-loss",
+                        watched="preview" if watched is self.preview_popup else "dock",
+                        event_type=int(event_type),
+                    )
+                    QTimer.singleShot(0, self.hide_dock)
+            return False
         if event_type == QEvent.DragEnter:
             self.dragEnterEvent(event)
             return event.isAccepted()
@@ -359,6 +396,27 @@ class CustomDock(QWidget):
             'is_maximized': self.is_window_maximized(win_id),
         }
 
+    def _dock_item_app_path(self, dock_item) -> str:
+        if dock_item is None:
+            return ""
+        return str(getattr(dock_item, "app_data", {}).get("path") or "").strip()
+
+    def _iter_dock_items(self):
+        for index in range(self.app_row_layout.count()):
+            layout_item = self.app_row_layout.itemAt(index)
+            dock_item = layout_item.widget() if layout_item is not None else None
+            if dock_item is not None:
+                yield dock_item
+
+    def _find_dock_item_by_app_path(self, app_path: str):
+        normalized_path = str(app_path or "").strip()
+        if not normalized_path:
+            return None
+        for dock_item in self._iter_dock_items():
+            if self._dock_item_app_path(dock_item) == normalized_path:
+                return dock_item
+        return None
+
     def _dock_item_matches_active_window(self, dock_item, normalized_active_window_id):
         normalized_active_window_id = str(normalized_active_window_id or "").strip().lower()
         if not normalized_active_window_id:
@@ -376,6 +434,36 @@ class CustomDock(QWidget):
         if not force and normalized_active_window_id == self._last_active_window_id:
             return
         self._last_active_window_id = normalized_active_window_id
+
+        preview_item = None
+        preview_matches_active_window = False
+        if self._has_active_preview_state() and self.active_preview_app_path:
+            preview_item = self._find_dock_item_by_app_path(self.active_preview_app_path)
+            if preview_item is not None:
+                preview_matches_active_window = self._dock_item_matches_active_window(
+                    preview_item,
+                    normalized_active_window_id,
+                )
+
+        if (
+            self._has_active_preview_state()
+            and normalized_active_window_id
+            and not self._is_own_window(normalized_active_window_id)
+        ):
+            if self._preview_item_activation_guard_active():
+                log_dock_debug(
+                    "dock-preview-focus-hide-suppressed",
+                    active_window_id=normalized_active_window_id,
+                    app_path=self.active_preview_app_path,
+                    preview_matches_active_window=preview_matches_active_window,
+                )
+            else:
+                self._log_preview_hide_reason(
+                    "active-window-focus-left-dock",
+                    active_window_id=normalized_active_window_id,
+                )
+                self.hide_dock()
+                return
 
         active_app_names: list[str] = []
         for index in range(self.app_row_layout.count()):
@@ -420,6 +508,106 @@ class CustomDock(QWidget):
             return
         self.preview_timer.start(self._preview_delay_ms())
 
+    def _has_active_preview_state(self) -> bool:
+        return bool(
+            getattr(self, "active_preview_app_path", "")
+            or getattr(self, "current_preview_entries", [])
+            or getattr(self, "pending_preview_item", None)
+        )
+
+    def _arm_preview_visibility_guard(self, seconds: float = 0.5) -> None:
+        self.preview_visibility_guard_deadline = max(
+            self.preview_visibility_guard_deadline,
+            time.monotonic() + max(0.0, float(seconds)),
+        )
+
+    def _preview_visibility_guard_active(self) -> bool:
+        return time.monotonic() < self.preview_visibility_guard_deadline
+
+    def _arm_preview_item_activation_guard(self, seconds: float = 0.35) -> None:
+        self.preview_item_activation_guard_deadline = max(
+            self.preview_item_activation_guard_deadline,
+            time.monotonic() + max(0.0, float(seconds)),
+        )
+
+    def _preview_item_activation_guard_active(self) -> bool:
+        return time.monotonic() < self.preview_item_activation_guard_deadline
+
+    def _log_preview_hide_reason(self, reason: str, /, **fields) -> None:
+        cursor_pos = QCursor.pos()
+        log_dock_debug(
+            "dock-preview-hide-reason",
+            reason=reason,
+            cursor_pos=(cursor_pos.x(), cursor_pos.y()),
+            active_preview_app_path=self.active_preview_app_path,
+            preview_count=len(self.current_preview_entries),
+            popup_visible=self.preview_popup.isVisible(),
+            dock_visible=self.isVisible(),
+            **fields,
+        )
+
+    def _restore_preview_visibility_if_guarded(self) -> bool:
+        if not self._has_active_preview_state():
+            return False
+        if not self._preview_visibility_guard_active():
+            return False
+        if not self.isVisible():
+            self.show()
+            self.setWindowOpacity(1.0)
+        self.preview_popup.show()
+        self.preview_popup_opacity.setOpacity(1.0)
+        self.refresh_active_preview()
+        return True
+
+    def _preview_screen_geometry_for_item(self, dock_item) -> QRect:
+        if dock_item is not None and isValid(dock_item):
+            anchor_rect = QRect(dock_item.mapToGlobal(QPoint(0, 0)), dock_item.size())
+            screen = QGuiApplication.screenAt(anchor_rect.center())
+            if screen is not None:
+                return screen.availableGeometry()
+        return self._screen_geometry(prefer_cursor=True)
+
+    def _preview_global_rect(self) -> QRect:
+        if self.preview_popup is None or not self.preview_popup.isVisible():
+            return QRect()
+        return self.preview_popup.frameGeometry()
+
+    def _dock_global_rect(self) -> QRect:
+        return QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+
+    def _global_pointer_pressed(self) -> bool:
+        pointer_pressed = pointer_buttons_pressed_via_xlib()
+        if pointer_pressed is not None:
+            return bool(pointer_pressed)
+        return QGuiApplication.mouseButtons() != Qt.MouseButton.NoButton
+
+    def _pointer_pressed_outside_dock(self, cursor_pos: QPoint) -> bool:
+        pressed_now = self._global_pointer_pressed()
+        was_pressed = bool(self._last_mouse_buttons)
+        self._last_mouse_buttons = Qt.MouseButton.LeftButton if pressed_now else Qt.MouseButton.NoButton
+        if not pressed_now or was_pressed:
+            return False
+        dock_rect = self._dock_global_rect()
+        preview_rect = self._preview_global_rect()
+        inside_dock = dock_rect.contains(cursor_pos)
+        inside_preview = not preview_rect.isNull() and preview_rect.contains(cursor_pos)
+        preview_popup = getattr(self, "preview_popup", None)
+        log_dock_debug(
+            "dock-preview-pointer-press",
+            cursor_pos=(cursor_pos.x(), cursor_pos.y()),
+            inside_dock=inside_dock,
+            inside_preview=inside_preview,
+            dock_rect=dock_rect.getRect(),
+            preview_rect=preview_rect.getRect() if not preview_rect.isNull() else None,
+            popup_visible=bool(preview_popup is not None and preview_popup.isVisible()),
+            last_mouse_buttons=getattr(self._last_mouse_buttons, "value", self._last_mouse_buttons),
+        )
+        if inside_dock:
+            return False
+        if inside_preview:
+            return False
+        return True
+
     def _handle_visibility_animation_finished(self):
         if self.is_visible:
             self.setWindowOpacity(1.0)
@@ -457,6 +645,8 @@ class CustomDock(QWidget):
 
     def closeEvent(self, event):
         self.x11_window_manager.sync(reserve_space=False)
+        self.preview_popup.hide()
+        self.preview_popup.close()
         super().closeEvent(event)
 
     def load_pinned_apps(self):
@@ -676,8 +866,7 @@ class CustomDock(QWidget):
         )
 
     def rebuild_layout(self, items):
-        if self.preview_popup.isVisible() or self.pending_preview_item is not None:
-            self.hide_preview()
+        preview_app_path = self.active_preview_app_path if self._has_active_preview_state() else ""
 
         while self.app_row_layout.count():
             item = self.app_row_layout.takeAt(0)
@@ -699,8 +888,6 @@ class CustomDock(QWidget):
             button.setAcceptDrops(True)
             button.installEventFilter(self)
             button.pin_toggled.connect(self.handle_pin_toggle)
-            button.preview_requested.connect(self.schedule_preview)
-            button.preview_hidden.connect(self.schedule_preview_hide)
             button.activated.connect(self.handle_item_activation)
             button.context_menu_requested.connect(self.show_item_context_menu)
             self.app_row_layout.addWidget(button)
@@ -708,6 +895,9 @@ class CustomDock(QWidget):
         self.adjustSize()
         self.refresh_active_window_highlight(force=True)
         self.recenter()
+        if preview_app_path:
+            self.active_preview_app_path = preview_app_path
+            self.refresh_active_preview()
         self._log_window_state(
             "dock-layout-rebuilt",
             item_count=len(items),
@@ -752,6 +942,7 @@ class CustomDock(QWidget):
             QApplication.instance().quit()
 
     def open_settings_dialog(self):
+        self._log_preview_hide_reason("open-settings-dialog")
         self.hide_preview()
         dialog = DockSettingsDialog(on_applied=self.apply_dock_settings, parent=self)
         dialog.exec()
@@ -767,6 +958,7 @@ class CustomDock(QWidget):
         button_size = max(48, int(self.dock_settings.icon_size) + 18)
 
         self.container.apply_settings(self.dock_settings)
+        self.preview_popup.apply_settings(self.dock_settings)
         self.container_layout.setContentsMargins(padding, padding, padding, padding)
         self.container_layout.setSpacing(spacing)
         self.app_row_layout.setSpacing(spacing)
@@ -792,6 +984,8 @@ class CustomDock(QWidget):
             focused_window_highlight_color=self.dock_settings.focused_window_highlight_color,
             focused_window_highlight_opacity=self.dock_settings.focused_window_highlight_opacity,
             background_image_opacity=self.dock_settings.background_image_opacity,
+            preview_background_image_opacity=self.dock_settings.preview_background_image_opacity,
+            preview_border_radius=self.dock_settings.preview_border_radius,
         )
 
     def schedule_preview(self, dock_item):
@@ -828,13 +1022,13 @@ class CustomDock(QWidget):
         dock_item = self.pending_preview_item
         if dock_item is None or not isValid(dock_item) or not dock_item.isVisible():
             self._log_window_state("dock-preview-aborted", reason="dock-item-missing-or-hidden")
+            self._log_preview_hide_reason("pending-preview-item-missing")
             self.hide_preview()
             return
 
-        self.active_preview_anchor_rect = QRect(
-            dock_item.mapToGlobal(QPoint(0, 0)),
-            dock_item.size(),
-        )
+        self.show_preview_for_item(dock_item)
+
+    def _preview_entries_for_item(self, dock_item):
         preview_windows = dock_item.windows or [{'id': dock_item.win_id, 'title': dock_item.app_data.get('Title', '')}]
         previews = []
         for window in preview_windows:
@@ -855,37 +1049,90 @@ class CustomDock(QWidget):
                 'pixmap': pixmap,
                 'win_id': window.get('id'),
                 'app_data': dock_item.app_data,
+                'app_path': dock_item.app_data.get('path'),
                 'is_maximized': self.is_window_maximized(window.get('id')),
             })
+        return preview_windows, previews
 
-        if not previews:
-            self._log_window_state(
-                "dock-preview-empty",
-                app_name=dock_item.app_data.get('Name', 'Unknown App'),
-                requested_windows=len(preview_windows),
-            )
-            return
+    def _preview_title_for_window(self, app_data, window) -> str:
+        title = app_data.get('Name', 'Unknown App')
+        window_title = str(window.get('title') or app_data.get('Title') or '').strip()
+        if window_title and window_title != title:
+            return f"{title}\n{window_title}"
+        return title
 
-        self.preview_popup.update_content(previews)
+    def _running_windows_by_id(self) -> dict[str, dict]:
+        running_by_id: dict[str, dict] = {}
+        for window in self.get_running_windows():
+            normalized_win_id = self._normalize_window_id(window.get('id'))
+            if normalized_win_id:
+                running_by_id[normalized_win_id] = window
+        return running_by_id
+
+    def _sync_preview_entries_from_running_windows(self, running_windows_by_id: dict[str, dict]) -> bool:
+        if not self.current_preview_entries:
+            return False
+        synced_entries = []
+        for preview in self.current_preview_entries:
+            normalized_win_id = self._normalize_window_id(preview.get('win_id'))
+            window = running_windows_by_id.get(normalized_win_id)
+            if window is None:
+                continue
+            updated_preview = dict(preview)
+            app_data = updated_preview.get('app_data', {})
+            updated_preview['title'] = self._preview_title_for_window(app_data, window)
+            updated_preview['is_maximized'] = self.is_window_maximized(updated_preview.get('win_id'))
+            synced_entries.append(updated_preview)
+
+        if not synced_entries:
+            if self.preview_refresh_grace_attempts > 0:
+                self.preview_refresh_grace_attempts -= 1
+                QTimer.singleShot(180, self.refresh_preview_after_action)
+                return True
+            return False
+
+        if synced_entries != self.current_preview_entries:
+            anchor_item = self.active_preview_item if isValid(self.active_preview_item) else None
+            if anchor_item is None or not anchor_item.isVisible():
+                anchor_item = self._find_dock_item_by_app_path(self.active_preview_app_path)
+            if anchor_item is not None and isValid(anchor_item) and anchor_item.isVisible():
+                self._render_preview_entries(anchor_item, synced_entries)
+            else:
+                self.current_preview_entries = synced_entries
+        return True
+
+    def _render_preview_entries(self, dock_item, previews):
+        was_visible = self.preview_popup.isVisible()
+        self.current_preview_entries = [dict(preview) for preview in previews]
+        self.preview_popup.update_content(self.current_preview_entries)
         preview_size = self.preview_popup.sizeHint()
         self.preview_popup.resize(preview_size)
-        host_width = max(self.container.sizeHint().width(), preview_size.width() + 16)
-        self.preview_host.setFixedSize(host_width, preview_size.height() + 12)
-        self.adjustSize()
-        self.recenter()
-
-        button_top_left = self.preview_host.mapFromGlobal(dock_item.mapToGlobal(QPoint(0, 0)))
-        popup_x = button_top_left.x() + (dock_item.width() - self.preview_popup.width()) // 2
-        popup_x = max(8, min(popup_x, self.preview_host.width() - self.preview_popup.width() - 8))
-        popup_y = max(0, self.preview_host.height() - self.preview_popup.height() - 4)
+        screen_geometry = self._preview_screen_geometry_for_item(dock_item)
+        anchor_top_left = dock_item.mapToGlobal(QPoint(0, 0))
+        popup_x = anchor_top_left.x() + (dock_item.width() - self.preview_popup.width()) // 2
+        popup_y = anchor_top_left.y() - self.preview_popup.height() - 12
+        if not screen_geometry.isNull():
+            popup_x = max(
+                screen_geometry.left() + 8,
+                min(popup_x, screen_geometry.right() - self.preview_popup.width() - 7),
+            )
+            min_y = screen_geometry.top() + 8
+            if popup_y < min_y:
+                popup_y = min(
+                    anchor_top_left.y() + dock_item.height() + 12,
+                    screen_geometry.bottom() - self.preview_popup.height() - 7,
+                )
 
         self.preview_popup.move(popup_x, popup_y)
         self.preview_popup_fade.stop()
-        self.preview_popup_opacity.setOpacity(0.0)
         self.preview_popup.show()
-        self.preview_popup_fade.setStartValue(0.0)
-        self.preview_popup_fade.setEndValue(1.0)
-        self.preview_popup_fade.start()
+        if was_visible:
+            self.preview_popup_opacity.setOpacity(1.0)
+        else:
+            self.preview_popup_opacity.setOpacity(0.0)
+            self.preview_popup_fade.setStartValue(0.0)
+            self.preview_popup_fade.setEndValue(1.0)
+            self.preview_popup_fade.start()
         self._log_window_state(
             "dock-preview-shown",
             app_name=dock_item.app_data.get('Name', 'Unknown App'),
@@ -895,10 +1142,134 @@ class CustomDock(QWidget):
             popup_pos=(popup_x, popup_y),
         )
 
+    def _remove_preview_entry(self, win_id):
+        normalized_win_id = self._normalize_window_id(win_id)
+        if not normalized_win_id:
+            return
+        remaining = [
+            dict(preview)
+            for preview in self.current_preview_entries
+            if self._normalize_window_id(preview.get("win_id")) != normalized_win_id
+        ]
+        if len(remaining) == len(self.current_preview_entries):
+            return
+        if not remaining:
+            self._log_preview_hide_reason("remove-preview-entry-last-card", win_id=normalized_win_id)
+            self.hide_preview()
+            return
+        anchor_item = self.active_preview_item if isValid(self.active_preview_item) else None
+        if anchor_item is None or not anchor_item.isVisible():
+            anchor_item = self._find_dock_item_by_app_path(self.active_preview_app_path)
+        if anchor_item is None or not isValid(anchor_item) or not anchor_item.isVisible():
+            self.current_preview_entries = remaining
+            return
+        self._render_preview_entries(anchor_item, remaining)
+        self.preview_refresh_grace_attempts = max(self.preview_refresh_grace_attempts, 3)
+
+    def show_preview_for_item(self, dock_item, *, preserve_on_empty: bool = False):
+        if dock_item is None or not isValid(dock_item):
+            self._log_preview_hide_reason(
+                "show-preview-invalid-item",
+                has_item=dock_item is not None,
+                preserve_on_empty=preserve_on_empty,
+            )
+            if preserve_on_empty and self.current_preview_entries:
+                return False
+            self.hide_preview()
+            return False
+
+        if not dock_item.isVisible():
+            self._log_preview_hide_reason(
+                "show-preview-item-not-visible",
+                app_path=self._dock_item_app_path(dock_item),
+                preserve_on_empty=preserve_on_empty,
+            )
+            if preserve_on_empty and self.current_preview_entries:
+                return False
+            self.hide_preview()
+            return False
+
+        self.set_settings_revealed(False)
+        self.pending_preview_item = dock_item
+        self.active_preview_item = dock_item
+        self.active_preview_app_path = self._dock_item_app_path(dock_item)
+        self.active_preview_anchor_rect = QRect(
+            dock_item.mapToGlobal(QPoint(0, 0)),
+            dock_item.size(),
+        )
+        preview_windows, previews = self._preview_entries_for_item(dock_item)
+        if not previews:
+            self._log_window_state(
+                "dock-preview-empty",
+                app_name=dock_item.app_data.get('Name', 'Unknown App'),
+                requested_windows=len(preview_windows),
+            )
+            if preserve_on_empty and self.current_preview_entries:
+                return False
+            self._log_preview_hide_reason(
+                "show-preview-empty",
+                app_name=dock_item.app_data.get('Name', 'Unknown App'),
+                requested_windows=len(preview_windows),
+                preserve_on_empty=preserve_on_empty,
+            )
+            self.hide_preview()
+            return False
+
+        self.preview_refresh_grace_attempts = 0
+        self._render_preview_entries(dock_item, previews)
+        return True
+
+    def refresh_active_preview(self):
+        if not self._has_active_preview_state():
+            return
+        preserve_on_empty = bool(self.current_preview_entries)
+        running_windows_by_id = self._running_windows_by_id()
+        dock_item = self._find_dock_item_by_app_path(self.active_preview_app_path)
+        if self.current_preview_entries and not self._sync_preview_entries_from_running_windows(running_windows_by_id):
+            if dock_item is None or not dock_item.is_running:
+                self._log_preview_hide_reason(
+                    "refresh-active-preview-sync-empty-app-gone",
+                    app_path=self.active_preview_app_path,
+                )
+                self.hide_preview()
+                return
+        if dock_item is None or not dock_item.is_running:
+            if not self.current_preview_entries:
+                self._log_preview_hide_reason(
+                    "refresh-active-preview-app-gone",
+                    app_path=self.active_preview_app_path,
+                )
+                self.hide_preview()
+            return
+        if not self.show_preview_for_item(
+            dock_item,
+            preserve_on_empty=preserve_on_empty,
+        ) and self.preview_refresh_grace_attempts > 0 and self.current_preview_entries:
+            self.preview_refresh_grace_attempts -= 1
+            QTimer.singleShot(180, self.refresh_preview_after_action)
+
     def hide_preview(self):
+        caller_frame = inspect.currentframe().f_back
+        caller_name = caller_frame.f_code.co_name if caller_frame is not None else "unknown"
+        caller_line = caller_frame.f_lineno if caller_frame is not None else -1
+        log_dock_debug(
+            "dock-preview-hide-called",
+            caller=caller_name,
+            line=caller_line,
+            active_preview_app_path=self.active_preview_app_path,
+            preview_count=len(self.current_preview_entries),
+            popup_visible=self.preview_popup.isVisible(),
+            dock_visible=self.isVisible(),
+        )
+        self._suppress_preview_restore = True
         self.pending_preview_item = None
         self.active_preview_item = None
+        self.active_preview_app_path = ""
         self.active_preview_anchor_rect = None
+        self.current_preview_entries = []
+        self.preview_refresh_grace_attempts = 0
+        self.preview_visibility_guard_deadline = 0.0
+        self.preview_item_activation_guard_deadline = 0.0
         self.preview_hover_active = False
         self.preview_timer.stop()
         self.preview_hide_timer.stop()
@@ -908,6 +1279,7 @@ class CustomDock(QWidget):
         self.preview_host.setFixedSize(0, 0)
         self.adjustSize()
         self.recenter()
+        self._suppress_preview_restore = False
         self._log_window_state("dock-preview-hidden")
 
     def hide_preview_if_inactive(self):
@@ -925,6 +1297,7 @@ class CustomDock(QWidget):
             ).adjusted(-10, -10, 10, 10)
             if popup_rect.contains(cursor_pos):
                 return
+        self._log_preview_hide_reason("hide-preview-if-inactive")
         self.hide_preview()
 
     def handle_preview_hover_changed(self, is_hovered):
@@ -933,6 +1306,21 @@ class CustomDock(QWidget):
             self.preview_hide_timer.stop()
         elif self.preview_popup.isVisible():
             self.schedule_preview_hide()
+
+    def handle_preview_interaction_started(self):
+        self._arm_preview_visibility_guard(0.5)
+        self._arm_preview_item_activation_guard(0.5)
+        self._last_mouse_buttons = Qt.MouseButton.LeftButton
+        cursor_pos = QCursor.pos()
+        preview_popup = getattr(self, "preview_popup", None)
+        log_dock_debug(
+            "dock-preview-interaction-started",
+            cursor_pos=(cursor_pos.x(), cursor_pos.y()),
+            preview_visibility_guard_deadline=self.preview_visibility_guard_deadline,
+            preview_item_activation_guard_deadline=self.preview_item_activation_guard_deadline,
+            popup_visible=bool(preview_popup is not None and preview_popup.isVisible()),
+            preview_count=len(getattr(self, "current_preview_entries", [])),
+        )
 
     def focus_window(self, win_id, *, app_path=None):
         if not win_id:
@@ -1000,10 +1388,37 @@ class CustomDock(QWidget):
         log_dock_debug("dock-window-action", action=action_name, win_id=win_id, app_path=app_path)
 
     def handle_item_activation(self, dock_item):
-        self.hide_preview()
-        self.execute_window_action('toggle_focus', self._item_action_payload(dock_item))
+        if dock_item is None or not isValid(dock_item):
+            return
+        if self._preview_item_activation_guard_active():
+            return
+        if not dock_item.is_running:
+            self._log_preview_hide_reason(
+                "handle-item-activation-non-running",
+                app_path=self._dock_item_app_path(dock_item),
+            )
+            self.hide_preview()
+            self.execute_window_action('new_window', self._item_action_payload(dock_item))
+            return
+        next_app_path = self._dock_item_app_path(dock_item)
+        if self.preview_popup.isVisible() and next_app_path == self.active_preview_app_path:
+            self._log_preview_hide_reason("handle-item-activation-toggle-same-app", app_path=next_app_path)
+            self.hide_preview()
+            return
+        if self.preview_popup.isVisible() and next_app_path != self.active_preview_app_path:
+            self._log_preview_hide_reason(
+                "handle-item-activation-switch-app",
+                from_app_path=self.active_preview_app_path,
+                to_app_path=next_app_path,
+            )
+            self.hide_preview()
+        self.show_preview_for_item(dock_item)
 
     def show_item_context_menu(self, dock_item, global_pos):
+        self._log_preview_hide_reason(
+            "show-item-context-menu",
+            app_path=self._dock_item_app_path(dock_item),
+        )
         self.hide_preview()
         menu = QMenu(self)
         payload = self._item_action_payload(dock_item)
@@ -1053,9 +1468,16 @@ class CustomDock(QWidget):
         menu.exec(global_pos)
 
     def handle_preview_action(self, action_name, preview):
+        self.handle_preview_interaction_started()
+        if action_name == 'close':
+            self._remove_preview_entry(preview.get('win_id'))
         self.execute_window_action(action_name, preview)
-        self.hide_preview()
-        QTimer.singleShot(180, self.update_dock_items)
+        QTimer.singleShot(180, self.refresh_preview_after_action)
+
+    def refresh_preview_after_action(self):
+        self.update_dock_items()
+        if self._has_active_preview_state():
+            self.refresh_active_preview()
 
     def toggle_window_maximize(self, win_id, is_maximized):
         action = 'remove' if is_maximized else 'add'
@@ -1128,7 +1550,32 @@ class CustomDock(QWidget):
         screen_geometry = self._screen_geometry(prefer_cursor=True)
         if screen_geometry.isNull():
             return
+        if self._has_active_preview_state() and not self.preview_popup.isVisible():
+            self._restore_preview_visibility_if_guarded()
+        if self._has_active_preview_state() and self._preview_item_activation_guard_active():
+            preview_popup = getattr(self, "preview_popup", None)
+            log_dock_debug(
+                "dock-preview-outside-click-suppressed",
+                cursor_pos=(pos.x(), pos.y()),
+                preview_visibility_guard_deadline=getattr(self, "preview_visibility_guard_deadline", 0.0),
+                preview_item_activation_guard_deadline=getattr(self, "preview_item_activation_guard_deadline", 0.0),
+                popup_visible=bool(preview_popup is not None and preview_popup.isVisible()),
+                preview_count=len(getattr(self, "current_preview_entries", [])),
+            )
+        if (
+            self._has_active_preview_state()
+            and not self._preview_item_activation_guard_active()
+            and self._pointer_pressed_outside_dock(pos)
+        ):
+            self._log_preview_hide_reason("check-mouse-proximity-outside-click")
+            self.hide_preview()
         trigger_area = screen_geometry.bottom() - 4
+
+        if self._has_active_preview_state():
+            if not self.is_visible:
+                self.show_dock()
+            self.update_settings_reveal(pos)
+            return
 
         if screen_geometry.contains(pos) and pos.y() >= trigger_area:
             if not self.is_visible:
@@ -1138,6 +1585,14 @@ class CustomDock(QWidget):
             dock_rect = self.geometry()
             buffered_rect = dock_rect.adjusted(-buffer, -buffer, buffer, buffer)
             if not buffered_rect.contains(pos) and self.is_visible:
+                log_dock_debug(
+                    "dock-auto-hide-buffer-exit",
+                    cursor_pos=(pos.x(), pos.y()),
+                    buffered_rect=buffered_rect.getRect(),
+                    dock_rect=dock_rect.getRect(),
+                    has_active_preview=self._has_active_preview_state(),
+                    popup_visible=self.preview_popup.isVisible(),
+                )
                 self.hide_dock()
 
         self.update_settings_reveal(pos)
@@ -1214,7 +1669,20 @@ class CustomDock(QWidget):
     def hide_dock(self):
         if not self.is_visible:
             return
+        caller_frame = inspect.currentframe().f_back
+        caller_name = caller_frame.f_code.co_name if caller_frame is not None else "unknown"
+        caller_line = caller_frame.f_lineno if caller_frame is not None else -1
+        log_dock_debug(
+            "dock-hide-called",
+            caller=caller_name,
+            line=caller_line,
+            active_preview_app_path=self.active_preview_app_path,
+            preview_count=len(self.current_preview_entries),
+            popup_visible=self.preview_popup.isVisible(),
+            dock_visible=self.isVisible(),
+        )
         self._stop_animation()
+        self._log_preview_hide_reason("hide-dock")
         self.hide_preview()
         self.set_settings_revealed(False)
         self.is_visible = False

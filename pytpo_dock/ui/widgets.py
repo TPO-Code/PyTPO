@@ -48,6 +48,14 @@ def color_to_qss_rgba(color: QColor) -> str:
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
 
 
+def load_background_pixmap(image_path: str) -> QPixmap:
+    normalized = str(image_path or "").strip()
+    if not normalized:
+        return QPixmap()
+    pixmap = QPixmap(normalized)
+    return pixmap if not pixmap.isNull() else QPixmap()
+
+
 def themed_icon(icon_names: tuple[str, ...], fallback_standard_icon) -> QIcon:
     for icon_name in icon_names:
         icon = QIcon.fromTheme(icon_name)
@@ -66,6 +74,72 @@ def apply_widget_opacity(widget: QWidget, opacity_percent: int) -> None:
         effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
     effect.setOpacity(opacity)
+
+
+def paint_panel_background(
+    painter: QPainter,
+    rect: QRect,
+    *,
+    background_color: str,
+    background_pixmap: QPixmap,
+    background_image_fit: str,
+    background_image_opacity: int,
+    background_tint: str,
+    border_color: str,
+    border_width: int,
+    border_radius: int,
+    border_style: str,
+) -> QPainterPath:
+    border_width = max(0, int(border_width))
+    border_offset = border_width / 2.0
+    paint_rect = QRectF(rect).adjusted(border_offset, border_offset, -border_offset, -border_offset)
+    radius = max(0, int(border_radius))
+
+    path = QPainterPath()
+    path.addRoundedRect(paint_rect, radius, radius)
+    painter.setClipPath(path)
+    painter.fillPath(path, color_from_setting(background_color, "#1e1e1e"))
+
+    if not background_pixmap.isNull():
+        target_rect = paint_rect.toRect()
+        fit_mode = str(background_image_fit or "cover").strip().lower()
+        image_opacity = max(0.0, min(1.0, int(background_image_opacity) / 100.0))
+        painter.setOpacity(image_opacity)
+        if fit_mode == "tile":
+            painter.drawTiledPixmap(target_rect, background_pixmap)
+        elif fit_mode == "stretch":
+            painter.drawPixmap(target_rect, background_pixmap, background_pixmap.rect())
+        else:
+            aspect_mode = Qt.KeepAspectRatioByExpanding if fit_mode == "cover" else Qt.KeepAspectRatio
+            scaled = background_pixmap.scaled(target_rect.size(), aspect_mode, Qt.SmoothTransformation)
+            draw_x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
+            draw_y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
+            if fit_mode == "center":
+                scaled = background_pixmap
+                draw_x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
+                draw_y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
+            painter.drawPixmap(draw_x, draw_y, scaled)
+        painter.setOpacity(1.0)
+
+    tint = color_from_setting(background_tint, "#00000000")
+    if tint.alpha() > 0:
+        painter.fillPath(path, tint)
+
+    painter.setClipping(False)
+    if border_width > 0:
+        pen = QPen(color_from_setting(border_color, "#ffffff33"))
+        pen.setWidth(border_width)
+        border_style = str(border_style or "solid").strip().lower()
+        if border_style == "dashed":
+            pen.setStyle(Qt.DashLine)
+        elif border_style == "dotted":
+            pen.setStyle(Qt.DotLine)
+        else:
+            pen.setStyle(Qt.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+    return path
 
 
 class DockItem(QToolButton):
@@ -275,18 +349,17 @@ class DockItem(QToolButton):
 
 class WindowPreview(QFrame):
     hover_changed = Signal(bool)
+    interaction_started = Signal()
     action_requested = Signal(str, object)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("WindowPreview")
         self._content_size = QSize()
+        self._settings = DockVisualSettings()
+        self._background_pixmap = QPixmap()
+        self._last_paint_signature = None
         self.setStyleSheet("""
-            QFrame#WindowPreview {
-                background-color: rgba(20, 20, 20, 235);
-                border: 1px solid rgba(255, 255, 255, 35);
-                border-radius: 14px;
-            }
             QLabel {
                 color: white;
                 background: transparent;
@@ -296,6 +369,24 @@ class WindowPreview(QFrame):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.setSpacing(10)
+
+    def apply_settings(self, settings: DockVisualSettings) -> None:
+        self._settings = settings
+        self._background_pixmap = load_background_pixmap(settings.preview_background_image_path)
+        log_dock_debug(
+            "dock-preview-settings-applied",
+            background_color=settings.preview_background_color,
+            background_image_path=settings.preview_background_image_path,
+            background_image_loaded=not self._background_pixmap.isNull(),
+            background_image_opacity=settings.preview_background_image_opacity,
+            background_fit=settings.preview_background_image_fit,
+            background_tint=settings.preview_background_tint,
+            border_color=settings.preview_border_color,
+            border_width=settings.preview_border_width,
+            border_radius=settings.preview_border_radius,
+            border_style=settings.preview_border_style,
+        )
+        self.update()
 
     def clear_content(self):
         while self.layout.count():
@@ -314,6 +405,7 @@ class WindowPreview(QFrame):
         frame_sizes = []
         for preview in previews:
             frame = PreviewCard(preview, self)
+            frame.pressed.connect(self.interaction_started)
             frame.clicked.connect(
                 lambda data, action='toggle_focus': self.action_requested.emit(action, data)
             )
@@ -357,6 +449,7 @@ class WindowPreview(QFrame):
                         background: rgba(255, 255, 255, 35);
                     }
                 """)
+                button.pressed.connect(self.interaction_started)
                 button.clicked.connect(
                     lambda _checked=False, action=action_name, data=dict(preview): self.action_requested.emit(action, data)
                 )
@@ -447,8 +540,54 @@ class WindowPreview(QFrame):
             ),
         ]
 
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        paint_signature = (
+            self.width(),
+            self.height(),
+            self._settings.preview_background_color,
+            self._settings.preview_background_image_fit,
+            self._settings.preview_background_image_opacity,
+            self._settings.preview_background_tint,
+            self._settings.preview_border_color,
+            self._settings.preview_border_width,
+            self._settings.preview_border_radius,
+            self._settings.preview_border_style,
+            self._background_pixmap.width(),
+            self._background_pixmap.height(),
+        )
+        if paint_signature != self._last_paint_signature:
+            self._last_paint_signature = paint_signature
+            log_dock_debug(
+                "dock-preview-panel-paint",
+                widget_rect=self.rect().getRect(),
+                border_width=self._settings.preview_border_width,
+                radius=self._settings.preview_border_radius,
+                has_background_image=not self._background_pixmap.isNull(),
+                background_image_size=(self._background_pixmap.width(), self._background_pixmap.height()),
+                fit_mode=self._settings.preview_background_image_fit,
+            )
+
+        paint_panel_background(
+            painter,
+            self.rect(),
+            background_color=self._settings.preview_background_color,
+            background_pixmap=self._background_pixmap,
+            background_image_fit=self._settings.preview_background_image_fit,
+            background_image_opacity=self._settings.preview_background_image_opacity,
+            background_tint=self._settings.preview_background_tint,
+            border_color=self._settings.preview_border_color,
+            border_width=self._settings.preview_border_width,
+            border_radius=self._settings.preview_border_radius,
+            border_style=self._settings.preview_border_style,
+        )
+
 
 class PreviewCard(QFrame):
+    pressed = Signal()
     clicked = Signal(object)
 
     def __init__(self, preview, parent: QWidget | None = None):
@@ -463,6 +602,11 @@ class PreviewCard(QFrame):
             return
         super().mouseReleaseEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.pressed.emit()
+        super().mousePressEvent(event)
+
 
 class DockContainerFrame(QFrame):
     def __init__(self, parent: QWidget | None = None):
@@ -475,11 +619,7 @@ class DockContainerFrame(QFrame):
     def apply_settings(self, settings: DockVisualSettings):
         self._settings = settings
         image_path = str(settings.background_image_path or "").strip()
-        if image_path:
-            pixmap = QPixmap(image_path)
-            self._background_pixmap = pixmap if not pixmap.isNull() else QPixmap()
-        else:
-            self._background_pixmap = QPixmap()
+        self._background_pixmap = load_background_pixmap(image_path)
         log_dock_debug(
             "dock-container-settings-applied",
             background_color=settings.background_color,
@@ -539,46 +679,27 @@ class DockContainerFrame(QFrame):
                 fit_mode=self._settings.background_image_fit,
             )
 
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        painter.setClipPath(path)
+        path = paint_panel_background(
+            painter,
+            self.rect(),
+            background_color=self._settings.background_color,
+            background_pixmap=self._background_pixmap,
+            background_image_fit=self._settings.background_image_fit,
+            background_image_opacity=self._settings.background_image_opacity,
+            background_tint=self._settings.background_tint,
+            border_color=self._settings.border_color,
+            border_width=self._settings.border_width,
+            border_radius=self._settings.border_radius,
+            border_style=self._settings.border_style,
+        )
 
-        painter.fillPath(path, color_from_setting(self._settings.background_color, "#1e1e1e"))
-
-        if not self._background_pixmap.isNull():
-            target_rect = rect.toRect()
-            fit_mode = str(self._settings.background_image_fit or "cover").strip().lower()
-            image_opacity = max(0.0, min(1.0, int(self._settings.background_image_opacity) / 100.0))
-            painter.setOpacity(image_opacity)
-            if fit_mode == "tile":
-                painter.drawTiledPixmap(target_rect, self._background_pixmap)
-            elif fit_mode == "stretch":
-                painter.drawPixmap(target_rect, self._background_pixmap, self._background_pixmap.rect())
-            else:
-                aspect_mode = Qt.KeepAspectRatioByExpanding if fit_mode == "cover" else Qt.KeepAspectRatio
-                scaled = self._background_pixmap.scaled(target_rect.size(), aspect_mode, Qt.SmoothTransformation)
-                draw_x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
-                draw_y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
-                if fit_mode == "center":
-                    scaled = self._background_pixmap
-                    draw_x = target_rect.x() + (target_rect.width() - scaled.width()) // 2
-                    draw_y = target_rect.y() + (target_rect.height() - scaled.height()) // 2
-                painter.drawPixmap(draw_x, draw_y, scaled)
-            painter.setOpacity(1.0)
-
-        tint = color_from_setting(self._settings.background_tint, "#00000000")
-        if tint.alpha() > 0:
-            painter.fillPath(path, tint)
-
-        painter.setClipping(False)
-        if border_width > 0 or self._drop_active:
+        if self._drop_active:
             border_color = color_from_setting(self._settings.border_color, "#ffffff33")
             border_style = str(self._settings.border_style or "solid").strip().lower()
-            if self._drop_active:
-                border_color = QColor(244, 210, 105, 220)
-                border_style = "solid"
+            border_color = QColor(244, 210, 105, 220)
+            border_style = "solid"
             pen = QPen(border_color)
-            pen.setWidth(max(1, border_width, 2 if self._drop_active else 0))
+            pen.setWidth(max(2, border_width))
             if border_style == "dashed":
                 pen.setStyle(Qt.DashLine)
             elif border_style == "dotted":

@@ -52,6 +52,12 @@ class _FakeDock:
 
 
 class _FakeScreenGeometry:
+    def x(self):
+        return 0
+
+    def y(self):
+        return 0
+
     def width(self):
         return 1920
 
