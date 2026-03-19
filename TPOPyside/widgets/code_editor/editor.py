@@ -282,6 +282,7 @@ class CodeEditor(QPlainTextEdit):
         self._fold_ranges: dict[int, int] = {}
         self._folded_starts: set[int] = set()
         self._fold_selection_adjusting = False
+        self._fold_repair_immediate_pending = False
         self._fold_gutter_width = 14
         self.use_tabs = False
         self.indent_width = 4  # spaces per indent level
@@ -409,6 +410,7 @@ class CodeEditor(QPlainTextEdit):
         self._fold_refresh_timer.setSingleShot(True)
         self._fold_refresh_timer.setInterval(140)
         self._fold_refresh_timer.timeout.connect(self._refresh_fold_ranges)
+        self.textChanged.connect(self._repair_fold_state_after_edit)
         self.textChanged.connect(self._schedule_fold_refresh)
 
         self._editor_background_color = QColor("#252526")
@@ -753,6 +755,15 @@ class CodeEditor(QPlainTextEdit):
     def _refresh_fold_ranges(self):
         update_editor_folding(self)
 
+    def _repair_fold_state_after_edit(self) -> None:
+        if not self._fold_repair_immediate_pending:
+            return
+        self._fold_repair_immediate_pending = False
+        if self._fold_provider is None:
+            return
+        self._fold_refresh_timer.stop()
+        self._refresh_fold_ranges()
+
     def _set_all_blocks_visible(self):
         block = self.document().firstBlock()
         while block.isValid():
@@ -852,6 +863,68 @@ class CodeEditor(QPlainTextEdit):
                 break
             changed_any = True
         return start, end, changed_any
+
+    def _folded_starts_overlapping_span(self, start_pos: int, end_pos: int) -> list[int]:
+        start = int(start_pos)
+        end = int(end_pos)
+        if end <= start or not self._folded_starts:
+            return []
+        matches: list[int] = []
+        for block_no in sorted(self._folded_starts):
+            region = self._fold_region_pos_range(int(block_no))
+            if region is None:
+                continue
+            region_start, region_end = region
+            if end <= region_start or start >= region_end:
+                continue
+            matches.append(int(block_no))
+        return matches
+
+    def _selection_touches_collapsed_fold(self, cursor: QTextCursor | None = None) -> bool:
+        work = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if not work.hasSelection():
+            return False
+        sel_start = int(work.selectionStart())
+        sel_end = int(work.selectionEnd())
+        expanded_start, expanded_end, changed = self._expand_selection_over_collapsed_folds(sel_start, sel_end)
+        if changed:
+            sel_start = expanded_start
+            sel_end = expanded_end
+        return bool(self._folded_starts_overlapping_span(sel_start, sel_end))
+
+    def _prepare_selection_for_fold_edit(self, cursor: QTextCursor | None = None) -> QTextCursor:
+        work = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if not work.hasSelection() or not self._folded_starts:
+            return work
+
+        anchor = int(work.anchor())
+        pos = int(work.position())
+        if anchor == pos:
+            return work
+
+        sel_start = min(anchor, pos)
+        sel_end = max(anchor, pos)
+        expanded_start, expanded_end, changed = self._expand_selection_over_collapsed_folds(sel_start, sel_end)
+        if changed:
+            if anchor <= pos:
+                work.setPosition(expanded_start)
+                work.setPosition(expanded_end, QTextCursor.KeepAnchor)
+            else:
+                work.setPosition(expanded_end)
+                work.setPosition(expanded_start, QTextCursor.KeepAnchor)
+            sel_start = int(work.selectionStart())
+            sel_end = int(work.selectionEnd())
+
+        touched_folds = self._folded_starts_overlapping_span(sel_start, sel_end)
+        if not touched_folds:
+            return work
+
+        for block_no in touched_folds:
+            self._folded_starts.discard(int(block_no))
+        self._fold_repair_immediate_pending = True
+        self._apply_fold_visibility()
+        self.setTextCursor(work)
+        return work
 
     def _on_selection_changed_expand_collapsed_folds(self) -> None:
         if self._fold_selection_adjusting:
@@ -4291,6 +4364,7 @@ class CodeEditor(QPlainTextEdit):
 
     def _paste_reindented_text(self, text: str, cursor: QTextCursor | None = None) -> None:
         work_cursor = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        work_cursor = self._prepare_selection_for_fold_edit(work_cursor)
         work_cursor = self._smart_paste_selection_cursor(work_cursor)
         tab_size = self._active_indent_width()
         target_indent = self._smart_paste_target_indent(work_cursor)
@@ -4325,7 +4399,7 @@ class CodeEditor(QPlainTextEdit):
             super().insertFromMimeData(source)
             return
         text = self._normalize_paste_text(str(source.text() or ""))
-        cursor = self.textCursor()
+        cursor = self._prepare_selection_for_fold_edit(self.textCursor())
         if not self._should_smart_reindent_paste(cursor, text, force=False):
             super().insertFromMimeData(source)
             return
@@ -4345,6 +4419,17 @@ class CodeEditor(QPlainTextEdit):
         if self._handle_editor_shortcut_fallback(event):
             event.accept()
             return
+
+        if self._selection_touches_collapsed_fold():
+            if key in (
+                Qt.Key_Backspace,
+                Qt.Key_Delete,
+                Qt.Key_Tab,
+                Qt.Key_Backtab,
+                Qt.Key_Return,
+                Qt.Key_Enter,
+            ) or bool(text and not (mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))):
+                self._prepare_selection_for_fold_edit()
 
         # --- block indent / unindent ---
         if key == Qt.Key_Tab and mods == Qt.NoModifier:
