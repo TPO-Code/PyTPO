@@ -21,6 +21,7 @@ from pytpo.services.asset_paths import preferred_shared_asset_path
 
 from topbar.focus import X11FocusController
 
+from ..settings_dialog import TopBarSettingsDialog
 from .connectivity import ConnectivitySection
 from .footer import FooterSection
 from .media_container import MediaContainer
@@ -55,6 +56,7 @@ class SystemMenuContent(QWidget):
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        open_settings: Callable[[], None],
         close_panel: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
@@ -90,6 +92,7 @@ class SystemMenuContent(QWidget):
         self.footer = FooterSection(
             open_terminal=open_terminal,
             open_dock=open_dock,
+            open_settings=open_settings,
             close_panel=close_panel,
             parent=self,
         )
@@ -185,6 +188,7 @@ class TopBarSystemMenuPanel(QFrame):
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        open_settings: Callable[[], None],
         focus_controller: X11FocusController | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -205,6 +209,7 @@ class TopBarSystemMenuPanel(QFrame):
         self.content = SystemMenuContent(
             open_terminal=open_terminal,
             open_dock=open_dock,
+            open_settings=open_settings,
             close_panel=self.hide,
             parent=self,
         )
@@ -374,6 +379,7 @@ class SystemMenuButton(QToolButton):
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        open_settings: Callable[[], None],
         focus_controller: X11FocusController | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -381,6 +387,7 @@ class SystemMenuButton(QToolButton):
         self._panel = TopBarSystemMenuPanel(
             open_terminal=open_terminal,
             open_dock=open_dock,
+            open_settings=open_settings,
             focus_controller=focus_controller,
             parent=self.window(),
         )
@@ -618,6 +625,7 @@ def preview_main() -> int:
     anchor_button = SystemMenuButton(
         open_terminal=lambda: QMessageBox.information(preview_host, "Preview", "Terminal preview action triggered."),
         open_dock=lambda: QMessageBox.information(preview_host, "Preview", "Dock preview action triggered."),
+        open_settings=lambda: TopBarSettingsDialog(preview_host).exec(),
         parent=preview_host,
     )
     layout.addWidget(anchor_button, alignment=Qt.AlignLeft)

@@ -105,6 +105,7 @@ class SchemaField:
     actions: list[dict[str, Any]] | None = None
     min: int | None = None
     max: int | None = None
+    visible_when: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -148,6 +149,15 @@ class FieldBinding:
     full_row: bool = False
     has_pending_changes: Callable[[], bool] | None = None
     apply_changes: Callable[[], list[str]] | None = None
+
+
+@dataclass(slots=True)
+class _FieldRowBinding:
+    field: SchemaField
+    binding: FieldBinding
+    form: QFormLayout
+    row: int
+    label: QLabel | None = None
 
 
 FieldFactory = Callable[[SchemaField, "SchemaSettingsDialog"], FieldBinding]
@@ -251,6 +261,8 @@ class SchemaSettingsDialog(DialogWindow):
         self._ignore_changes = False
         self._dirty_scopes: set[str] = set()
         self._bindings_by_page: dict[int, list[FieldBinding]] = {}
+        self._binding_lookup: dict[tuple[str, str], FieldBinding] = {}
+        self._field_rows: list[_FieldRowBinding] = []
         self._persisted_tree_expanded_paths = self._load_tree_expanded_paths_from_backend()
 
         self._build_ui(
@@ -294,6 +306,7 @@ class SchemaSettingsDialog(DialogWindow):
                         continue
         finally:
             self._ignore_changes = False
+        self._refresh_conditional_visibility()
 
     def _build_ui(
         self,
@@ -431,6 +444,8 @@ class SchemaSettingsDialog(DialogWindow):
         runtime_expanded_paths = self._collect_tree_expanded_paths() if self.tree.topLevelItemCount() > 0 else None
         self.tree.clear()
         self._bindings_by_page.clear()
+        self._binding_lookup.clear()
+        self._field_rows.clear()
         while self.stack.count():
             page_widget = self.stack.widget(0)
             self.stack.removeWidget(page_widget)
@@ -676,17 +691,43 @@ class SchemaSettingsDialog(DialogWindow):
             for schema_field in section.fields:
                 binding = self._create_field_binding(schema_field)
                 page_bindings.append(binding)
+                self._binding_lookup[(str(binding.scope), str(binding.key))] = binding
                 binding.on_change(lambda *_args, scope=schema_field.scope: self._mark_dirty(scope))
+                binding.on_change(lambda *_args: self._refresh_conditional_visibility())
+                binding.widget.setObjectName(
+                    f"SettingsField__{str(schema_field.scope or '').strip()}__{str(schema_field.id or '').strip()}"
+                )
 
                 field_type = str(schema_field.type or "")
+                row_index = form.rowCount()
                 if field_type == "checkbox" or bool(binding.full_row):
                     form.addRow(binding.widget)
+                    self._field_rows.append(
+                        _FieldRowBinding(
+                            field=schema_field,
+                            binding=binding,
+                            form=form,
+                            row=row_index,
+                        )
+                    )
                 else:
                     label = QLabel(schema_field.label)
+                    label.setObjectName(
+                        f"SettingsLabel__{str(schema_field.scope or '').strip()}__{str(schema_field.id or '').strip()}"
+                    )
                     if schema_field.description:
                         label.setToolTip(schema_field.description)
                         binding.widget.setToolTip(schema_field.description)
                     form.addRow(label, binding.widget)
+                    self._field_rows.append(
+                        _FieldRowBinding(
+                            field=schema_field,
+                            binding=binding,
+                            form=form,
+                            row=row_index,
+                            label=label,
+                        )
+                    )
 
             section_layout.addLayout(form)
             content.addWidget(group)
@@ -1195,6 +1236,49 @@ class SchemaSettingsDialog(DialogWindow):
                     binding.setter(value)
         finally:
             self._ignore_changes = False
+        self._refresh_conditional_visibility()
+
+    def _bound_value_for(self, *, key: str, scope: str, default: Any = None) -> Any:
+        binding = self._binding_lookup.get((str(scope), str(key)))
+        if binding is not None:
+            try:
+                return binding.getter()
+            except Exception:
+                return default
+        return self.backend.get(key, scope_preference=scope, default=default)
+
+    def _field_is_visible(self, field: SchemaField) -> bool:
+        rules = field.visible_when if isinstance(field.visible_when, list) else None
+        if not rules:
+            return True
+        for raw_rule in rules:
+            rule = raw_rule if isinstance(raw_rule, dict) else {}
+            key = str(rule.get("key") or "").strip()
+            if not key:
+                continue
+            scope = str(rule.get("scope") or field.scope or "").strip()
+            expected = rule.get("equals", rule.get("value"))
+            current = self._bound_value_for(key=key, scope=scope)
+            if current != expected:
+                return False
+        return True
+
+    def _set_form_row_visible(self, row_binding: _FieldRowBinding, visible: bool) -> None:
+        try:
+            row_binding.form.setRowVisible(row_binding.row, visible)
+            return
+        except Exception:
+            pass
+        if row_binding.label is not None:
+            row_binding.label.setVisible(visible)
+        row_binding.binding.widget.setVisible(visible)
+
+    def _refresh_conditional_visibility(self) -> None:
+        for row_binding in self._field_rows:
+            self._set_form_row_visible(
+                row_binding,
+                self._field_is_visible(row_binding.field),
+            )
 
     def _schema_default_for(self, key: str, scope: str) -> Any:
         for page in self.schema.pages:

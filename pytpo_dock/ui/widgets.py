@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEasingCurve, Property, QParallelAnimationGroup, QPropertyAnimation, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QStyle, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QSizePolicy, QStyle, QToolButton, QVBoxLayout, QWidget
 
 from ..debug import log_dock_debug
 from ..settings_dialog import DockVisualSettings
@@ -351,6 +351,7 @@ class WindowPreview(QFrame):
     hover_changed = Signal(bool)
     interaction_started = Signal()
     action_requested = Signal(str, object)
+    content_size_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -359,6 +360,7 @@ class WindowPreview(QFrame):
         self._settings = DockVisualSettings()
         self._background_pixmap = QPixmap()
         self._last_paint_signature = None
+        self._cards_by_key: dict[str, AnimatedPreviewCard] = {}
         self.setStyleSheet("""
             QLabel {
                 color: white;
@@ -394,98 +396,54 @@ class WindowPreview(QFrame):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._cards_by_key.clear()
+        self._sync_content_size()
 
-    def update_content(self, previews):
-        self.clear_content()
+    def update_content(self, previews, *, animate_changes: bool = True):
         log_dock_debug(
             "dock-preview-content-updated",
             preview_count=len(previews),
             preview_titles=[preview.get('title', '') for preview in previews],
         )
-        frame_sizes = []
-        for preview in previews:
-            frame = PreviewCard(preview, self)
-            frame.pressed.connect(self.interaction_started)
-            frame.clicked.connect(
-                lambda data, action='toggle_focus': self.action_requested.emit(action, data)
-            )
-            frame.setStyleSheet("""
-                QFrame {
-                    background-color: rgba(255, 255, 255, 12);
-                    border-radius: 10px;
-                }
-            """)
+        if not previews:
+            self.clear_content()
+            return
 
-            image_label = QLabel(frame)
-            image_label.setAlignment(Qt.AlignCenter)
-            image_label.setMinimumSize(220, 140)
+        previous_order = self._layout_keys()
+        target_keys = [self._preview_key(preview, index) for index, preview in enumerate(previews)]
+        target_key_set = set(target_keys)
 
-            title_label = QLabel(frame)
-            title_label.setAlignment(Qt.AlignCenter)
-            title_label.setWordWrap(True)
+        for key in previous_order:
+            if key not in target_key_set:
+                card = self._cards_by_key.get(key)
+                if card is not None:
+                    card.animate_out(animated=animate_changes)
 
-            controls_row = QHBoxLayout()
-            controls_row.setContentsMargins(0, 0, 0, 0)
-            controls_row.setSpacing(4)
-
-            scaled = preview['pixmap'].scaled(280, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            image_label.setPixmap(scaled)
-            title_label.setText(preview['title'])
-
-            for action_name, tooltip, icon in self._actions_for_preview(preview):
-                button = QToolButton(frame)
-                button.setCursor(Qt.PointingHandCursor)
-                button.setAutoRaise(True)
-                button.setIcon(icon)
-                button.setIconSize(QSize(14, 14))
-                button.setFixedSize(24, 24)
-                button.setToolTip(tooltip)
-                button.setStyleSheet("""
-                    QToolButton {
-                        background: rgba(255, 255, 255, 20);
-                        border-radius: 6px;
-                    }
-                    QToolButton:hover {
-                        background: rgba(255, 255, 255, 35);
-                    }
-                """)
-                button.pressed.connect(self.interaction_started)
-                button.clicked.connect(
-                    lambda _checked=False, action=action_name, data=dict(preview): self.action_requested.emit(action, data)
+        for index, preview in enumerate(previews):
+            key = target_keys[index]
+            card = self._cards_by_key.get(key)
+            if card is None:
+                card = AnimatedPreviewCard(
+                    key,
+                    preview,
+                    actions_provider=self._actions_for_preview,
+                    parent=self,
                 )
-                controls_row.addWidget(button)
-            controls_row.addStretch(1)
+                card.pressed.connect(self.interaction_started)
+                card.clicked.connect(
+                    lambda data, action='toggle_focus': self.action_requested.emit(action, data)
+                )
+                card.action_requested.connect(self.action_requested)
+                card.removal_finished.connect(self._remove_card)
+                card.size_changed.connect(self._sync_content_size)
+                self._cards_by_key[key] = card
+                self.layout.insertWidget(self._insertion_index(previous_order, target_keys, key), card)
+                previous_order = self._layout_keys()
+                card.animate_in(animated=animate_changes)
+            else:
+                card.update_preview(preview)
 
-            frame_layout = QVBoxLayout(frame)
-            frame_layout.setContentsMargins(8, 8, 8, 8)
-            frame_layout.setSpacing(6)
-            frame_layout.addWidget(image_label)
-            frame_layout.addWidget(title_label)
-            frame_layout.addLayout(controls_row)
-            self.layout.addWidget(frame)
-            frame_layout.activate()
-            frame.adjustSize()
-            frame_size = frame.sizeHint().expandedTo(frame.minimumSizeHint())
-            frame_sizes.append(frame_size)
-
-        self.layout.invalidate()
-        self.layout.activate()
-        margins = self.layout.contentsMargins()
-        total_width = margins.left() + margins.right()
-        total_height = margins.top() + margins.bottom()
-        if frame_sizes:
-            total_width += sum(size.width() for size in frame_sizes)
-            total_width += self.layout.spacing() * max(0, len(frame_sizes) - 1)
-            total_height += max(size.height() for size in frame_sizes)
-        self._content_size = QSize(total_width, total_height)
-        self.setMinimumSize(self._content_size)
-        self.resize(self._content_size)
-        self.updateGeometry()
-        log_dock_debug(
-            "dock-preview-size-computed",
-            frame_sizes=[(size.width(), size.height()) for size in frame_sizes],
-            target_size=(self._content_size.width(), self._content_size.height()),
-        )
+        self._sync_content_size()
 
     def sizeHint(self):
         if self._content_size.isValid() and not self._content_size.isEmpty():
@@ -496,6 +454,66 @@ class WindowPreview(QFrame):
         if self._content_size.isValid() and not self._content_size.isEmpty():
             return self._content_size
         return super().minimumSizeHint()
+
+    def _layout_keys(self) -> list[str]:
+        keys: list[str] = []
+        for index in range(self.layout.count()):
+            widget = self.layout.itemAt(index).widget()
+            if isinstance(widget, AnimatedPreviewCard):
+                keys.append(widget.preview_key)
+        return keys
+
+    def _preview_key(self, preview, index: int) -> str:
+        win_id = str(preview.get("win_id") or "").strip()
+        if win_id:
+            return win_id
+        title = str(preview.get("title") or "").strip()
+        return f"preview-{index}:{title}"
+
+    def _insertion_index(self, current_order: list[str], target_order: list[str], key: str) -> int:
+        target_index = target_order.index(key)
+        next_keys = target_order[target_index + 1:]
+        for next_key in next_keys:
+            if next_key in current_order:
+                return current_order.index(next_key)
+        return self.layout.count()
+
+    def _remove_card(self, key: str) -> None:
+        card = self._cards_by_key.pop(key, None)
+        if card is None:
+            return
+        self.layout.removeWidget(card)
+        card.deleteLater()
+        self._sync_content_size()
+
+    def _sync_content_size(self) -> None:
+        frame_sizes = []
+        for index in range(self.layout.count()):
+            widget = self.layout.itemAt(index).widget()
+            if widget is None or widget.isHidden():
+                continue
+            frame_sizes.append(widget.size())
+
+        self.layout.invalidate()
+        self.layout.activate()
+        margins = self.layout.contentsMargins()
+        total_width = margins.left() + margins.right()
+        total_height = margins.top() + margins.bottom()
+        visible_sizes = [size for size in frame_sizes if size.width() > 0 and size.height() > 0]
+        if visible_sizes:
+            total_width += sum(size.width() for size in visible_sizes)
+            total_width += self.layout.spacing() * max(0, len(visible_sizes) - 1)
+            total_height += max(size.height() for size in visible_sizes)
+        self._content_size = QSize(total_width, total_height)
+        self.setMinimumSize(self._content_size)
+        self.resize(self._content_size)
+        self.updateGeometry()
+        self.content_size_changed.emit()
+        log_dock_debug(
+            "dock-preview-size-computed",
+            frame_sizes=[(size.width(), size.height()) for size in frame_sizes],
+            target_size=(self._content_size.width(), self._content_size.height()),
+        )
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -589,11 +607,85 @@ class WindowPreview(QFrame):
 class PreviewCard(QFrame):
     pressed = Signal()
     clicked = Signal(object)
+    action_requested = Signal(str, object)
 
-    def __init__(self, preview, parent: QWidget | None = None):
+    def __init__(self, preview, actions_provider, parent: QWidget | None = None):
         super().__init__(parent)
         self._preview = dict(preview)
         self.setCursor(Qt.PointingHandCursor)
+        self._actions_provider = actions_provider
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255, 255, 255, 12);
+                border-radius: 10px;
+            }
+        """)
+
+        image_label = QLabel(self)
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setScaledContents(True)
+        image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        title_label = QLabel(self)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setWordWrap(True)
+        title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(4)
+
+        frame_layout = QVBoxLayout(self)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(6)
+        frame_layout.addWidget(image_label)
+        frame_layout.addWidget(title_label)
+        frame_layout.addLayout(controls_row)
+        self._image_label = image_label
+        self._title_label = title_label
+        self._controls_row = controls_row
+        self._frame_layout = frame_layout
+        self.update_preview(preview)
+
+    def update_preview(self, preview) -> None:
+        self._preview = dict(preview)
+        while self._controls_row.count():
+            item = self._controls_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        scaled = self._preview['pixmap'].scaled(196, 126, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._image_label.setPixmap(scaled)
+        self._title_label.setText(self._preview['title'])
+
+        for action_name, tooltip, icon in self._actions_provider(self._preview):
+            button = QToolButton(self)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setAutoRaise(True)
+            button.setIcon(icon)
+            button.setIconSize(QSize(14, 14))
+            button.setFixedSize(24, 24)
+            button.setToolTip(tooltip)
+            button.setStyleSheet("""
+                QToolButton {
+                    background: rgba(255, 255, 255, 20);
+                    border-radius: 6px;
+                }
+                QToolButton:hover {
+                    background: rgba(255, 255, 255, 35);
+                }
+            """)
+            button.pressed.connect(self.pressed)
+            button.clicked.connect(
+                lambda _checked=False, action=action_name, data=dict(self._preview): self.action_requested.emit(action, data)
+            )
+            self._controls_row.addWidget(button)
+        self._controls_row.addStretch(1)
+        self._frame_layout.activate()
+        self.adjustSize()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -606,6 +698,115 @@ class PreviewCard(QFrame):
         if event.button() == Qt.LeftButton:
             self.pressed.emit()
         super().mousePressEvent(event)
+
+
+class AnimatedPreviewCard(QWidget):
+    pressed = Signal()
+    clicked = Signal(object)
+    action_requested = Signal(str, object)
+    removal_finished = Signal(str)
+    size_changed = Signal()
+
+    def __init__(self, preview_key: str, preview, *, actions_provider, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.preview_key = preview_key
+        self._actions_provider = actions_provider
+        self._preview = dict(preview)
+        self._animated_size = QSize()
+        self._target_size = QSize()
+
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(0, 0)
+
+        self._live_card = PreviewCard(preview, actions_provider, self)
+        self._live_card.pressed.connect(self.pressed)
+        self._live_card.clicked.connect(self.clicked)
+        self._live_card.action_requested.connect(self.action_requested)
+
+        self._size_anim = QPropertyAnimation(self, b"animatedSize", self)
+        self._size_anim.setDuration(160)
+        self._size_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._anim_group = QParallelAnimationGroup(self)
+        self._anim_group.addAnimation(self._size_anim)
+        self._anim_group.finished.connect(self._handle_animation_finished)
+        self._animation_mode = ""
+        self.update_preview(preview)
+
+    def get_animated_size(self) -> QSize:
+        return QSize(self._animated_size)
+
+    def set_animated_size(self, size: QSize) -> None:
+        normalized = QSize(max(0, size.width()), max(0, size.height()))
+        if normalized == self._animated_size:
+            return
+        self._animated_size = normalized
+        self.setMinimumSize(normalized)
+        self.setMaximumSize(normalized)
+        self.resize(normalized)
+        self.updateGeometry()
+        self.size_changed.emit()
+
+    animatedSize = Property(QSize, get_animated_size, set_animated_size)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._live_card.setGeometry(self.rect())
+
+    def update_preview(self, preview) -> None:
+        self._preview = dict(preview)
+        self._live_card.update_preview(preview)
+        self._target_size = self._live_card.sizeHint().expandedTo(self._live_card.minimumSizeHint())
+        if not self._animation_mode:
+            self._live_card.setGeometry(QRect(0, 0, self._target_size.width(), self._target_size.height()))
+            self.set_animated_size(self._target_size)
+            self._live_card.show()
+
+    def animate_in(self, *, animated: bool) -> None:
+        self._stop_animation()
+        self._target_size = self._live_card.sizeHint().expandedTo(self._live_card.minimumSizeHint())
+        if not animated:
+            self._animation_mode = ""
+            self._live_card.show()
+            self.set_animated_size(self._target_size)
+            return
+        self._animation_mode = "enter"
+        self._live_card.show()
+        self.set_animated_size(QSize(0, 0))
+        self._size_anim.setStartValue(QSize(0, 0))
+        self._size_anim.setEndValue(self._target_size)
+        self._anim_group.start()
+
+    def animate_out(self, *, animated: bool) -> None:
+        self._stop_animation()
+        if not animated:
+            self.removal_finished.emit(self.preview_key)
+            return
+        self._animation_mode = "exit"
+        self._live_card.show()
+        current_size = self.size()
+        if not current_size.isValid() or current_size.isEmpty():
+            current_size = QSize(self._target_size)
+        self.set_animated_size(current_size)
+        self._size_anim.setStartValue(current_size)
+        self._size_anim.setEndValue(QSize(0, 0))
+        self._anim_group.start()
+
+    def _stop_animation(self) -> None:
+        if self._anim_group.state():
+            self._anim_group.stop()
+        self._live_card.show()
+        self._animation_mode = ""
+
+    def _handle_animation_finished(self) -> None:
+        mode = self._animation_mode
+        self._animation_mode = ""
+        if mode == "enter":
+            self._live_card.show()
+            self.set_animated_size(self._target_size)
+            return
+        if mode == "exit":
+            self.removal_finished.emit(self.preview_key)
 
 
 class DockContainerFrame(QFrame):

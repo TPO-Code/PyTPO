@@ -168,8 +168,9 @@ class _FakePopupSizer:
     def isVisible(self):
         return True
 
-    def update_content(self, previews):
+    def update_content(self, previews, *, animate_changes=True):
         self.updated_with.append([dict(preview) for preview in previews])
+        self.animate_changes = animate_changes
 
     def sizeHint(self):
         return self._size
@@ -1025,6 +1026,7 @@ class DockWindowPreviewTests(unittest.TestCase):
 
         class _DummyDock:
             _render_preview_entries = main_window.CustomDock._render_preview_entries
+            _position_preview_popup = main_window.CustomDock._position_preview_popup
 
             def __init__(self):
                 self.preview_popup = _FakePopupSizer()
@@ -1051,6 +1053,7 @@ class DockWindowPreviewTests(unittest.TestCase):
         self.assertEqual(dock.preview_popup_fade.start_calls, 0)
         self.assertEqual(dock.preview_popup_opacity.values[-1], 1.0)
         self.assertEqual(dock.current_preview_entries[0]["win_id"], "0x2b")
+        self.assertTrue(dock.preview_popup.animate_changes)
 
     def test_refresh_active_preview_retries_before_hiding_when_grace_is_available(self):
         scheduled = {}

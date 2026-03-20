@@ -19,6 +19,7 @@ from PySide6.QtCore import QEasingCurve, QObject, QRectF, QSize, QThread, QTimer
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QContextMenuEvent,
     QDesktopServices,
     QIcon,
     QLinearGradient,
@@ -850,18 +851,31 @@ class _ChatInputEdit(SpellcheckTextEdit):
 
     def _link_raw_at_doc_pos(self, pos: int) -> str | None:
         doc = self.document()
-        max_pos = max(0, int(doc.characterCount()) - 1)
         probe = int(pos)
-        if probe < 0 or probe > max_pos:
+        if probe < 0:
             return None
-        cursor = QTextCursor(doc)
-        cursor.setPosition(probe)
-        fmt = cursor.charFormat()
-        if not fmt.hasProperty(self.LINK_RAW_PROPERTY):
+        block = doc.findBlock(probe)
+        if not block.isValid():
             return None
-        raw = fmt.property(self.LINK_RAW_PROPERTY)
-        text = str(raw or "").strip()
-        return text or None
+        block_start = int(block.position())
+        block_end = block_start + len(str(block.text() or ""))
+        if probe < block_start or probe >= block_end:
+            return None
+        it = block.begin()
+        while not it.atEnd():
+            fragment = it.fragment()
+            if fragment.isValid():
+                start = int(fragment.position())
+                end = start + len(str(fragment.text() or ""))
+                if start <= probe < end:
+                    fmt = fragment.charFormat()
+                    if not fmt.hasProperty(self.LINK_RAW_PROPERTY):
+                        return None
+                    raw = fmt.property(self.LINK_RAW_PROPERTY)
+                    text = str(raw or "").strip()
+                    return text or None
+            it += 1
+        return None
 
     def _link_span_at_cursor(
         self,
@@ -905,6 +919,42 @@ class _ChatInputEdit(SpellcheckTextEdit):
             return None
         return start, end, raw
 
+    def _link_span_at_viewport_pos(self, pos) -> tuple[int, int, str] | None:
+        cursor = self.cursorForPosition(pos)
+        if cursor is None:
+            return None
+        return self._link_span_at_cursor(cursor)
+
+    def _boundary_link_raw(self, cursor: QTextCursor | None = None) -> str | None:
+        cur = QTextCursor(cursor) if isinstance(cursor, QTextCursor) else self.textCursor()
+        if cur.hasSelection():
+            return None
+        span = self._link_span_at_cursor(cur)
+        if span is None:
+            return None
+        start, end, raw = span
+        pos = int(cur.position())
+        if pos <= start or pos >= end:
+            return raw
+        return None
+
+    def _reset_boundary_link_format(self, cursor: QTextCursor | None = None) -> None:
+        if not self._boundary_link_raw(cursor):
+            return
+        self._break_link_boundary_format()
+
+    def _insert_plain_text_at_cursor(self, text: str) -> None:
+        value = str(text or "")
+        if not value:
+            return
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        try:
+            cursor.insertText(value, QTextCharFormat())
+        finally:
+            cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
     def _expand_link_for_editing(
         self,
         cursor: QTextCursor | None = None,
@@ -937,6 +987,7 @@ class _ChatInputEdit(SpellcheckTextEdit):
         finally:
             self.document().setModified(was_modified)
             self._is_internal_change = was_internal
+        self._reset_boundary_link_format(self.textCursor())
         self._last_cursor_pos = int(self.textCursor().position())
         return True
 
@@ -1175,13 +1226,56 @@ class _ChatInputEdit(SpellcheckTextEdit):
         if (
             text
             and not (modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
-            and (
-                self._cursor_is_appending_to_link(self.textCursor())
-                or self._cursor_is_prepending_to_link(self.textCursor())
-            )
+            and not self.textCursor().hasSelection()
+            and self._boundary_link_raw(self.textCursor())
         ):
-            self._break_link_boundary_format()
+            self._insert_plain_text_at_cursor(text)
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def insertPlainText(self, text: str) -> None:  # type: ignore[override]
+        if not self.textCursor().hasSelection() and self._boundary_link_raw(self.textCursor()):
+            self._insert_plain_text_at_cursor(text)
+            return
+        super().insertPlainText(text)
+
+    def insertFromMimeData(self, source) -> None:  # type: ignore[override]
+        if (
+            source is not None
+            and source.hasText()
+            and not self.textCursor().hasSelection()
+            and self._boundary_link_raw(self.textCursor())
+        ):
+            self._insert_plain_text_at_cursor(str(source.text() or ""))
+            return
+        self._reset_boundary_link_format(self.textCursor())
+        super().insertFromMimeData(source)
+
+    def _append_copy_reference_action(self, menu: QMenu, local_pos) -> None:
+        span = self._link_span_at_viewport_pos(local_pos)
+        if span is None:
+            return
+        _start, _end, raw_link = span
+        actions = menu.actions()
+        action = QAction("Copy reference", menu)
+        action.triggered.connect(
+            lambda _checked=False, text=raw_link: QApplication.clipboard().setText(text)
+        )
+        if actions:
+            menu.insertAction(actions[0], action)
+            menu.insertSeparator(actions[0])
+            return
+        menu.addAction(action)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # type: ignore[override]
+        menu = self.createStandardContextMenu(event.pos())
+        try:
+            self._append_copy_reference_action(menu, event.pos())
+            self._append_spell_actions(menu, event.pos())
+            menu.exec(event.globalPos())
+        finally:
+            menu.deleteLater()
 
     def focusOutEvent(self, event) -> None:  # type: ignore[override]
         super().focusOutEvent(event)

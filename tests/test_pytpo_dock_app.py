@@ -128,6 +128,8 @@ class DockAppTests(unittest.TestCase):
                 return 0
 
         class _DummyDock:
+            _log_preview_hide_reason = staticmethod(lambda *_args, **_kwargs: None)
+
             def __init__(self):
                 self.hide_preview_called = False
 

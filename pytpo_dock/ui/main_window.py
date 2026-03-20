@@ -77,6 +77,7 @@ class CustomDock(QWidget):
         self.preview_popup_fade.setEasingCurve(QEasingCurve.InOutCubic)
         self.preview_popup.interaction_started.connect(self.handle_preview_interaction_started)
         self.preview_popup.action_requested.connect(self.handle_preview_action)
+        self.preview_popup.content_size_changed.connect(self._reposition_active_preview_popup)
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.show_pending_preview)
@@ -566,6 +567,42 @@ class CustomDock(QWidget):
             if screen is not None:
                 return screen.availableGeometry()
         return self._screen_geometry(prefer_cursor=True)
+
+    def _active_preview_anchor_item(self):
+        anchor_item = self.active_preview_item if isValid(self.active_preview_item) else None
+        if anchor_item is None or not anchor_item.isVisible():
+            anchor_item = self._find_dock_item_by_app_path(self.active_preview_app_path)
+        if anchor_item is None or not isValid(anchor_item) or not anchor_item.isVisible():
+            return None
+        return anchor_item
+
+    def _position_preview_popup(self, dock_item) -> tuple[int, int]:
+        screen_geometry = self._preview_screen_geometry_for_item(dock_item)
+        anchor_top_left = dock_item.mapToGlobal(QPoint(0, 0))
+        popup_x = anchor_top_left.x() + (dock_item.width() - self.preview_popup.width()) // 2
+        popup_y = anchor_top_left.y() - self.preview_popup.height() - 12
+        if not screen_geometry.isNull():
+            popup_x = max(
+                screen_geometry.left() + 8,
+                min(popup_x, screen_geometry.right() - self.preview_popup.width() - 7),
+            )
+            min_y = screen_geometry.top() + 8
+            if popup_y < min_y:
+                popup_y = min(
+                    anchor_top_left.y() + dock_item.height() + 12,
+                    screen_geometry.bottom() - self.preview_popup.height() - 7,
+                )
+
+        self.preview_popup.move(popup_x, popup_y)
+        return popup_x, popup_y
+
+    def _reposition_active_preview_popup(self) -> None:
+        if self.preview_popup is None or not self.preview_popup.isVisible():
+            return
+        anchor_item = self._active_preview_anchor_item()
+        if anchor_item is None:
+            return
+        self._position_preview_popup(anchor_item)
 
     def _preview_global_rect(self) -> QRect:
         if self.preview_popup is None or not self.preview_popup.isVisible():
@@ -1104,26 +1141,10 @@ class CustomDock(QWidget):
     def _render_preview_entries(self, dock_item, previews):
         was_visible = self.preview_popup.isVisible()
         self.current_preview_entries = [dict(preview) for preview in previews]
-        self.preview_popup.update_content(self.current_preview_entries)
+        self.preview_popup.update_content(self.current_preview_entries, animate_changes=was_visible)
         preview_size = self.preview_popup.sizeHint()
         self.preview_popup.resize(preview_size)
-        screen_geometry = self._preview_screen_geometry_for_item(dock_item)
-        anchor_top_left = dock_item.mapToGlobal(QPoint(0, 0))
-        popup_x = anchor_top_left.x() + (dock_item.width() - self.preview_popup.width()) // 2
-        popup_y = anchor_top_left.y() - self.preview_popup.height() - 12
-        if not screen_geometry.isNull():
-            popup_x = max(
-                screen_geometry.left() + 8,
-                min(popup_x, screen_geometry.right() - self.preview_popup.width() - 7),
-            )
-            min_y = screen_geometry.top() + 8
-            if popup_y < min_y:
-                popup_y = min(
-                    anchor_top_left.y() + dock_item.height() + 12,
-                    screen_geometry.bottom() - self.preview_popup.height() - 7,
-                )
-
-        self.preview_popup.move(popup_x, popup_y)
+        popup_x, popup_y = self._position_preview_popup(dock_item)
         self.preview_popup_fade.stop()
         self.preview_popup.show()
         if was_visible:

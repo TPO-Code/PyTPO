@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -30,12 +30,14 @@ class FooterSection(QWidget):
         *,
         open_terminal: Callable[[], None],
         open_dock: Callable[[], None],
+        open_settings: Callable[[], None],
         close_panel: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._open_terminal = open_terminal
         self._open_dock = open_dock
+        self._open_settings = open_settings
         self._close_panel = close_panel
 
         root = QVBoxLayout(self)
@@ -58,10 +60,19 @@ class FooterSection(QWidget):
         self.dock_button.clicked.connect(lambda: self._invoke_and_close(self._open_dock))
         actions_row.addWidget(self.dock_button)
 
+        self.settings_button = QToolButton(self)
+        self.settings_button.setText("Settings")
+        self.settings_button.setIcon(QIcon(_icon_path("settings.png")))
+        self.settings_button.setIconSize(QSize(16, 16))
+        self.settings_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.settings_button.clicked.connect(lambda: self._invoke_and_close(self._open_settings))
+        actions_row.addWidget(self.settings_button)
+
         self.power_button = QToolButton(self)
         self.power_button.setText("Power")
         self.power_button.setIcon(QIcon(_icon_path("power.svg")))
         self.power_button.setIconSize(QSize(16, 16))
+        self.power_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.power_button.setPopupMode(QToolButton.InstantPopup)
         self.power_menu = QMenu(self)
         self.power_button.setMenu(self.power_menu)
