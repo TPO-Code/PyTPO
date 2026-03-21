@@ -15,8 +15,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pytpo.services.asset_paths import preferred_shared_asset_path
-
 from ..dbus import (
     run_logout_command,
     run_poweroff_command,
@@ -24,11 +22,9 @@ from ..dbus import (
     run_shutdown_command,
     run_suspend_command,
 )
+from ..appearance import color_from_setting
 from ..settings import TopBarBehaviorSettings
-
-
-def _icon_path(name: str) -> str:
-    return str(preferred_shared_asset_path(f"icons/{name}"))
+from .icon_assets import POWER_ICON_NAME, SETTINGS_ICON_NAME, asset_icon, color_hex
 
 
 class FooterSection(QWidget):
@@ -85,18 +81,27 @@ class FooterSection(QWidget):
     def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
         icon_size = max(12, int(settings.menu_appearance_item_icon_size))
         size = QSize(icon_size, icon_size)
-        self._apply_icon_button(self.settings_button, "Settings", "settings.png", size)
-        self._apply_icon_button(self.power_button, "Power", "power.svg", size)
+        item_text = color_from_setting(settings.menu_appearance_item_text_color, "#f2f4f5")
+        foreground = color_hex(item_text)
+        self._apply_icon_button(self.settings_button, "Settings", SETTINGS_ICON_NAME, size, foreground)
+        self._apply_icon_button(self.power_button, "Power", POWER_ICON_NAME, size, foreground)
 
-    def _apply_icon_button(self, button: QToolButton, fallback_text: str, icon_name: str, size: QSize) -> None:
-        icon = QIcon(_icon_path(icon_name))
-        icon_pixmap = icon.pixmap(size)
+    def _apply_icon_button(
+        self,
+        button: QToolButton,
+        fallback_text: str,
+        icon_name: str,
+        size: QSize,
+        foreground: str,
+    ) -> None:
+        button_icon = asset_icon(icon_name, foreground=foreground)
+        icon_pixmap = button_icon.pixmap(size)
         if icon_pixmap.isNull():
             button.setIcon(QIcon())
             button.setText(fallback_text)
             button.setToolButtonStyle(Qt.ToolButtonTextOnly)
             return
-        button.setIcon(icon)
+        button.setIcon(button_icon)
         button.setIconSize(size)
         button.setText("")
         button.setToolTip(fallback_text)

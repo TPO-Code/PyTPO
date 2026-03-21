@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from PySide6.QtCore import QTimer, Qt, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QSize, QTimer, Qt, Slot
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -23,6 +23,7 @@ from ..appearance import (
     color_to_qss_rgba,
 )
 from ..settings import TopBarBehaviorSettings
+from .icon_assets import MEDIA_ICON_NAMES, asset_icon, color_hex, loop_icon_name, volume_icon_name
 from .service import PlayerInfo
 
 
@@ -65,6 +66,10 @@ class MediaPlayerCard(StyledPanel):
         self._position_hold_until = 0.0
         self._volume_pending_percent: int | None = None
         self._volume_hold_until = 0.0
+        self._playback_status = ""
+        self._display_volume_percent_value: int | None = None
+        self._control_icon_size = 16
+        self._control_icon_foreground = "#FFFFFF"
         self._settings = TopBarBehaviorSettings()
 
         self._refresh_timer = QTimer(self)
@@ -119,7 +124,7 @@ class MediaPlayerCard(StyledPanel):
 
         self.prev_button.setText("⏮")
         self.seek_back_button.setText("⏪")
-        self.play_pause_button.setText("⏯")
+        self.play_pause_button.setText("▶")
         self.seek_forward_button.setText("⏩")
         self.stop_button.setText("⏹")
         self.next_button.setText("⏭")
@@ -293,12 +298,15 @@ class MediaPlayerCard(StyledPanel):
 
         transport_font = QFont(self.play_pause_button.font())
         transport_font.setPointSize(max(8, int(round(control_icon_size * 0.7))))
+        self._control_icon_size = control_icon_size
+        self._control_icon_foreground = color_hex(title_color)
         for button in self._transport_buttons:
             button.setFont(transport_font)
             button.setFixedSize(button_size, button_size)
 
         for button in (self.loop_button, self.shuffle_button, self.mute_button):
             button.setMinimumHeight(button_size)
+            button.setIconSize(QSize(control_icon_size, control_icon_size))
 
         slider_qss = (
             "QSlider::groove:horizontal {"
@@ -319,6 +327,7 @@ class MediaPlayerCard(StyledPanel):
         )
         self.position_slider.setStyleSheet(slider_qss)
         self.volume_slider.setStyleSheet(slider_qss)
+        self._refresh_button_icons()
 
     def bind(self, info: PlayerInfo) -> None:
         self._player_name = info.name
@@ -335,6 +344,7 @@ class MediaPlayerCard(StyledPanel):
 
         identity = (info.identity or info.name or "Player").strip()
         status = (info.status or "").strip()
+        self._playback_status = status
         title = (info.title or "").strip()
         artist = (info.artist or "").strip()
         album = (info.album or "").strip()
@@ -385,11 +395,10 @@ class MediaPlayerCard(StyledPanel):
         self.stop_button.setVisible(show_stop)
         self.play_pause_button.setVisible(show_play_pause)
         if status.lower() == "playing":
-            self.play_pause_button.setText("⏸")
             self.play_pause_button.setToolTip("Pause")
         else:
-            self.play_pause_button.setText("▶")
             self.play_pause_button.setToolTip("Play")
+        self._refresh_transport_icons()
 
         self._position_syncing = True
         try:
@@ -432,10 +441,12 @@ class MediaPlayerCard(StyledPanel):
         self.shuffle_button.setVisible(show_shuffle)
         if show_shuffle:
             self.shuffle_button.setText("Shuffle: On" if info.shuffle else "Shuffle: Off")
+        self._refresh_option_icons()
 
         self._volume_syncing = True
         try:
             if info.volume is None:
+                self._display_volume_percent_value = None
                 self._volume_pending_percent = None
                 self.volume_slider.setEnabled(False)
                 self.mute_button.setEnabled(False)
@@ -446,6 +457,7 @@ class MediaPlayerCard(StyledPanel):
             else:
                 percent = max(0, min(100, int(round(info.volume * 100.0))))
                 display_percent = self._display_volume_percent(percent)
+                self._display_volume_percent_value = display_percent
                 self.volume_slider.setEnabled(True)
                 self.mute_button.setEnabled(True)
                 if not self._volume_dragging:
@@ -457,6 +469,7 @@ class MediaPlayerCard(StyledPanel):
                     self._last_nonzero_volume = max(0.01, display_percent / 100.0)
         finally:
             self._volume_syncing = False
+        self._refresh_volume_icon()
 
     def _set_layout_visible(self, layout: QHBoxLayout, visible: bool) -> None:
         for i in range(layout.count()):
@@ -634,8 +647,10 @@ class MediaPlayerCard(StyledPanel):
         if self._volume_syncing:
             return
         clamped = max(0, min(100, int(value)))
+        self._display_volume_percent_value = clamped
         self.volume_value_label.setText(f"{clamped}%")
         self.mute_button.setText("Unmute" if clamped == 0 else "Mute")
+        self._refresh_volume_icon()
 
     @Slot()
     def _on_volume_slider_pressed(self) -> None:
@@ -672,6 +687,7 @@ class MediaPlayerCard(StyledPanel):
             target_percent = max(0, min(100, int(round(target * 100.0))))
             self._volume_pending_percent = target_percent
             self._volume_hold_until = time.monotonic() + 0.9
+            self._display_volume_percent_value = target_percent
             self._volume_dragging = False
             self._volume_syncing = True
             try:
@@ -680,6 +696,65 @@ class MediaPlayerCard(StyledPanel):
                 self.mute_button.setText("Unmute" if target_percent == 0 else "Mute")
             finally:
                 self._volume_syncing = False
+            self._refresh_volume_icon()
             self._schedule_refresh(240)
             return
         self._schedule_refresh(0)
+
+    def _refresh_button_icons(self) -> None:
+        self._refresh_transport_icons()
+        self._refresh_option_icons()
+        self._refresh_volume_icon()
+
+    def _refresh_transport_icons(self) -> None:
+        icon_size = QSize(self._control_icon_size, self._control_icon_size)
+        self._apply_tool_button_icon(self.prev_button, MEDIA_ICON_NAMES["previous"], "⏮", icon_size)
+        self._apply_tool_button_icon(self.seek_back_button, MEDIA_ICON_NAMES["skip_back"], "⏪", icon_size)
+        play_icon_name = MEDIA_ICON_NAMES["pause"] if self._playback_status.lower() == "playing" else MEDIA_ICON_NAMES["play"]
+        play_fallback = "⏸" if self._playback_status.lower() == "playing" else "▶"
+        self._apply_tool_button_icon(self.play_pause_button, play_icon_name, play_fallback, icon_size)
+        self._apply_tool_button_icon(self.seek_forward_button, MEDIA_ICON_NAMES["skip_forward"], "⏩", icon_size)
+        self._apply_tool_button_icon(self.stop_button, MEDIA_ICON_NAMES["stop"], "⏹", icon_size)
+        self._apply_tool_button_icon(self.next_button, MEDIA_ICON_NAMES["next"], "⏭", icon_size)
+
+    def _refresh_option_icons(self) -> None:
+        icon_size = QSize(self._control_icon_size, self._control_icon_size)
+        self._apply_push_button_icon(self.loop_button, loop_icon_name(self._loop_status), "", icon_size)
+        self._apply_push_button_icon(self.shuffle_button, MEDIA_ICON_NAMES["shuffle"], "", icon_size)
+
+    def _refresh_volume_icon(self) -> None:
+        icon_size = QSize(self._control_icon_size, self._control_icon_size)
+        icon_name = volume_icon_name(self._display_volume_percent_value, self._display_volume_percent_value == 0)
+        self._apply_push_button_icon(self.mute_button, icon_name, "", icon_size)
+
+    def _apply_tool_button_icon(
+        self,
+        button: QToolButton,
+        icon_name: str,
+        fallback_text: str,
+        icon_size: QSize,
+    ) -> None:
+        button_icon = asset_icon(icon_name, foreground=self._control_icon_foreground)
+        if button_icon.pixmap(icon_size).isNull():
+            button.setIcon(QIcon())
+            button.setText(fallback_text)
+            return
+        button.setIcon(button_icon)
+        button.setIconSize(icon_size)
+        button.setText("")
+
+    def _apply_push_button_icon(
+        self,
+        button: QPushButton,
+        icon_name: str,
+        fallback_text: str,
+        icon_size: QSize,
+    ) -> None:
+        button_icon = asset_icon(icon_name, foreground=self._control_icon_foreground)
+        if button_icon.pixmap(icon_size).isNull():
+            button.setIcon(QIcon())
+            if fallback_text:
+                button.setText(fallback_text)
+            return
+        button.setIcon(button_icon)
+        button.setIconSize(icon_size)

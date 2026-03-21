@@ -6,7 +6,7 @@ set -euo pipefail
 
 PKG_NAME="pytpo"
 ROOT_DIR="$(pwd)"
-PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+PIPX_PYTHON="$(uv python find --system '==3.11.*')"
 DBUS_SERVICES_DIR="${HOME}/.local/share/dbus-1/services"
 STATE_DIR="${HOME}/.local/state/pytpo"
 TOPBAR_BIN="${HOME}/.local/bin/pytpo-topbar"
@@ -199,13 +199,14 @@ do_install() {
     echo "==> Syncing project environment with uv..."
     uv sync
 
-    if [[ ! -x "$PYTHON_BIN" ]]; then
-        echo "Error: expected Python interpreter not found at $PYTHON_BIN"
+    if [[ -z "${PIPX_PYTHON:-}" || ! -x "$PIPX_PYTHON" ]]; then
+        echo "Error: could not find a usable non-venv Python 3.11 interpreter for pipx."
+        echo "Try: uv python install 3.11"
         exit 1
     fi
 
-    echo "==> Reinstalling app with pipx using $PYTHON_BIN ..."
-    pipx install --python "$PYTHON_BIN" . --force
+    echo "==> Reinstalling app with pipx using $PIPX_PYTHON ..."
+    pipx install --python "$PIPX_PYTHON" . --force
 
     echo "==> Installing desktop entries..."
     pytpo-desktop-integration install

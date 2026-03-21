@@ -4,8 +4,8 @@ import concurrent.futures
 import time
 from typing import Callable
 
-from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, QSize, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -25,9 +25,30 @@ from ..appearance import (
     color_to_qss_rgba,
 )
 from ..settings import TopBarBehaviorSettings
+from .icon_assets import asset_icon, color_hex, volume_icon_name
 from .service import AudioStreamInfo, SoundSnapshot, VolumeService
 
 _SHARED_SOUND_BACKEND: "LiveSoundBackend | None" = None
+
+
+def _slider_qss(slider_thickness: int, groove_color, progress_color) -> str:
+    return (
+        "QSlider::groove:horizontal {"
+        f"height: {slider_thickness}px;"
+        f"background: {color_to_qss_rgba(groove_color)};"
+        "border-radius: 999px;"
+        "}"
+        "QSlider::sub-page:horizontal {"
+        f"background: {color_to_qss_rgba(progress_color)};"
+        "border-radius: 999px;"
+        "}"
+        "QSlider::handle:horizontal {"
+        f"width: {max(10, slider_thickness + 6)}px;"
+        f"margin: -{max(2, slider_thickness // 2)}px 0;"
+        f"background: {color_to_qss_rgba(progress_color)};"
+        "border-radius: 999px;"
+        "}"
+    )
 
 
 class LiveSoundBackend(QObject):
@@ -217,6 +238,10 @@ class ApplicationVolumeCard(StyledPanel):
         self._pending_volume_percent: int | None = None
         self._volume_hold_until = 0.0
         self._last_nonzero_percent = 50
+        self._display_volume_percent_value: int | None = None
+        self._is_muted: bool | None = None
+        self._button_icon_size = 16
+        self._button_icon_foreground = "#FFFFFF"
 
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
@@ -318,23 +343,11 @@ class ApplicationVolumeCard(StyledPanel):
             "}"
         )
         self.mute_button.setMinimumHeight(button_size)
-        self.volume_slider.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            f"height: {slider_thickness}px;"
-            f"background: {color_to_qss_rgba(groove_color)};"
-            "border-radius: 999px;"
-            "}"
-            "QSlider::sub-page:horizontal {"
-            f"background: {color_to_qss_rgba(progress_color)};"
-            "border-radius: 999px;"
-            "}"
-            "QSlider::handle:horizontal {"
-            f"width: {max(10, slider_thickness + 6)}px;"
-            f"margin: -{max(2, slider_thickness // 2)}px 0;"
-            f"background: {color_to_qss_rgba(progress_color)};"
-            "border-radius: 999px;"
-            "}"
-        )
+        self._button_icon_size = max(12, button_size - 8)
+        self._button_icon_foreground = color_hex(title_color)
+        self.mute_button.setIconSize(QSize(self._button_icon_size, self._button_icon_size))
+        self._refresh_mute_button_icon()
+        self.volume_slider.setStyleSheet(_slider_qss(slider_thickness, groove_color, progress_color))
 
     def bind(self, info: AudioStreamInfo) -> None:
         self._stream_id = info.stream_id
@@ -349,12 +362,17 @@ class ApplicationVolumeCard(StyledPanel):
 
         percent = info.volume_percent
         if percent is None:
+            self._display_volume_percent_value = None
+            self._is_muted = info.is_muted
             self.volume_slider.setEnabled(False)
             self.mute_button.setEnabled(False)
             self.volume_value_label.setText("N/A")
+            self._refresh_mute_button_icon()
             return
 
         display_percent = self._display_volume_percent(percent)
+        self._display_volume_percent_value = display_percent
+        self._is_muted = info.is_muted
         if display_percent > 0:
             self._last_nonzero_percent = display_percent
 
@@ -369,6 +387,7 @@ class ApplicationVolumeCard(StyledPanel):
         self.mute_button.setEnabled(True)
         self.volume_value_label.setText(f"{display_percent}%")
         self.mute_button.setText("Unmute" if bool(info.is_muted) or display_percent == 0 else "Mute")
+        self._refresh_mute_button_icon()
 
     def _display_volume_percent(self, remote_percent: int) -> int:
         if self._volume_dragging:
@@ -391,9 +410,13 @@ class ApplicationVolumeCard(StyledPanel):
         clamped = max(0, min(100, int(value)))
         if clamped > 0:
             self._last_nonzero_percent = clamped
+        self._display_volume_percent_value = clamped
+        self._is_muted = clamped == 0
         self._pending_volume_percent = clamped
         self._volume_hold_until = time.monotonic() + 0.9
         self.volume_value_label.setText(f"{clamped}%")
+        self.mute_button.setText("Unmute" if clamped == 0 else "Mute")
+        self._refresh_mute_button_icon()
         self._apply_timer.start()
 
     @Slot()
@@ -432,6 +455,8 @@ class ApplicationVolumeCard(StyledPanel):
 
         self._pending_volume_percent = target_percent
         self._volume_hold_until = time.monotonic() + 0.9
+        self._display_volume_percent_value = target_percent
+        self._is_muted = target_percent == 0
         previous_state = self.volume_slider.blockSignals(True)
         self._volume_syncing = True
         self.volume_slider.setValue(target_percent)
@@ -439,6 +464,19 @@ class ApplicationVolumeCard(StyledPanel):
         self.volume_slider.blockSignals(previous_state)
         self.volume_value_label.setText(f"{target_percent}%")
         self.mute_button.setText("Unmute" if target_percent == 0 else "Mute")
+        self._refresh_mute_button_icon()
+
+    def _refresh_mute_button_icon(self) -> None:
+        icon_size = QSize(self._button_icon_size, self._button_icon_size)
+        button_icon = asset_icon(
+            volume_icon_name(self._display_volume_percent_value, self._is_muted),
+            foreground=self._button_icon_foreground,
+        )
+        if button_icon.pixmap(icon_size).isNull():
+            self.mute_button.setIcon(QIcon())
+            return
+        self.mute_button.setIcon(button_icon)
+        self.mute_button.setIconSize(icon_size)
 
 
 class SoundSection(QWidget):
@@ -458,6 +496,10 @@ class SoundSection(QWidget):
         self._pending_volume_percent: int | None = None
         self._volume_hold_until = 0.0
         self._last_nonzero_percent = 50
+        self._display_volume_percent_value: int | None = None
+        self._is_muted: bool | None = None
+        self._button_icon_size = 16
+        self._button_icon_foreground = "#FFFFFF"
         self._stream_cards: dict[int, ApplicationVolumeCard] = {}
 
         self._volume_apply_timer = QTimer(self)
@@ -542,6 +584,7 @@ class SoundSection(QWidget):
         self.volume_mute_button.setEnabled(available)
         if not available:
             self.volume_value_label.setText("Unavailable")
+        self._refresh_volume_mute_button_icon()
         if not self.volume.has_pactl():
             self.streams_empty_label.setText("Install pactl support to enable application audio stream controls.")
             self.streams_empty_label.show()
@@ -561,19 +604,25 @@ class SoundSection(QWidget):
         self.volume_slider.setEnabled(available)
         self.volume_mute_button.setEnabled(available)
         if not available:
+            self._display_volume_percent_value = None
+            self._is_muted = snapshot.is_muted
             self._pending_volume_percent = None
             self.volume_value_label.setText("Unavailable")
             self.volume_mute_button.setText("Mute")
             self._sync_stream_cards(())
             self._update_streams_visibility(())
+            self._refresh_volume_mute_button_icon()
             return
 
         percent = snapshot.volume_percent
         muted = snapshot.is_muted
+        self._is_muted = muted
         if percent is None:
+            self._display_volume_percent_value = None
             self.volume_value_label.setText("Unknown")
         else:
             display_percent = self._display_volume_percent(percent)
+            self._display_volume_percent_value = display_percent
             if display_percent > 0:
                 self._last_nonzero_percent = display_percent
             previous_state = self.volume_slider.blockSignals(True)
@@ -586,6 +635,7 @@ class SoundSection(QWidget):
             suffix = " muted" if muted and display_percent == 0 else ""
             self.volume_value_label.setText(f"{display_percent}%{suffix}")
             self.volume_mute_button.setText("Unmute" if muted or display_percent == 0 else "Mute")
+        self._refresh_volume_mute_button_icon()
 
         self._sync_stream_cards(snapshot.streams)
         self._update_streams_visibility(snapshot.streams)
@@ -594,10 +644,20 @@ class SoundSection(QWidget):
         self._settings = settings
         self._root_layout.setSpacing(max(0, int(settings.menu_appearance_section_spacing)))
         self.streams_layout.setSpacing(max(0, int(settings.media_cards_spacing)))
+        slider_thickness = max(2, int(settings.media_cards_slider_thickness))
+        groove_color = color_from_setting(settings.media_cards_progress_background_color, "#ffffff24")
+        progress_color = color_from_setting(settings.media_cards_progress_color, "#70c0ff")
+        self.volume_slider.setStyleSheet(_slider_qss(slider_thickness, groove_color, progress_color))
         for card in self._stream_cards.values():
             card.apply_settings(settings)
         self._sync_stream_cards(self._snapshot.streams)
         self._update_streams_visibility(self._snapshot.streams)
+        item_text = color_from_setting(settings.menu_appearance_item_text_color, "#f2f4f5")
+        self._button_icon_foreground = color_hex(item_text)
+        button_size = max(18, int(settings.media_cards_button_size))
+        self._button_icon_size = max(12, button_size - 8)
+        self.volume_mute_button.setIconSize(QSize(self._button_icon_size, self._button_icon_size))
+        self._refresh_volume_mute_button_icon()
 
     def _update_streams_visibility(self, streams: tuple[AudioStreamInfo, ...]) -> None:
         show_streams = bool(self._settings.media_controls_show_application_volumes)
@@ -656,6 +716,8 @@ class SoundSection(QWidget):
 
         self._pending_volume_percent = target_percent
         self._volume_hold_until = time.monotonic() + 0.9
+        self._display_volume_percent_value = target_percent
+        self._is_muted = target_percent == 0
         previous_state = self.volume_slider.blockSignals(True)
         self._volume_syncing = True
         self.volume_slider.setValue(target_percent)
@@ -663,6 +725,7 @@ class SoundSection(QWidget):
         self.volume_slider.blockSignals(previous_state)
         self.volume_value_label.setText(f"{target_percent}%")
         self.volume_mute_button.setText("Unmute" if target_percent == 0 else "Mute")
+        self._refresh_volume_mute_button_icon()
         if self._live_backend is None:
             self._schedule_refresh(260)
 
@@ -673,9 +736,13 @@ class SoundSection(QWidget):
         clamped = max(0, min(100, int(value)))
         if clamped > 0:
             self._last_nonzero_percent = clamped
+        self._display_volume_percent_value = clamped
+        self._is_muted = clamped == 0
         self._pending_volume_percent = clamped
         self._volume_hold_until = time.monotonic() + 0.9
         self.volume_value_label.setText(f"{clamped}%")
+        self.volume_mute_button.setText("Unmute" if clamped == 0 else "Mute")
+        self._refresh_volume_mute_button_icon()
         self._volume_apply_timer.start()
 
     @Slot()
@@ -730,3 +797,15 @@ class SoundSection(QWidget):
         if self._live_backend is not None:
             return self._live_backend.toggle_stream_mute(stream_id)
         return self.volume.toggle_stream_mute(stream_id)
+
+    def _refresh_volume_mute_button_icon(self) -> None:
+        icon_size = QSize(self._button_icon_size, self._button_icon_size)
+        button_icon = asset_icon(
+            volume_icon_name(self._display_volume_percent_value, self._is_muted),
+            foreground=self._button_icon_foreground,
+        )
+        if button_icon.pixmap(icon_size).isNull():
+            self.volume_mute_button.setIcon(QIcon())
+            return
+        self.volume_mute_button.setIcon(button_icon)
+        self.volume_mute_button.setIconSize(icon_size)

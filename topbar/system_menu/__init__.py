@@ -6,7 +6,7 @@ import sys
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCursor, QFont, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QCursor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,8 +18,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pytpo.services.asset_paths import preferred_shared_asset_path
-
 from topbar.focus import X11FocusController
 
 from ..appearance import StyledPanel, build_panel_appearance, color_from_setting, color_to_qss_rgba
@@ -27,28 +25,10 @@ from ..settings import TopBarBehaviorSettings, load_topbar_behavior_settings
 from ..settings_dialog import TopBarSettingsDialog
 from .connectivity import ConnectivitySection
 from .footer import FooterSection
+from .icon_assets import POWER_ICON_NAME, WIFI_ICON_NAMES, asset_icon, color_hex, volume_icon_name
 from .media_container import MediaContainer
 from .sound import SoundSection, shared_sound_backend
 from .service import SoundSnapshot, SystemMenuSnapshot, VolumeService, WifiService, collect_system_menu_snapshot
-
-_WIFI_ICON_NAMES = {
-    0: "internet_0.svg",
-    1: "internet_1.svg",
-    2: "internet_2.svg",
-    3: "internet_3.svg",
-    4: "internet_4.svg",
-}
-_VOLUME_ICON_NAMES = {
-    "muted": "volume_muted.svg",
-    "low": "volume_1.svg",
-    "medium": "volume_2.svg",
-    "high": "volume_3.svg",
-}
-_POWER_ICON_NAME = "power.svg"
-
-
-def _icon_path(name: str) -> str:
-    return str(preferred_shared_asset_path(f"icons/{name}"))
 
 
 class SystemMenuContent(QWidget):
@@ -541,6 +521,7 @@ class SystemMenuButton(QToolButton):
         self._current_wifi_signal: int | None = None
         self._current_volume_percent: int | None = None
         self._current_is_muted: bool | None = None
+        self._status_icon_foreground = "#f1f1f1"
 
         self.setAutoRaise(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -586,7 +567,11 @@ class SystemMenuButton(QToolButton):
         return super().eventFilter(watched, event)
 
     def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._status_icon_foreground = color_hex(
+            color_from_setting(settings.appearance_label_text_color, "#f1f1f1")
+        )
         self._panel.apply_settings(settings)
+        self._update_label()
 
     @Slot()
     def _toggle_panel(self) -> None:
@@ -706,9 +691,9 @@ class SystemMenuButton(QToolButton):
 
         painter = QPainter(pixmap)
         try:
-            wifi_icon = self._tinted_icon_pixmap(_WIFI_ICON_NAMES[wifi_level], icon_size)
-            volume_icon = self._tinted_icon_pixmap(volume_icon_name, icon_size)
-            power_icon = self._tinted_icon_pixmap(_POWER_ICON_NAME, icon_size)
+            wifi_icon = self._status_icon_pixmap(WIFI_ICON_NAMES[wifi_level], icon_size)
+            volume_icon = self._status_icon_pixmap(volume_icon_name, icon_size)
+            power_icon = self._status_icon_pixmap(POWER_ICON_NAME, icon_size)
             x_pos = 0
             painter.drawPixmap(x_pos, icon_y, wifi_icon)
             x_pos += icon_size.width() + self._status_icon_gap
@@ -720,21 +705,8 @@ class SystemMenuButton(QToolButton):
 
         return QIcon(pixmap)
 
-    def _tinted_icon_pixmap(self, icon_name: str, icon_size: QSize) -> QPixmap:
-        source = QIcon(_icon_path(icon_name)).pixmap(icon_size)
-        if source.isNull():
-            return source
-
-        tinted = QPixmap(source.size())
-        tinted.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(tinted)
-        try:
-            painter.drawPixmap(0, 0, source)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(tinted.rect(), self.palette().color(QPalette.ColorRole.ButtonText))
-        finally:
-            painter.end()
-        return tinted
+    def _status_icon_pixmap(self, icon_name: str, icon_size: QSize) -> QPixmap:
+        return asset_icon(icon_name, foreground=self._status_icon_foreground).pixmap(icon_size)
 
     @staticmethod
     def _wifi_icon_level(signal: int | None) -> int:
@@ -750,13 +722,7 @@ class SystemMenuButton(QToolButton):
 
     @staticmethod
     def _volume_icon_name(volume_percent: int | None, is_muted: bool | None) -> str:
-        if is_muted or volume_percent is None or volume_percent <= 0:
-            return _VOLUME_ICON_NAMES["muted"]
-        if volume_percent <= 33:
-            return _VOLUME_ICON_NAMES["low"]
-        if volume_percent <= 66:
-            return _VOLUME_ICON_NAMES["medium"]
-        return _VOLUME_ICON_NAMES["high"]
+        return volume_icon_name(volume_percent, is_muted)
 
 
 def preview_main() -> int:
