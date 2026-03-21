@@ -4,8 +4,8 @@ import time
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,10 +15,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..appearance import (
+    StyledPanel,
+    apply_color_opacity,
+    build_panel_appearance,
+    color_from_setting,
+    color_to_qss_rgba,
+)
+from ..settings import TopBarBehaviorSettings
 from .service import PlayerInfo
 
 
-class MediaPlayerCard(QFrame):
+class MediaPlayerCard(StyledPanel):
     SEEK_STEP_SECONDS = 10.0
     POSITION_SLIDER_MAX = 1000
 
@@ -57,6 +65,7 @@ class MediaPlayerCard(QFrame):
         self._position_hold_until = 0.0
         self._volume_pending_percent: int | None = None
         self._volume_hold_until = 0.0
+        self._settings = TopBarBehaviorSettings()
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
@@ -64,14 +73,14 @@ class MediaPlayerCard(QFrame):
 
         self.setObjectName("mediaPlayerCard")
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(4)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(8, 8, 8, 8)
+        self._root_layout.setSpacing(4)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(6)
-        root.addLayout(header_row)
+        self._root_layout.addLayout(header_row)
 
         self.identity_label = QLabel("Player", self)
         self.identity_label.setObjectName("mediaPlayerIdentity")
@@ -87,19 +96,19 @@ class MediaPlayerCard(QFrame):
         self.title_label.setObjectName("mediaPlayerTitle")
         self.title_label.setWordWrap(True)
         self.title_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        root.addWidget(self.title_label)
+        self._root_layout.addWidget(self.title_label)
 
         self.meta_label = QLabel("", self)
         self.meta_label.setObjectName("mediaPlayerDetail")
         self.meta_label.setWordWrap(True)
         self.meta_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.meta_label.hide()
-        root.addWidget(self.meta_label)
+        self._root_layout.addWidget(self.meta_label)
 
         self.transport_row = QHBoxLayout()
         self.transport_row.setContentsMargins(0, 0, 0, 0)
         self.transport_row.setSpacing(4)
-        root.addLayout(self.transport_row)
+        self._root_layout.addLayout(self.transport_row)
 
         self.prev_button = QToolButton(self)
         self.seek_back_button = QToolButton(self)
@@ -144,7 +153,7 @@ class MediaPlayerCard(QFrame):
         self.position_row = QHBoxLayout()
         self.position_row.setContentsMargins(0, 0, 0, 0)
         self.position_row.setSpacing(4)
-        root.addLayout(self.position_row)
+        self._root_layout.addLayout(self.position_row)
 
         self.position_label = QLabel("0:00", self)
         self.position_label.setObjectName("mediaPlayerPositionLabel")
@@ -166,7 +175,7 @@ class MediaPlayerCard(QFrame):
         self.options_row = QHBoxLayout()
         self.options_row.setContentsMargins(0, 0, 0, 0)
         self.options_row.setSpacing(4)
-        root.addLayout(self.options_row)
+        self._root_layout.addLayout(self.options_row)
 
         self.loop_button = QPushButton("Loop: Off", self)
         self.shuffle_button = QPushButton("Shuffle: Off", self)
@@ -182,7 +191,7 @@ class MediaPlayerCard(QFrame):
         self.volume_row = QHBoxLayout()
         self.volume_row.setContentsMargins(0, 0, 0, 0)
         self.volume_row.setSpacing(4)
-        root.addLayout(self.volume_row)
+        self._root_layout.addLayout(self.volume_row)
 
         self.volume_label = QLabel("Vol", self)
         self.volume_label.setObjectName("mediaPlayerVolumeLabel")
@@ -205,6 +214,112 @@ class MediaPlayerCard(QFrame):
         self.volume_slider.sliderReleased.connect(self._commit_volume)
         self.mute_button.clicked.connect(self._toggle_mute)
 
+        self.apply_settings(self._settings)
+
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self.apply_panel_appearance(build_panel_appearance(settings, "media_cards"))
+        padding = max(0, int(settings.media_cards_internal_padding))
+        spacing = max(0, int(settings.media_cards_control_spacing))
+        slider_thickness = max(2, int(settings.media_cards_slider_thickness))
+        seek_thickness = max(2, int(settings.media_cards_seek_bar_thickness))
+        button_size = max(18, int(settings.media_cards_button_size))
+        control_icon_size = max(12, int(settings.media_cards_control_icon_size))
+        button_radius = max(0, int(settings.media_cards_controls_button_corner_radius))
+
+        self._root_layout.setContentsMargins(padding, padding, padding, padding)
+        self._root_layout.setSpacing(max(2, spacing))
+        for row in (self.transport_row, self.position_row, self.options_row, self.volume_row):
+            row.setSpacing(spacing)
+
+        title_font = QFont(self.title_label.font())
+        title_family = str(settings.media_cards_title_font_family or "").strip()
+        if title_family:
+            title_font.setFamily(title_family)
+        title_font.setPointSize(max(1, int(settings.media_cards_title_size)))
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+
+        subtitle_font = QFont(self.meta_label.font())
+        subtitle_family = str(settings.media_cards_subtitle_font_family or "").strip()
+        if subtitle_family:
+            subtitle_font.setFamily(subtitle_family)
+        subtitle_font.setPointSize(max(1, int(settings.media_cards_subtitle_size)))
+        self.identity_label.setFont(subtitle_font)
+        self.meta_label.setFont(subtitle_font)
+        self.status_label.setFont(subtitle_font)
+        self.position_label.setFont(subtitle_font)
+        self.duration_label.setFont(subtitle_font)
+        self.volume_label.setFont(subtitle_font)
+        self.volume_value_label.setFont(subtitle_font)
+
+        title_color = color_from_setting(settings.media_cards_title_color, "#f6f7f8")
+        subtitle_color = color_from_setting(settings.media_cards_subtitle_color, "#c8d0d4")
+        disabled_text = apply_color_opacity(title_color, int(settings.media_cards_controls_button_disabled_opacity))
+        button_bg = color_from_setting(settings.media_cards_controls_button_background, "#ffffff12")
+        button_hover = color_from_setting(settings.media_cards_controls_button_hover_background, "#ffffff1f")
+        button_active = color_from_setting(settings.media_cards_controls_button_active_background, "#ffffff2c")
+        groove_color = color_from_setting(settings.media_cards_progress_background_color, "#ffffff24")
+        progress_color = color_from_setting(settings.media_cards_progress_color, "#70c0ff")
+
+        self.identity_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.status_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.title_label.setStyleSheet(f"color: {color_to_qss_rgba(title_color)};")
+        self.meta_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.position_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.duration_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.volume_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.volume_value_label.setStyleSheet(f"color: {color_to_qss_rgba(title_color)};")
+
+        button_qss = (
+            "QToolButton, QPushButton {"
+            f"color: {color_to_qss_rgba(title_color)};"
+            f"background: {color_to_qss_rgba(button_bg)};"
+            f"border: none;"
+            f"border-radius: {button_radius}px;"
+            "}"
+            "QToolButton:hover, QPushButton:hover {"
+            f"background: {color_to_qss_rgba(button_hover)};"
+            "}"
+            "QToolButton:pressed, QPushButton:pressed {"
+            f"background: {color_to_qss_rgba(button_active)};"
+            "}"
+            "QToolButton:disabled, QPushButton:disabled {"
+            f"color: {color_to_qss_rgba(disabled_text)};"
+            "}"
+        )
+        for button in self._transport_buttons + [self.loop_button, self.shuffle_button, self.mute_button]:
+            button.setStyleSheet(button_qss)
+
+        transport_font = QFont(self.play_pause_button.font())
+        transport_font.setPointSize(max(8, int(round(control_icon_size * 0.7))))
+        for button in self._transport_buttons:
+            button.setFont(transport_font)
+            button.setFixedSize(button_size, button_size)
+
+        for button in (self.loop_button, self.shuffle_button, self.mute_button):
+            button.setMinimumHeight(button_size)
+
+        slider_qss = (
+            "QSlider::groove:horizontal {"
+            f"height: {seek_thickness}px;"
+            f"background: {color_to_qss_rgba(groove_color)};"
+            "border-radius: 999px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            f"background: {color_to_qss_rgba(progress_color)};"
+            "border-radius: 999px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            f"width: {max(10, slider_thickness + 6)}px;"
+            f"margin: -{max(2, slider_thickness // 2)}px 0;"
+            f"background: {color_to_qss_rgba(progress_color)};"
+            "border-radius: 999px;"
+            "}"
+        )
+        self.position_slider.setStyleSheet(slider_qss)
+        self.volume_slider.setStyleSheet(slider_qss)
+
     def bind(self, info: PlayerInfo) -> None:
         self._player_name = info.name
         self._position_seconds = info.position_seconds
@@ -225,6 +340,7 @@ class MediaPlayerCard(QFrame):
         album = (info.album or "").strip()
 
         self.identity_label.setText(identity)
+        self.identity_label.setVisible(bool(self._settings.media_controls_show_player_name))
 
         if status:
             self.status_label.setText(status)
@@ -236,34 +352,36 @@ class MediaPlayerCard(QFrame):
         self.title_label.setText(title or identity)
 
         meta_bits = [bit for bit in (artist, album) if bit]
-        if meta_bits:
+        if meta_bits and self._settings.media_cards_show_secondary_text:
             self.meta_label.setText(" • ".join(meta_bits))
             self.meta_label.show()
         else:
             self.meta_label.clear()
             self.meta_label.hide()
 
+        full_controls = self._settings.media_controls_interaction_mode == "full_media_controls"
         control_fallback = bool(info.track_id or title or artist or album) and status.lower() in {"playing", "paused"}
         can_control = bool(info.can_control) or control_fallback
         transport_fallback = can_control and control_fallback
 
-        show_prev = can_control and (bool(info.can_go_previous) or transport_fallback)
-        show_next = can_control and (bool(info.can_go_next) or transport_fallback)
-        show_play_pause = can_control and (
+        show_prev = full_controls and self._settings.media_controls_show_previous_next and can_control and (bool(info.can_go_previous) or transport_fallback)
+        show_next = full_controls and self._settings.media_controls_show_previous_next and can_control and (bool(info.can_go_next) or transport_fallback)
+        show_play_pause = full_controls and self._settings.media_controls_show_play_pause and can_control and (
             bool(info.can_play)
             or bool(info.can_pause)
             or status.lower() in {"playing", "paused", "stopped"}
         )
-        show_stop = False
+        show_stop = full_controls and self._settings.media_controls_show_stop and can_control
 
         can_seek = can_control and (bool(info.can_seek) or bool(info.length_seconds and info.length_seconds > 0))
-        any_transport_visible = show_prev or show_next or show_play_pause or can_seek or show_stop
+        show_seek_buttons = full_controls and self._settings.media_controls_show_seek_controls and can_seek
+        any_transport_visible = show_prev or show_next or show_play_pause or show_seek_buttons or show_stop
         self._set_layout_visible(self.transport_row, any_transport_visible)
 
         self.prev_button.setVisible(show_prev)
-        self.seek_back_button.setVisible(can_seek)
+        self.seek_back_button.setVisible(show_seek_buttons)
         self.next_button.setVisible(show_next)
-        self.seek_forward_button.setVisible(can_seek)
+        self.seek_forward_button.setVisible(show_seek_buttons)
         self.stop_button.setVisible(show_stop)
         self.play_pause_button.setVisible(show_play_pause)
         if status.lower() == "playing":
@@ -276,7 +394,9 @@ class MediaPlayerCard(QFrame):
         self._position_syncing = True
         try:
             has_position = (
-                can_seek
+                full_controls
+                and self._settings.media_controls_show_position_scrubbing
+                and can_seek
                 and info.position_seconds is not None
                 and info.length_seconds is not None
                 and info.length_seconds > 0
@@ -302,8 +422,8 @@ class MediaPlayerCard(QFrame):
         finally:
             self._position_syncing = False
 
-        show_loop = can_control
-        show_shuffle = can_control and info.shuffle is not None
+        show_loop = full_controls and self._settings.media_controls_show_loop and can_control
+        show_shuffle = full_controls and self._settings.media_controls_show_shuffle and can_control and info.shuffle is not None
         self._set_layout_visible(self.options_row, show_loop or show_shuffle)
         self.loop_button.setVisible(show_loop)
         if show_loop:
@@ -332,7 +452,7 @@ class MediaPlayerCard(QFrame):
                     self.volume_slider.setValue(display_percent)
                 self.volume_value_label.setText(f"{display_percent}%")
                 self.mute_button.setText("Unmute" if display_percent == 0 else "Mute")
-                self._set_layout_visible(self.volume_row, True)
+                self._set_layout_visible(self.volume_row, bool(self._settings.media_controls_show_volume_slider))
                 if display_percent > 0:
                     self._last_nonzero_volume = max(0.01, display_percent / 100.0)
         finally:

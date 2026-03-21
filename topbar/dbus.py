@@ -623,6 +623,17 @@ def run_poweroff_command() -> tuple[bool, str]:
     return _run_session_command_candidates(commands)
 
 
+def run_restart_command() -> tuple[bool, str]:
+    commands: list[list[str]] = []
+    if shutil.which("systemctl"):
+        commands.append(["systemctl", "reboot"])
+    if shutil.which("loginctl"):
+        commands.append(["loginctl", "reboot"])
+    if shutil.which("shutdown"):
+        commands.append(["shutdown", "-r", "now"])
+    return _run_session_command_candidates(commands)
+
+
 def run_shutdown_command() -> tuple[bool, str]:
     commands: list[list[str]] = []
     if shutil.which("systemctl"):

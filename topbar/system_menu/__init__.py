@@ -6,12 +6,13 @@ import sys
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QCursor, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QCursor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
     QMessageBox,
+    QScrollArea,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -21,6 +22,8 @@ from pytpo.services.asset_paths import preferred_shared_asset_path
 
 from topbar.focus import X11FocusController
 
+from ..appearance import StyledPanel, build_panel_appearance, color_from_setting, color_to_qss_rgba
+from ..settings import TopBarBehaviorSettings, load_topbar_behavior_settings
 from ..settings_dialog import TopBarSettingsDialog
 from .connectivity import ConnectivitySection
 from .footer import FooterSection
@@ -61,6 +64,10 @@ class SystemMenuContent(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._settings = TopBarBehaviorSettings()
+        self.setObjectName("systemMenuContent")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="topbar-system-menu")
         self._pending: dict[concurrent.futures.Future, str] = {}
         self._refresh_requested_while_busy = False
@@ -74,20 +81,20 @@ class SystemMenuContent(QWidget):
         self._live_refresh_timer.setInterval(1500)
         self._live_refresh_timer.timeout.connect(self.refresh_all)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(10)
 
         self.connectivity = ConnectivitySection(self, request_refresh=self.refresh_all)
-        root.addWidget(self.connectivity)
+        self._root_layout.addWidget(self.connectivity)
 
         self.sound = SoundSection(self, request_refresh=self.refresh_all)
-        root.addWidget(self.sound)
+        self._root_layout.addWidget(self.sound)
 
         self.media = MediaContainer(self, request_refresh=self.refresh_all)
-        root.addWidget(self.media)
+        self._root_layout.addWidget(self.media)
 
-        root.addStretch(1)
+        self._root_layout.addStretch(1)
 
         self.footer = FooterSection(
             open_terminal=open_terminal,
@@ -96,7 +103,9 @@ class SystemMenuContent(QWidget):
             close_panel=close_panel,
             parent=self,
         )
-        root.addWidget(self.footer)
+        self._root_layout.addWidget(self.footer)
+
+        self.apply_settings(self._settings)
 
         self.destroyed.connect(lambda *_args: self._shutdown())
         QTimer.singleShot(0, self.warm_up)
@@ -156,6 +165,13 @@ class SystemMenuContent(QWidget):
         self.media.apply_snapshot(result.media)
         self.snapshotApplied.emit()
 
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self._root_layout.setSpacing(max(0, int(settings.menu_appearance_section_spacing)))
+        self.sound.apply_settings(settings)
+        self.media.apply_settings(settings)
+        self.footer.apply_settings(settings)
+
     def start_live_refresh(self) -> None:
         self._live_refresh_timer.start()
 
@@ -196,27 +212,47 @@ class TopBarSystemMenuPanel(QFrame):
         self._anchor: QWidget | None = None
         self._tracking_app_events = False
         self._focus_controller = focus_controller
+        self._settings = TopBarBehaviorSettings()
         self._proximity_timer = QTimer(self)
         self._proximity_timer.setInterval(120)
         self._proximity_timer.timeout.connect(self._hide_if_cursor_far)
 
         self.setObjectName("topbarSystemMenuPanel")
-        self.setFixedWidth(400)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+
+        self._panel = StyledPanel(self)
+        self._panel.setObjectName("systemMenuChrome")
+        self._root_layout.addWidget(self._panel)
+
+        self._panel_layout = QVBoxLayout(self._panel)
+        self._panel_layout.setContentsMargins(12, 12, 12, 12)
+        self._panel_layout.setSpacing(0)
+
+        self._scroll = QScrollArea(self._panel)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._scroll.setAutoFillBackground(False)
+        self._scroll.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._scroll.viewport().setAutoFillBackground(False)
+        self._panel_layout.addWidget(self._scroll)
 
         self.content = SystemMenuContent(
             open_terminal=open_terminal,
             open_dock=open_dock,
             open_settings=open_settings,
             close_panel=self.hide,
-            parent=self,
+            parent=self._panel,
         )
-        root.addWidget(self.content)
+        self._scroll.setWidget(self.content)
         self.content.snapshotApplied.connect(self._on_content_snapshot_applied)
 
-        self._apply_style()
+        self.apply_settings(self._settings)
 
     def toggle(self, anchor: QWidget) -> None:
         self._anchor = anchor
@@ -232,11 +268,12 @@ class TopBarSystemMenuPanel(QFrame):
         if anchor_widget is None:
             return
 
-        self.adjustSize()
         anchor_bottom_right = anchor_widget.mapToGlobal(anchor_widget.rect().bottomRight())
         anchor_bottom_left = anchor_widget.mapToGlobal(anchor_widget.rect().bottomLeft())
         screen = QApplication.screenAt(anchor_bottom_right) or anchor_widget.screen() or QApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else QApplication.primaryScreen().availableGeometry()
+        self._update_scroll_height(available)
+        self.adjustSize()
 
         x = anchor_bottom_right.x() - self.width()
         x = max(available.left() + 12, min(x, available.right() - self.width() - 12))
@@ -249,6 +286,65 @@ class TopBarSystemMenuPanel(QFrame):
         self.content.refresh_all()
         if self.isVisible() and self._anchor is not None:
             self.reposition(self._anchor)
+
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self._panel.apply_panel_appearance(build_panel_appearance(settings, "menu_appearance"))
+        self._panel.setFixedWidth(max(280, int(settings.menu_appearance_panel_width)))
+        padding = max(0, int(settings.menu_appearance_internal_padding))
+        shadow_left, shadow_top, shadow_right, shadow_bottom = self._shadow_margins()
+        outer_margin = max(0, int(settings.menu_appearance_outer_margin))
+        self._root_layout.setContentsMargins(
+            outer_margin + shadow_left,
+            outer_margin + shadow_top,
+            outer_margin + shadow_right,
+            outer_margin + shadow_bottom,
+        )
+        self._panel_layout.setContentsMargins(padding, padding, padding, padding)
+        self._apply_scrollbar_policy()
+        self._apply_style()
+        self.content.apply_settings(settings)
+        if self._anchor is not None:
+            self.reposition(self._anchor)
+
+    def _shadow_margins(self) -> tuple[int, int, int, int]:
+        if not self._settings.menu_appearance_show_shadow or int(self._settings.menu_appearance_shadow_opacity) <= 0:
+            return (0, 0, 0, 0)
+        blur = max(0, int(self._settings.menu_appearance_shadow_blur))
+        offset_x = int(self._settings.menu_appearance_shadow_offset_x)
+        offset_y = int(self._settings.menu_appearance_shadow_offset_y)
+        return (
+            max(0, blur - offset_x),
+            max(0, blur - offset_y),
+            max(0, blur + offset_x),
+            max(0, blur + offset_y),
+        )
+
+    def _apply_scrollbar_policy(self) -> None:
+        visibility = str(self._settings.menu_appearance_scrollbar_visibility or "auto").strip().lower()
+        if visibility == "always":
+            policy = Qt.ScrollBarAlwaysOn
+        elif visibility == "hidden":
+            policy = Qt.ScrollBarAlwaysOff
+        else:
+            policy = Qt.ScrollBarAsNeeded
+        self._scroll.setVerticalScrollBarPolicy(policy)
+
+    def _update_scroll_height(self, available: QRect) -> None:
+        content_layout = self.content.layout()
+        if content_layout is not None:
+            content_layout.activate()
+        self.content.adjustSize()
+        padding = self._panel_layout.contentsMargins().top() + self._panel_layout.contentsMargins().bottom()
+        outer = self._root_layout.contentsMargins().top() + self._root_layout.contentsMargins().bottom()
+        available_height = max(160, int(available.height()) - outer - 24)
+        configured_height = max(240, int(self._settings.menu_appearance_panel_max_height))
+        height_limit = max(120, min(configured_height - padding, available_height - padding))
+        desired_height = max(
+            self.content.minimumSizeHint().height(),
+            self.content.sizeHint().height(),
+        )
+        self._scroll.setFixedHeight(max(1, min(desired_height, height_limit)))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -370,7 +466,51 @@ class TopBarSystemMenuPanel(QFrame):
         return False
 
     def _apply_style(self) -> None:
-        pass
+        settings = self._settings
+        item_text = color_from_setting(settings.menu_appearance_item_text_color, "#f2f4f5")
+        secondary_text = color_from_setting(settings.menu_appearance_item_secondary_text_color, "#c5ccd0")
+        header_text = color_from_setting(settings.menu_appearance_section_header_color, "#f2f4f5")
+        item_bg = color_from_setting(settings.menu_appearance_item_background, "#ffffff14")
+        item_hover = color_from_setting(settings.menu_appearance_item_hover_background, "#ffffff22")
+        item_active = color_from_setting(settings.menu_appearance_item_active_background, "#ffffff30")
+        scrollbar = color_from_setting(settings.menu_appearance_scrollbar_color, "#ffffff40")
+        radius = max(0, int(settings.menu_appearance_item_corner_radius))
+        item_height = max(22, int(settings.menu_appearance_item_height))
+        item_padding = max(0, int(settings.menu_appearance_item_padding))
+        item_spacing = max(0, int(settings.menu_appearance_item_spacing))
+        icon_size = max(12, int(settings.menu_appearance_item_icon_size))
+        header_family = str(settings.menu_appearance_section_header_font_family or "").strip()
+        header_family_rule = f'font-family: "{header_family}";' if header_family else ""
+
+        self._panel.setStyleSheet(
+            "QWidget#systemMenuChrome { background: transparent; }"
+            "QWidget#systemMenuContent { background: transparent; }"
+            "QWidget#qt_scrollarea_viewport { background: transparent; }"
+            f"QLabel#systemMenuSectionTitle {{ color: {color_to_qss_rgba(header_text)}; font-size: {int(settings.menu_appearance_section_header_font_size)}pt; font-weight: 700; {header_family_rule} }}"
+            f"QLabel#systemMenuStatus, QLabel#systemMenuValue {{ color: {color_to_qss_rgba(item_text)}; }}"
+            f"QLabel#systemMenuMutedText {{ color: {color_to_qss_rgba(secondary_text)}; }}"
+            f"QPushButton, QToolButton {{ color: {color_to_qss_rgba(item_text)}; background: {color_to_qss_rgba(item_bg)}; border: none; border-radius: {radius}px; min-height: {item_height}px; padding: 0 {item_padding}px; }}"
+            f"QPushButton:hover, QToolButton:hover {{ background: {color_to_qss_rgba(item_hover)}; }}"
+            f"QPushButton:pressed, QToolButton:pressed {{ background: {color_to_qss_rgba(item_active)}; }}"
+            f"QPushButton:disabled, QToolButton:disabled {{ color: {color_to_qss_rgba(secondary_text)}; }}"
+            f"QScrollArea {{ background: transparent; border: none; }}"
+            f"QScrollBar:vertical {{ background: transparent; width: {int(settings.menu_appearance_scrollbar_width)}px; margin: 0; }}"
+            f"QScrollBar::handle:vertical {{ background: {color_to_qss_rgba(scrollbar)}; border-radius: {int(settings.menu_appearance_scrollbar_corner_radius)}px; min-height: 24px; }}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+        )
+
+        for section in (self.content.connectivity, self.content.sound, self.content.media, self.content.footer):
+            layout = section.layout()
+            if layout is not None:
+                layout.setSpacing(item_spacing)
+
+        for button in self._panel.findChildren(QToolButton):
+            button.setIconSize(QSize(icon_size, icon_size))
+        for button in self._panel.findChildren(QToolButton):
+            font = QFont(button.font())
+            font.setPointSizeF(max(8.0, font.pointSizeF()))
+            button.setFont(font)
 
 
 class SystemMenuButton(QToolButton):
@@ -407,7 +547,9 @@ class SystemMenuButton(QToolButton):
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedHeight(28)
         self.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        self.setIconSize(QSize(74, 28))
+        self._status_icon_size = 20
+        self._status_icon_gap = 6
+        self.set_status_icon_size(self._status_icon_size)
 
         self.clicked.connect(self._toggle_panel)
         self.installEventFilter(self)
@@ -425,17 +567,30 @@ class SystemMenuButton(QToolButton):
             self._sound_backend.snapshotChanged.connect(self._on_sound_snapshot_changed)
         self.destroyed.connect(lambda *_args: self._shutdown_status_refresh())
 
+        self.apply_settings(load_topbar_behavior_settings())
+
         # Render immediately with cached values, then refresh off the UI thread.
         self._update_label()
         self._schedule_status_refresh()
+
+    def set_status_icon_size(self, icon_size: int) -> None:
+        self._status_icon_size = max(12, int(icon_size))
+        canvas_width = (self._status_icon_size * 3) + (self._status_icon_gap * 2)
+        canvas_height = max(self.height(), self._status_icon_size)
+        self.setIconSize(QSize(canvas_width, canvas_height))
+        self._update_label()
 
     def eventFilter(self, watched: QWidget, event) -> bool:
         if self._panel.isVisible() and event.type() in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
             QTimer.singleShot(0, lambda: self._panel.reposition(self))
         return super().eventFilter(watched, event)
 
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._panel.apply_settings(settings)
+
     @Slot()
     def _toggle_panel(self) -> None:
+        self.apply_settings(load_topbar_behavior_settings())
         self._panel.toggle(self)
 
     @staticmethod
@@ -546,7 +701,7 @@ class SystemMenuButton(QToolButton):
         canvas_size = self.iconSize()
         pixmap = QPixmap(canvas_size)
         pixmap.fill(Qt.GlobalColor.transparent)
-        icon_size = QSize(20, 20)
+        icon_size = QSize(self._status_icon_size, self._status_icon_size)
         icon_y = max(0, (canvas_size.height() - icon_size.height()) // 2)
 
         painter = QPainter(pixmap)
@@ -554,9 +709,12 @@ class SystemMenuButton(QToolButton):
             wifi_icon = self._tinted_icon_pixmap(_WIFI_ICON_NAMES[wifi_level], icon_size)
             volume_icon = self._tinted_icon_pixmap(volume_icon_name, icon_size)
             power_icon = self._tinted_icon_pixmap(_POWER_ICON_NAME, icon_size)
-            painter.drawPixmap(0, icon_y, wifi_icon)
-            painter.drawPixmap(26, icon_y, volume_icon)
-            painter.drawPixmap(52, icon_y, power_icon)
+            x_pos = 0
+            painter.drawPixmap(x_pos, icon_y, wifi_icon)
+            x_pos += icon_size.width() + self._status_icon_gap
+            painter.drawPixmap(x_pos, icon_y, volume_icon)
+            x_pos += icon_size.width() + self._status_icon_gap
+            painter.drawPixmap(x_pos, icon_y, power_icon)
         finally:
             painter.end()
 
@@ -622,10 +780,24 @@ def preview_main() -> int:
     layout.addWidget(subtitle)
 
     # Note: If previewing standalone, you can still test the new button look directly
+    def _open_preview_settings() -> None:
+        dialog = getattr(preview_host, "_topbar_settings_dialog", None)
+        if isinstance(dialog, TopBarSettingsDialog) and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        dialog = TopBarSettingsDialog(preview_host)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_args: setattr(preview_host, "_topbar_settings_dialog", None))
+        preview_host._topbar_settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     anchor_button = SystemMenuButton(
         open_terminal=lambda: QMessageBox.information(preview_host, "Preview", "Terminal preview action triggered."),
         open_dock=lambda: QMessageBox.information(preview_host, "Preview", "Dock preview action triggered."),
-        open_settings=lambda: TopBarSettingsDialog(preview_host).exec(),
+        open_settings=_open_preview_settings,
         parent=preview_host,
     )
     layout.addWidget(anchor_button, alignment=Qt.AlignLeft)

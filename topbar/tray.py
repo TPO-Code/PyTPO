@@ -957,6 +957,9 @@ class StatusNotifierTrayArea(QWidget):
         self._buttons: dict[str, QToolButton] = {}
         self._fallback_item_cache: dict[str, tuple[str | None, float]] = {}
         self._focus_controller = focus_controller
+        self._button_icon_size = 20
+        self._button_size = 28
+        self._button_style_sheet = ""
 
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self._layout = QHBoxLayout(self)
@@ -970,6 +973,24 @@ class StatusNotifierTrayArea(QWidget):
         if self._local_watcher is not None:
             self._local_watcher.itemsChanged.connect(self.sync_items)
         QTimer.singleShot(0, self.sync_items)
+
+    def apply_appearance(
+        self,
+        *,
+        icon_size: int,
+        button_size: int,
+        spacing: int,
+        button_style_sheet: str,
+    ) -> None:
+        self._button_icon_size = max(12, int(icon_size))
+        self._button_size = max(self._button_icon_size + 6, int(button_size))
+        self._button_style_sheet = str(button_style_sheet or "").strip()
+        self._layout.setSpacing(max(0, int(spacing)))
+        for button in self._buttons.values():
+            button.setIconSize(QSize(self._button_icon_size, self._button_icon_size))
+            button.setFixedSize(self._button_size, self._button_size)
+            button.setStyleSheet(self._button_style_sheet)
+        self.updateGeometry()
 
     def sync_items(self) -> None:
         discovered_items = self._discovery.get_items(visible_only=True)
@@ -991,10 +1012,11 @@ class StatusNotifierTrayArea(QWidget):
                 LOGGER.debug("Creating tray button for %s via TrayDiscovery", item_id)
                 button = item_map[item_id].create_button(
                     self,
-                    icon_size=20,
-                    button_size=28,
+                    icon_size=self._button_icon_size,
+                    button_size=self._button_size,
                     on_qmenu_closed=self._restore_focus_after_tray_menu,
                 )
+                button.setStyleSheet(self._button_style_sheet)
                 self._buttons[item_id] = button
                 self._layout.insertWidget(index, button)
                 continue
@@ -1002,6 +1024,9 @@ class StatusNotifierTrayArea(QWidget):
             update_item = getattr(button, "update_item", None)
             if callable(update_item):
                 update_item(item_map[item_id])
+            button.setIconSize(QSize(self._button_icon_size, self._button_icon_size))
+            button.setFixedSize(self._button_size, self._button_size)
+            button.setStyleSheet(self._button_style_sheet)
 
             current_index = self._layout.indexOf(button)
             if current_index != index:

@@ -17,7 +17,14 @@ from PySide6.QtWidgets import (
 
 from pytpo.services.asset_paths import preferred_shared_asset_path
 
-from ..dbus import run_logout_command, run_poweroff_command, run_shutdown_command, run_suspend_command
+from ..dbus import (
+    run_logout_command,
+    run_poweroff_command,
+    run_restart_command,
+    run_shutdown_command,
+    run_suspend_command,
+)
+from ..settings import TopBarBehaviorSettings
 
 
 def _icon_path(name: str) -> str:
@@ -62,22 +69,38 @@ class FooterSection(QWidget):
 
         self.settings_button = QToolButton(self)
         self.settings_button.setText("Settings")
-        self.settings_button.setIcon(QIcon(_icon_path("settings.png")))
-        self.settings_button.setIconSize(QSize(16, 16))
-        self.settings_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.settings_button.clicked.connect(lambda: self._invoke_and_close(self._open_settings))
         actions_row.addWidget(self.settings_button)
 
         self.power_button = QToolButton(self)
         self.power_button.setText("Power")
-        self.power_button.setIcon(QIcon(_icon_path("power.svg")))
-        self.power_button.setIconSize(QSize(16, 16))
-        self.power_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.power_button.setPopupMode(QToolButton.InstantPopup)
         self.power_menu = QMenu(self)
         self.power_button.setMenu(self.power_menu)
         self._populate_power_menu()
         actions_row.addWidget(self.power_button)
+
+        self.apply_settings(TopBarBehaviorSettings())
+
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        icon_size = max(12, int(settings.menu_appearance_item_icon_size))
+        size = QSize(icon_size, icon_size)
+        self._apply_icon_button(self.settings_button, "Settings", "settings.png", size)
+        self._apply_icon_button(self.power_button, "Power", "power.svg", size)
+
+    def _apply_icon_button(self, button: QToolButton, fallback_text: str, icon_name: str, size: QSize) -> None:
+        icon = QIcon(_icon_path(icon_name))
+        icon_pixmap = icon.pixmap(size)
+        if icon_pixmap.isNull():
+            button.setIcon(QIcon())
+            button.setText(fallback_text)
+            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            return
+        button.setIcon(icon)
+        button.setIconSize(size)
+        button.setText("")
+        button.setToolTip(fallback_text)
+        button.setToolButtonStyle(Qt.ToolButtonIconOnly)
 
     def _invoke_and_close(self, callback: Callable[[], None]) -> None:
         self._close_panel()
@@ -89,6 +112,10 @@ class FooterSection(QWidget):
         suspend_action = QAction("Suspend", self)
         suspend_action.triggered.connect(lambda checked=False: self._run_session_action("Suspend", run_suspend_command))
         self.power_menu.addAction(suspend_action)
+
+        restart_action = QAction("Restart", self)
+        restart_action.triggered.connect(lambda checked=False: self._run_session_action("Restart", run_restart_command))
+        self.power_menu.addAction(restart_action)
 
         poweroff_action = QAction("Power Off", self)
         poweroff_action.triggered.connect(lambda checked=False: self._run_session_action("Power Off", run_poweroff_command))

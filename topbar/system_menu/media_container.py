@@ -3,15 +3,13 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFrame,
     QLabel,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from ..settings import TopBarBehaviorSettings
 from .service import MediaSnapshot, MprisService, PlayerInfo
 from .media_widget import MediaPlayerCard
 
@@ -28,39 +26,32 @@ class MediaContainer(QWidget):
         super().__init__(parent)
         self.mpris = MprisService()
         self._request_refresh = request_refresh
+        self._settings = TopBarBehaviorSettings()
+        self._snapshot = MediaSnapshot(playerctl_missing=False, gdbus_missing=False, players=())
         self.player_cards: dict[str, MediaPlayerCard] = {}
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(4)
 
         self.media_title = QLabel("Media", self)
         self.media_title.setObjectName("systemMenuSectionTitle")
-        root.addWidget(self.media_title)
+        self._root_layout.addWidget(self.media_title)
 
         self.media_empty_label = QLabel(self)
         self.media_empty_label.setObjectName("systemMenuMutedText")
         self.media_empty_label.setWordWrap(True)
         self.media_empty_label.hide()
-        root.addWidget(self.media_empty_label)
-
-        self.media_scroll = QScrollArea(self)
-        self.media_scroll.setWidgetResizable(True)
-        self.media_scroll.setFrameShape(QFrame.NoFrame)
-        self.media_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.media_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.media_scroll.setMaximumHeight(260)
-        self.media_scroll.setObjectName("mediaScroll")
-        self.media_scroll.hide()
-        root.addWidget(self.media_scroll)
+        self._root_layout.addWidget(self.media_empty_label)
 
         self.media_cards_host = QWidget(self)
         self.media_cards_layout = QVBoxLayout(self.media_cards_host)
         self.media_cards_layout.setContentsMargins(0, 0, 0, 0)
         self.media_cards_layout.setSpacing(6)
         self.media_cards_layout.addStretch(1)
-        self.media_scroll.setWidget(self.media_cards_host)
+        self._root_layout.addWidget(self.media_cards_host)
 
+        self.apply_settings(self._settings)
         self.hide()
 
     def _ensure_player_card(self, name: str) -> MediaPlayerCard:
@@ -78,6 +69,7 @@ class MediaContainer(QWidget):
             self.refresh,
             self.media_cards_host,
         )
+        card.apply_settings(self._settings)
         self.player_cards[name] = card
         self.media_cards_layout.insertWidget(self.media_cards_layout.count() - 1, card)
         return card
@@ -176,8 +168,25 @@ class MediaContainer(QWidget):
             )
         )
 
-    def apply_snapshot(self, snapshot: MediaSnapshot) -> None:
-        players = self._dedupe_players(snapshot.players)
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self.media_cards_layout.setSpacing(max(0, int(settings.media_cards_spacing)))
+        for card in self.player_cards.values():
+            card.apply_settings(settings)
+        self._apply_state(self._snapshot)
+
+    def _sorted_players(self, players: tuple[PlayerInfo, ...]) -> tuple[PlayerInfo, ...]:
+        if not self._settings.media_controls_prefer_active_player_first:
+            return players
+        return tuple(sorted(players, key=self._player_score, reverse=True))
+
+    def _apply_state(self, snapshot: MediaSnapshot) -> None:
+        if not self._settings.media_controls_show_media_players:
+            self._set_empty_text("")
+            self.hide()
+            return
+
+        players = self._sorted_players(self._dedupe_players(snapshot.players))
         active_players = {player.name for player in players}
         self._remove_missing_player_cards(active_players)
 
@@ -191,13 +200,13 @@ class MediaContainer(QWidget):
             deps_text = ", ".join(missing_dependencies)
             self.media_title.show()
             self._set_empty_text(f"Install {deps_text} to enable media detection and controls.")
-            self.media_scroll.hide()
+            self.media_cards_host.hide()
             self.show()
             return
 
         if not players:
             self._set_empty_text("")
-            self.media_scroll.hide()
+            self.media_cards_host.hide()
             self.hide()
             return
 
@@ -206,5 +215,9 @@ class MediaContainer(QWidget):
 
         self._set_empty_text("")
         self.media_title.show()
-        self.media_scroll.show()
+        self.media_cards_host.show()
         self.show()
+
+    def apply_snapshot(self, snapshot: MediaSnapshot) -> None:
+        self._snapshot = snapshot
+        self._apply_state(snapshot)

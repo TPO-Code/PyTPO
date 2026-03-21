@@ -5,9 +5,9 @@ import time
 from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -17,6 +17,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..appearance import (
+    StyledPanel,
+    apply_color_opacity,
+    build_panel_appearance,
+    color_from_setting,
+    color_to_qss_rgba,
+)
+from ..settings import TopBarBehaviorSettings
 from .service import AudioStreamInfo, SoundSnapshot, VolumeService
 
 _SHARED_SOUND_BACKEND: "LiveSoundBackend | None" = None
@@ -192,7 +200,7 @@ def shared_sound_backend() -> LiveSoundBackend | None:
     return backend
 
 
-class ApplicationVolumeCard(QFrame):
+class ApplicationVolumeCard(StyledPanel):
     def __init__(
         self,
         set_volume: Callable[[int, int], bool],
@@ -202,6 +210,7 @@ class ApplicationVolumeCard(QFrame):
         super().__init__(parent)
         self._set_volume = set_volume
         self._toggle_mute = toggle_mute
+        self._settings = TopBarBehaviorSettings()
         self._stream_id = -1
         self._volume_syncing = False
         self._volume_dragging = False
@@ -214,13 +223,13 @@ class ApplicationVolumeCard(QFrame):
         self._apply_timer.setInterval(40)
         self._apply_timer.timeout.connect(self._apply_pending_volume)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(8, 8, 8, 8)
+        self._root_layout.setSpacing(6)
 
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        root.addLayout(title_row)
+        self._root_layout.addLayout(title_row)
 
         self.app_label = QLabel("Application", self)
         self.app_label.setObjectName("systemMenuValue")
@@ -234,11 +243,11 @@ class ApplicationVolumeCard(QFrame):
         self.title_label.setObjectName("systemMenuMutedText")
         self.title_label.setWordWrap(True)
         self.title_label.hide()
-        root.addWidget(self.title_label)
+        self._root_layout.addWidget(self.title_label)
 
         slider_row = QHBoxLayout()
         slider_row.setSpacing(8)
-        root.addLayout(slider_row)
+        self._root_layout.addLayout(slider_row)
 
         self.volume_slider = QSlider(Qt.Horizontal, self)
         self.volume_slider.setRange(0, 100)
@@ -251,11 +260,87 @@ class ApplicationVolumeCard(QFrame):
         self.volume_value_label.setObjectName("systemMenuValue")
         slider_row.addWidget(self.volume_value_label)
 
+        self.apply_settings(self._settings)
+
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self.apply_panel_appearance(build_panel_appearance(settings, "media_cards"))
+        padding = max(0, int(settings.media_cards_internal_padding))
+        spacing = max(0, int(settings.media_cards_control_spacing))
+        slider_thickness = max(2, int(settings.media_cards_slider_thickness))
+        button_size = max(18, int(settings.media_cards_button_size))
+        button_radius = max(0, int(settings.media_cards_controls_button_corner_radius))
+        self._root_layout.setContentsMargins(padding, padding, padding, padding)
+        self._root_layout.setSpacing(max(2, spacing))
+
+        title_font = QFont(self.app_label.font())
+        title_family = str(settings.media_cards_title_font_family or "").strip()
+        if title_family:
+            title_font.setFamily(title_family)
+        title_font.setPointSize(max(1, int(settings.media_cards_title_size)))
+        title_font.setBold(True)
+        self.app_label.setFont(title_font)
+        self.volume_value_label.setFont(title_font)
+
+        subtitle_font = QFont(self.title_label.font())
+        subtitle_family = str(settings.media_cards_subtitle_font_family or "").strip()
+        if subtitle_family:
+            subtitle_font.setFamily(subtitle_family)
+        subtitle_font.setPointSize(max(1, int(settings.media_cards_subtitle_size)))
+        self.title_label.setFont(subtitle_font)
+
+        title_color = color_from_setting(settings.media_cards_title_color, "#f6f7f8")
+        subtitle_color = color_from_setting(settings.media_cards_subtitle_color, "#c8d0d4")
+        disabled_text = apply_color_opacity(title_color, int(settings.media_cards_controls_button_disabled_opacity))
+        button_bg = color_from_setting(settings.media_cards_controls_button_background, "#ffffff12")
+        button_hover = color_from_setting(settings.media_cards_controls_button_hover_background, "#ffffff1f")
+        button_active = color_from_setting(settings.media_cards_controls_button_active_background, "#ffffff2c")
+        groove_color = color_from_setting(settings.media_cards_progress_background_color, "#ffffff24")
+        progress_color = color_from_setting(settings.media_cards_progress_color, "#70c0ff")
+
+        self.app_label.setStyleSheet(f"color: {color_to_qss_rgba(title_color)};")
+        self.volume_value_label.setStyleSheet(f"color: {color_to_qss_rgba(title_color)};")
+        self.title_label.setStyleSheet(f"color: {color_to_qss_rgba(subtitle_color)};")
+        self.mute_button.setStyleSheet(
+            "QPushButton {"
+            f"color: {color_to_qss_rgba(title_color)};"
+            f"background: {color_to_qss_rgba(button_bg)};"
+            f"border: none; border-radius: {button_radius}px;"
+            "}"
+            "QPushButton:hover {"
+            f"background: {color_to_qss_rgba(button_hover)};"
+            "}"
+            "QPushButton:pressed {"
+            f"background: {color_to_qss_rgba(button_active)};"
+            "}"
+            "QPushButton:disabled {"
+            f"color: {color_to_qss_rgba(disabled_text)};"
+            "}"
+        )
+        self.mute_button.setMinimumHeight(button_size)
+        self.volume_slider.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            f"height: {slider_thickness}px;"
+            f"background: {color_to_qss_rgba(groove_color)};"
+            "border-radius: 999px;"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            f"background: {color_to_qss_rgba(progress_color)};"
+            "border-radius: 999px;"
+            "}"
+            "QSlider::handle:horizontal {"
+            f"width: {max(10, slider_thickness + 6)}px;"
+            f"margin: -{max(2, slider_thickness // 2)}px 0;"
+            f"background: {color_to_qss_rgba(progress_color)};"
+            "border-radius: 999px;"
+            "}"
+        )
+
     def bind(self, info: AudioStreamInfo) -> None:
         self._stream_id = info.stream_id
         self.app_label.setText(info.app_name or f"Stream {info.stream_id}")
         detail = (info.title or "").strip()
-        if detail:
+        if detail and self._settings.media_cards_show_secondary_text:
             self.title_label.setText(detail)
             self.title_label.show()
         else:
@@ -366,6 +451,8 @@ class SoundSection(QWidget):
         super().__init__(parent)
         self.volume = VolumeService()
         self._request_refresh = request_refresh
+        self._settings = TopBarBehaviorSettings()
+        self._snapshot = SoundSnapshot(available=False, volume_percent=None, is_muted=None, streams=())
         self._volume_syncing = False
         self._volume_dragging = False
         self._pending_volume_percent: int | None = None
@@ -388,13 +475,13 @@ class SoundSection(QWidget):
         if self._live_backend is not None:
             self._live_backend.snapshotChanged.connect(self.apply_snapshot)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(8)
 
         volume_title_row = QHBoxLayout()
         volume_title_row.setSpacing(8)
-        root.addLayout(volume_title_row)
+        self._root_layout.addLayout(volume_title_row)
 
         volume_title = QLabel("Volume", self)
         volume_title.setObjectName("systemMenuSectionTitle")
@@ -414,11 +501,11 @@ class SoundSection(QWidget):
         self.volume_slider.valueChanged.connect(self._on_volume_slider_changed)
         self.volume_slider.sliderPressed.connect(self._on_slider_pressed)
         self.volume_slider.sliderReleased.connect(self._on_slider_released)
-        root.addWidget(self.volume_slider)
+        self._root_layout.addWidget(self.volume_slider)
 
         sound_row = QHBoxLayout()
         sound_row.setSpacing(8)
-        root.addLayout(sound_row)
+        self._root_layout.addLayout(sound_row)
 
         sound_refresh = QPushButton("Refresh Sound", self)
         sound_refresh.clicked.connect(self.refresh)
@@ -431,22 +518,23 @@ class SoundSection(QWidget):
         self.streams_title = QLabel("Applications", self)
         self.streams_title.setObjectName("systemMenuSectionTitle")
         self.streams_title.hide()
-        root.addWidget(self.streams_title)
+        self._root_layout.addWidget(self.streams_title)
 
         self.streams_empty_label = QLabel("", self)
         self.streams_empty_label.setObjectName("systemMenuMutedText")
         self.streams_empty_label.setWordWrap(True)
         self.streams_empty_label.hide()
-        root.addWidget(self.streams_empty_label)
+        self._root_layout.addWidget(self.streams_empty_label)
 
         self.streams_host = QWidget(self)
         self.streams_layout = QVBoxLayout(self.streams_host)
         self.streams_layout.setContentsMargins(0, 0, 0, 0)
         self.streams_layout.setSpacing(8)
         self.streams_layout.addStretch(1)
-        root.addWidget(self.streams_host)
+        self._root_layout.addWidget(self.streams_host)
 
         self._set_initial_state()
+        self.apply_settings(self._settings)
 
     def _set_initial_state(self) -> None:
         available = self.volume.available()
@@ -468,6 +556,7 @@ class SoundSection(QWidget):
         self.apply_snapshot(self.volume.sound_snapshot())
 
     def apply_snapshot(self, snapshot: SoundSnapshot) -> None:
+        self._snapshot = snapshot
         available = snapshot.available
         self.volume_slider.setEnabled(available)
         self.volume_mute_button.setEnabled(available)
@@ -476,6 +565,7 @@ class SoundSection(QWidget):
             self.volume_value_label.setText("Unavailable")
             self.volume_mute_button.setText("Mute")
             self._sync_stream_cards(())
+            self._update_streams_visibility(())
             return
 
         percent = snapshot.volume_percent
@@ -498,6 +588,31 @@ class SoundSection(QWidget):
             self.volume_mute_button.setText("Unmute" if muted or display_percent == 0 else "Mute")
 
         self._sync_stream_cards(snapshot.streams)
+        self._update_streams_visibility(snapshot.streams)
+
+    def apply_settings(self, settings: TopBarBehaviorSettings) -> None:
+        self._settings = settings
+        self._root_layout.setSpacing(max(0, int(settings.menu_appearance_section_spacing)))
+        self.streams_layout.setSpacing(max(0, int(settings.media_cards_spacing)))
+        for card in self._stream_cards.values():
+            card.apply_settings(settings)
+        self._sync_stream_cards(self._snapshot.streams)
+        self._update_streams_visibility(self._snapshot.streams)
+
+    def _update_streams_visibility(self, streams: tuple[AudioStreamInfo, ...]) -> None:
+        show_streams = bool(self._settings.media_controls_show_application_volumes)
+        if not show_streams:
+            self.streams_title.hide()
+            self.streams_empty_label.hide()
+            self.streams_host.hide()
+            return
+        has_streams = bool(streams)
+        self.streams_title.setVisible(has_streams)
+        self.streams_host.setVisible(has_streams)
+        if not self.volume.has_pactl():
+            self.streams_empty_label.setVisible(True)
+        else:
+            self.streams_empty_label.setVisible(not has_streams and bool(self.streams_empty_label.text()))
 
     def _sync_stream_cards(self, streams: tuple[AudioStreamInfo, ...]) -> None:
         active_ids = {stream.stream_id for stream in streams}
@@ -514,13 +629,10 @@ class SoundSection(QWidget):
                     self._toggle_stream_mute,
                     self.streams_host,
                 )
+                card.apply_settings(self._settings)
                 self._stream_cards[stream.stream_id] = card
                 self.streams_layout.insertWidget(self.streams_layout.count() - 1, card)
             card.bind(stream)
-
-        has_streams = bool(streams)
-        self.streams_title.setVisible(has_streams)
-        self.streams_host.setVisible(has_streams)
         if self.volume.has_pactl():
             self.streams_empty_label.hide()
 

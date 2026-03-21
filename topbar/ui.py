@@ -12,23 +12,29 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QSize,
     Qt,
     QTimer,
     Slot,
 )
-from PySide6.QtGui import QCursor, QFontDatabase, QGuiApplication
+from PySide6.QtGui import QColor, QCursor, QFont, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QToolButton,
     QToolTip,
+    QVBoxLayout,
     QWidget,
 )
 
 from topbar.calendar_popup import CalendarPopup
 
+from .appearance import TopBarPanel, apply_color_opacity, color_from_setting, color_to_qss_rgba
 from .constants import NOTIFICATIONS_SERVICE, WATCHER_SERVICES
 from .dbus import launch_background_command, load_xlib
 from .focus import X11FocusController
@@ -58,6 +64,7 @@ class TopBar(QWidget):
         dock_attribute = getattr(Qt.WidgetAttribute, "WA_X11NetWmWindowTypeDock", None)
         if dock_attribute is not None:
             self.setAttribute(dock_attribute, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         center_started = time.perf_counter()
@@ -87,46 +94,76 @@ class TopBar(QWidget):
         self.setGeometry(0, 0, width, 35)
         self.focus_controller = X11FocusController(self)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 0, 15, 0)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+
+        self._panel = TopBarPanel(self)
+        self._root_layout.addWidget(self._panel)
+
+        self._panel_layout = QHBoxLayout(self._panel)
+        self._panel_layout.setContentsMargins(15, 0, 15, 0)
+        self._panel_layout.setSpacing(24)
+
+        self._left_section = QWidget(self._panel)
+        self._left_section.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._left_layout = QHBoxLayout(self._left_section)
+        self._left_layout.setContentsMargins(0, 0, 0, 0)
+        self._left_layout.setSpacing(8)
+
+        self._center_section = QWidget(self._panel)
+        self._center_section.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._center_layout = QHBoxLayout(self._center_section)
+        self._center_layout.setContentsMargins(0, 0, 0, 0)
+        self._center_layout.setSpacing(8)
+        self._center_section.hide()
+
+        self._right_section = QWidget(self._panel)
+        self._right_section.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._right_layout = QHBoxLayout(self._right_section)
+        self._right_layout.setContentsMargins(0, 0, 0, 0)
+        self._right_layout.setSpacing(8)
+
+        self._panel_layout.addWidget(self._left_section, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self._panel_layout.addStretch(1)
+        self._panel_layout.addWidget(self._center_section, 0, Qt.AlignCenter)
+        self._panel_layout.addStretch(1)
+        self._panel_layout.addWidget(self._right_section, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         self.workspaces_label = QLabel("Workspaces: 1 2 3")
         self.workspaces_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.workspaces_label.setStyleSheet("color: #f1f1f1; font-weight: 600;")
-        layout.addWidget(self.workspaces_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addStretch(1)
+        self._left_layout.addWidget(self.workspaces_label, alignment=Qt.AlignLeft | Qt.AlignVCenter)
 
         tray_area_started = time.perf_counter()
         self.tray_area = StatusNotifierTrayArea(
             self.status_notifier_watcher,
             self.x11_tray_selection_manager,
             self.focus_controller,
-            self,
+            self._right_section,
         )
         LOGGER.info("startup timing: StatusNotifierTrayArea initialized in %.1f ms", (time.perf_counter() - tray_area_started) * 1000.0)
-        layout.addWidget(self.tray_area, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        self._right_layout.addWidget(self.tray_area, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         notifications_button_started = time.perf_counter()
-        self.notifications_button = NotificationCenterButton(self.notification_center, self.notification_server, self)
+        self.notifications_button = NotificationCenterButton(self.notification_center, self.notification_server, self._right_section)
         LOGGER.info(
             "startup timing: NotificationCenterButton initialized in %.1f ms",
             (time.perf_counter() - notifications_button_started) * 1000.0,
         )
-        layout.addWidget(self.notifications_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        self._right_layout.addWidget(self.notifications_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self.menu_button = SystemMenuButton(
             open_terminal=self._open_terminal,
             open_dock=self._open_dock_panel,
             open_settings=self._open_settings_dialog,
             focus_controller=self.focus_controller,
-            parent=self,
+            parent=self._right_section,
         )
-        layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        self._right_layout.addWidget(self.menu_button, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self.clock_btn = QPushButton()
-        self.clock_btn.setStyleSheet("color: #f1f1f1; margin-left: 5x; border: 0px")
         self.clock_btn.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        layout.addWidget(self.clock_btn, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        self._right_layout.addWidget(self.clock_btn, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock)
@@ -158,8 +195,8 @@ class TopBar(QWidget):
         self.status_notifier_watcher.itemsChanged.connect(self._refresh_runtime_status)
         self.notification_center.notificationsChanged.connect(self._refresh_runtime_status)
 
-        self.setStyleSheet("background: #5b5b5b; border-bottom: 0px")
         self._last_status_text = ""
+        self._settings_dialog: TopBarSettingsDialog | None = None
         self._refresh_runtime_status()
         self.reload_behavior_settings()
         QTimer.singleShot(0, self._claim_x11_tray_selection)
@@ -167,11 +204,13 @@ class TopBar(QWidget):
 
     @Slot()
     def _update_clock(self) -> None:
-        self.clock_btn.setText(QDateTime.currentDateTime().toString("h:mm:ss AP"))
+        time_format = str(self._behavior_settings.appearance_time_format or "").strip() or "h:mm:ss AP"
+        self.clock_btn.setText(QDateTime.currentDateTime().toString(time_format))
         self.update_date_tooltip()
 
     def update_date_tooltip(self) -> None:
-        self.clock_btn.setToolTip(QDate.currentDate().toString("dd/MM/yyyy"))
+        date_format = str(self._behavior_settings.appearance_date_format or "").strip() or "dd/MM/yyyy"
+        self.clock_btn.setToolTip(QDate.currentDate().toString(date_format))
 
     def eventFilter(self, obj, event):
         if obj == self.clock_btn:
@@ -217,7 +256,20 @@ class TopBar(QWidget):
         self.focus_controller.restore_last_external_window_soon(0)
 
     def _open_settings_dialog(self) -> None:
-        TopBarSettingsDialog(self, on_applied=self.reload_behavior_settings).exec()
+        self._reveal_topbar(immediate=True)
+        dialog = self._settings_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dialog = TopBarSettingsDialog(self, on_applied=self.reload_behavior_settings)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_args: setattr(self, "_settings_dialog", None))
+        self._settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     @Slot()
     def _claim_x11_tray_selection(self) -> None:
@@ -258,8 +310,185 @@ class TopBar(QWidget):
     def reload_behavior_settings(self) -> None:
         self.apply_behavior_settings(load_topbar_behavior_settings())
 
+    def _shadow_margins(self) -> tuple[int, int, int, int]:
+        if not self._behavior_settings.appearance_show_shadow or int(self._behavior_settings.appearance_shadow_opacity) <= 0:
+            return (0, 0, 0, 0)
+        blur = max(0, int(self._behavior_settings.appearance_shadow_blur))
+        offset_x = int(self._behavior_settings.appearance_shadow_offset_x)
+        offset_y = int(self._behavior_settings.appearance_shadow_offset_y)
+        return (
+            max(0, blur - offset_x),
+            max(0, blur - offset_y),
+            max(0, blur + offset_x),
+            max(0, blur + offset_y),
+        )
+
+    def _apply_text_shadow(self, widget: QWidget, enabled: bool) -> None:
+        if not enabled:
+            effect = widget.graphicsEffect()
+            if isinstance(effect, QGraphicsDropShadowEffect):
+                widget.setGraphicsEffect(None)
+            return
+        effect = widget.graphicsEffect()
+        if not isinstance(effect, QGraphicsDropShadowEffect):
+            effect = QGraphicsDropShadowEffect(widget)
+            widget.setGraphicsEffect(effect)
+        effect.setBlurRadius(6)
+        effect.setOffset(0, 1)
+        effect.setColor(QColor(0, 0, 0, 180))
+
+    def _style_for_buttons(self, *, mode: str | None = None) -> str:
+        text_color = color_from_setting(self._behavior_settings.appearance_label_text_color, "#f1f1f1")
+        background_mode = str(mode or self._behavior_settings.appearance_button_background_style or "subtle").strip().lower()
+        border_mode = str(self._behavior_settings.appearance_button_border_style or "soft").strip().lower()
+        hover_mode = str(self._behavior_settings.appearance_button_hover_style or "highlight").strip().lower()
+        pressed_mode = str(self._behavior_settings.appearance_button_pressed_style or "inset").strip().lower()
+
+        if background_mode == "filled":
+            base_bg = apply_color_opacity(text_color, 18)
+        elif background_mode == "transparent":
+            base_bg = QColor(0, 0, 0, 0)
+        else:
+            base_bg = apply_color_opacity(text_color, 8)
+
+        if border_mode == "outline":
+            border_color = apply_color_opacity(text_color, 34)
+        elif border_mode == "none":
+            border_color = QColor(0, 0, 0, 0)
+        else:
+            border_color = apply_color_opacity(text_color, 18)
+
+        if hover_mode == "filled":
+            hover_bg = apply_color_opacity(text_color, 24)
+        elif hover_mode == "inset":
+            hover_bg = apply_color_opacity(text_color, 12)
+        elif hover_mode == "none":
+            hover_bg = base_bg
+        else:
+            hover_bg = apply_color_opacity(text_color, 16)
+
+        if pressed_mode == "filled":
+            pressed_bg = apply_color_opacity(text_color, 30)
+        elif pressed_mode == "highlight":
+            pressed_bg = apply_color_opacity(text_color, 22)
+        elif pressed_mode == "none":
+            pressed_bg = hover_bg
+        else:
+            pressed_bg = apply_color_opacity(text_color, 12)
+
+        padding = max(0, int(self._behavior_settings.appearance_button_padding))
+        radius = max(0, int(self._behavior_settings.appearance_button_corner_radius))
+        return (
+            "QToolButton, QPushButton {"
+            f"color: {color_to_qss_rgba(text_color)};"
+            f"background: {color_to_qss_rgba(base_bg)};"
+            f"border: 1px solid {color_to_qss_rgba(border_color)};"
+            f"border-radius: {radius}px;"
+            f"padding: 0 {padding}px;"
+            "}"
+            "QToolButton:hover, QPushButton:hover {"
+            f"background: {color_to_qss_rgba(hover_bg)};"
+            "}"
+            "QToolButton:pressed, QPushButton:pressed {"
+            f"background: {color_to_qss_rgba(pressed_bg)};"
+            "}"
+        )
+
+    def _apply_appearance_settings(self) -> None:
+        settings = self._behavior_settings
+        self._panel.apply_settings(settings)
+
+        shadow_left, shadow_top, shadow_right, shadow_bottom = self._shadow_margins()
+        self._root_layout.setContentsMargins(
+            max(0, int(settings.appearance_left_margin)) + shadow_left,
+            max(0, int(settings.appearance_top_margin)) + shadow_top,
+            max(0, int(settings.appearance_right_margin)) + shadow_right,
+            shadow_bottom,
+        )
+        self._panel_layout.setContentsMargins(
+            max(0, int(settings.appearance_internal_padding)),
+            0,
+            max(0, int(settings.appearance_internal_padding)),
+            0,
+        )
+        self._panel_layout.setSpacing(max(0, int(settings.appearance_section_spacing)))
+
+        default_spacing = max(0, int(settings.appearance_widget_spacing))
+        self._left_layout.setSpacing(max(0, int(settings.appearance_left_section_spacing if settings.appearance_left_section_spacing is not None else default_spacing)))
+        self._center_layout.setSpacing(max(0, int(settings.appearance_center_section_spacing if settings.appearance_center_section_spacing is not None else default_spacing)))
+        self._right_layout.setSpacing(max(0, int(settings.appearance_right_section_spacing if settings.appearance_right_section_spacing is not None else default_spacing)))
+
+        total_height = (
+            self._root_layout.contentsMargins().top()
+            + int(settings.appearance_height)
+            + self._root_layout.contentsMargins().bottom()
+        )
+        self.setFixedHeight(max(24, total_height))
+
+        label_font = QFont(self.workspaces_label.font())
+        label_family = str(settings.appearance_label_font_family or "").strip()
+        if label_family:
+            label_font.setFamily(label_family)
+        label_font.setPointSize(max(1, int(settings.appearance_label_font_size)))
+        label_font.setWeight(QFont.Weight(max(1, min(900, int(settings.appearance_label_font_weight)))))
+        self.workspaces_label.setFont(label_font)
+        label_color = color_from_setting(settings.appearance_label_text_color, "#f1f1f1")
+        self.workspaces_label.setStyleSheet(f"color: {color_to_qss_rgba(label_color)};")
+        self._apply_text_shadow(self.workspaces_label, bool(settings.appearance_label_text_shadow))
+
+        clock_font = QFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        clock_family = str(settings.appearance_clock_font_family or "").strip()
+        if clock_family:
+            clock_font.setFamily(clock_family)
+        clock_font.setPointSize(max(1, int(settings.appearance_clock_size)))
+        self.clock_btn.setFont(clock_font)
+        clock_color = color_from_setting(settings.appearance_clock_color, "#f1f1f1")
+
+        button_style = self._style_for_buttons()
+        for button in (self.notifications_button, self.menu_button, self.clock_btn):
+            button.setStyleSheet(button_style)
+            button.setMinimumHeight(max(20, int(settings.appearance_button_size)))
+            button.setMaximumHeight(max(20, int(settings.appearance_button_size)))
+        self.clock_btn.setStyleSheet(
+            button_style
+            + f"QPushButton {{ color: {color_to_qss_rgba(clock_color)}; }}"
+        )
+
+        button_icon_size = max(12, int(settings.appearance_button_icon_size))
+        self.notifications_button.setIconSize(QSize(button_icon_size, button_icon_size))
+        self.menu_button.set_status_icon_size(button_icon_size)
+
+        self.clock_btn.setVisible(bool(settings.appearance_show_clock))
+        self.update_date_tooltip()
+        self._update_clock()
+
+        tray_style_mode = str(settings.appearance_tray_button_style or "match_buttons").strip().lower()
+        if tray_style_mode == "filled":
+            tray_button_style = self._style_for_buttons(mode="filled")
+        elif tray_style_mode == "transparent":
+            tray_button_style = self._style_for_buttons(mode="transparent")
+        else:
+            tray_button_style = ""
+        self.tray_area.apply_appearance(
+            icon_size=max(12, int(settings.appearance_tray_icon_size)),
+            button_size=max(
+                int(settings.appearance_button_size),
+                int(settings.appearance_tray_icon_size) + 10,
+                30,
+            ),
+            spacing=max(0, int(settings.appearance_tray_icon_spacing)),
+            button_style_sheet=tray_button_style,
+        )
+        self.menu_button.apply_settings(settings)
+
+        if self.isVisible():
+            screen_rect = self._screen_geometry()
+            self.setGeometry(screen_rect.x(), self.y(), screen_rect.width(), self.height())
+        self.update()
+
     def apply_behavior_settings(self, settings: TopBarBehaviorSettings | None = None) -> None:
         self._behavior_settings = settings or TopBarBehaviorSettings()
+        self._apply_appearance_settings()
         self._auto_hide_enabled = bool(self._behavior_settings.auto_hide)
         self._auto_hide_reveal_timer.stop()
         self._auto_hide_hide_timer.stop()
@@ -328,8 +557,6 @@ class TopBar(QWidget):
             return 0
         if not self._behavior_settings.reserve_screen_space:
             return 0
-        if self._auto_hide_enabled and self._is_hidden_to_edge:
-            return self._visible_reserve_height
         return self.height()
 
     def _stop_visibility_animation(self) -> None:
@@ -375,8 +602,6 @@ class TopBar(QWidget):
                 self.setGeometry(visible_geometry)
             else:
                 self.setGeometry(hidden_animation_geometry)
-        elif hidden:
-            self.setGeometry(visible_geometry)
         else:
             self.setGeometry(visible_geometry)
 
@@ -427,6 +652,8 @@ class TopBar(QWidget):
 
     def _has_attached_popup(self) -> bool:
         if self.calendar_popup.isVisible():
+            return True
+        if self._settings_dialog is not None and self._settings_dialog.isVisible():
             return True
         panel = getattr(self.menu_button, "_panel", None)
         if isinstance(panel, QWidget) and panel.isVisible():
@@ -480,10 +707,7 @@ class TopBar(QWidget):
             self._apply_visibility_state(hidden=False, animated=False)
             return
         self._auto_hide_reveal_timer.stop()
-        self._apply_visibility_state(
-            hidden=False,
-            animated=not immediate,
-        )
+        self._apply_visibility_state(hidden=False, animated=not immediate)
 
     def _hide_topbar_to_edge(self) -> None:
         if not self._auto_hide_enabled:
