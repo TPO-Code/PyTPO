@@ -314,6 +314,7 @@ class IdeSettings(TypedDict, total=False):
     font_family: str
     tree_font_size: int
     tree_font_family: str
+    project_explorer_icon_size: int
     window: IdeWindowSettings
     run: RunSettings
     projects: IdeProjectHistorySettings
@@ -516,6 +517,7 @@ def default_ide_settings() -> IdeSettings:
         "font_family": "",
         "tree_font_size": 10,
         "tree_font_family": "",
+        "project_explorer_icon_size": 16,
         "window": {
             "use_native_chrome": False,
             "show_title_in_custom_toolbar": True,

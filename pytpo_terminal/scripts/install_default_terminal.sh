@@ -38,7 +38,7 @@ if [[ -z "${REPO_ROOT}" ]]; then
     REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
-ICON_PATH="${REPO_ROOT}/icons/terminal.png"
+ICON_PATH="${REPO_ROOT}/pytpo_terminal/icon.png"
 
 mkdir -p "$(dirname "${LAUNCHER_PATH}")"
 cat > "${LAUNCHER_PATH}" <<EOF

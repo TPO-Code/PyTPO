@@ -1177,6 +1177,16 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                                 scope="ide",
                                 description="Font used by project and navigation trees.",
                             ),
+                            SchemaField(
+                                id="ide-project-explorer-icon-size",
+                                key="project_explorer_icon_size",
+                                label="Project Explorer Icon Size",
+                                type="spin",
+                                scope="ide",
+                                min=8,
+                                max=48,
+                                description="Icon size used by the project explorer file tree.",
+                            ),
                         ],
                     ),
                     SchemaSection(

@@ -316,6 +316,7 @@ IDE_KEY_ALIASES: dict[str, str] = {
     "font_family": "font_family",
     "tree_font_size": "tree_font_size",
     "tree_font_family": "tree_font_family",
+    "project_explorer_icon_size": "project_explorer_icon_size",
     "window": "window",
     "window.use_native_chrome": "window.use_native_chrome",
     "window.show_title_in_custom_toolbar": "window.show_title_in_custom_toolbar",
@@ -422,6 +423,7 @@ IDE_KEY_PREFIXES: tuple[str, ...] = (
     "font_family",
     "tree_font_size",
     "tree_font_family",
+    "project_explorer_icon_size",
     "window",
     "run",
     "projects",
@@ -594,6 +596,7 @@ class SettingsManager:
             "font_family",
             "tree_font_size",
             "tree_font_family",
+            "project_explorer_icon_size",
             "window",
             "run",
             "projects",
@@ -629,6 +632,7 @@ class SettingsManager:
                 "font_family",
                 "tree_font_size",
                 "tree_font_family",
+                "project_explorer_icon_size",
                 "window",
                 "run",
                 "projects",
@@ -1115,6 +1119,10 @@ class SettingsManager:
             data["tree_font_size"] = 10
         tree_font_family = data.get("tree_font_family")
         data["tree_font_family"] = str(tree_font_family).strip() if isinstance(tree_font_family, str) else ""
+        try:
+            data["project_explorer_icon_size"] = max(8, min(48, int(data.get("project_explorer_icon_size", 16))))
+        except Exception:
+            data["project_explorer_icon_size"] = 16
 
         window = data.get("window")
         if not isinstance(window, dict):

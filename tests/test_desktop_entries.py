@@ -31,12 +31,15 @@ class DesktopEntriesTests(unittest.TestCase):
         self.assertIn("Icon=pytpo-terminal", rendered)
         self.assertIn("Categories=System;TerminalEmulator;Utility;", rendered)
 
-    def test_desktop_specs_use_app_specific_shared_icons(self) -> None:
-        self.assertIn("icons/pytpo.png", app_alias_map()["pytpo"].icon_candidates)
-        self.assertIn("icons/terminal.png", app_alias_map()["terminal"].icon_candidates)
-        self.assertIn("icons/txt.png", app_alias_map()["text-editor"].icon_candidates)
-        self.assertIn("icons/dock.png", app_alias_map()["dock"].icon_candidates)
-        self.assertIn("icons/appgrid.png", app_alias_map()["appgrid"].icon_candidates)
+    def test_desktop_specs_use_package_local_icons(self) -> None:
+        self.assertEqual(app_alias_map()["pytpo"].icon_candidates, ("pytpo/icon.png",))
+        self.assertEqual(app_alias_map()["terminal"].icon_candidates, ("pytpo_terminal/icon.png",))
+        self.assertEqual(
+            app_alias_map()["text-editor"].icon_candidates,
+            ("pytpo_text_editor/icon.png",),
+        )
+        self.assertEqual(app_alias_map()["dock"].icon_candidates, ("pytpo_dock/icon.png",))
+        self.assertEqual(app_alias_map()["appgrid"].icon_candidates, ("pytpo_appgrid/icon.png",))
 
     def test_resolve_icon_source_prefers_package_icon(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -52,7 +55,7 @@ class DesktopEntriesTests(unittest.TestCase):
                 display_name="PyTPO Terminal",
                 comment="Standalone terminal",
                 categories=("Utility",),
-                icon_candidates=("pytpo_terminal/icon.png", "icons/terminal.png"),
+                icon_candidates=("pytpo_terminal/icon.png",),
             )
 
             with mock.patch("pytpo.desktop_entries.repo_root", return_value=tmp_path):

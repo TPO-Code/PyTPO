@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import sys
 from argparse import ArgumentParser, Namespace
+from pathlib import Path
 
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
-
-from pytpo.services.app_icons import shared_app_icon_path
 
 from .main_window import build_window
 from .settings_dialog import AppGridSettingsDialog
@@ -69,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(app, "setDesktopFileName"):
         app.setDesktopFileName("pytpo-appgrid")
     app.setApplicationName("pytpo-appgrid")
-    icon_path = shared_app_icon_path("appgrid")
+    icon_path = Path(__file__).with_name("icon.png")
     app_icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)

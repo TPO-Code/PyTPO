@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pytpo.services.asset_paths import shared_asset_search_dirs
+from pytpo.ui.icons.asset_icons import apply_tab_close_icon, app_palette_icon, has_asset_icon
 from pytpo.ui.widgets.code_editor import CodeEditor
 
 
@@ -125,7 +125,7 @@ def prompt_large_file_open(parent: QWidget | None, analysis: LargeFileAnalysis) 
         + "\n\nReduced capability mode disables the heaviest editor features to improve responsiveness."
     )
     reduced_button = msg.addButton("Open Reduced Mode", QMessageBox.AcceptRole)
-    full_button = msg.addButton("Open Full", QMessageBox.DestructiveRole)
+    msg.addButton("Open Full", QMessageBox.DestructiveRole)
     cancel_button = msg.addButton(QMessageBox.Cancel)
     msg.setDefaultButton(reduced_button)
     msg.setEscapeButton(cancel_button)
@@ -602,6 +602,7 @@ class EditorTabs(QTabWidget):
         self.setMovable(True)
         self.setDocumentMode(True)
         self.setUsesScrollButtons(True)
+        apply_tab_close_icon(self.tabBar())
 
         # Keep both on to be safe across WM/Qt combos
         self.setAcceptDrops(True)
@@ -611,102 +612,17 @@ class EditorTabs(QTabWidget):
         self.currentChanged.connect(self._on_current_changed)
         self.tabBar().tabMoved.connect(self._on_tab_bar_moved)
 
-    def _icon_search_roots(self) -> list[Path]:
-        host = self.workspace.parentWidget()
-        while host is not None:
-            roots_getter = getattr(host, "_toolbar_icon_roots", None)
-            if callable(roots_getter):
-                try:
-                    roots = roots_getter()
-                except Exception:
-                    roots = []
-                out = [Path(p) for p in roots if isinstance(p, (str, Path))]
-                if out:
-                    return out
-            host = host.parentWidget()
-        base = Path(__file__).resolve().parents[1]
-        roots = [
-            *shared_asset_search_dirs("icons"),
-            base / "assets" / "icons",
-            base / "ui" / "icons",
-            base / "resources" / "icons",
-        ]
-        seen: set[str] = set()
-        out: list[Path] = []
-        for root in roots:
-            try:
-                key = str(root.resolve()).lower()
-            except Exception:
-                key = str(root).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(root)
-        return out
-
-    def _report_missing_pin_icon(self, *, icon_key: str, checked_candidates: list[str]) -> None:
-        key = str(icon_key or "").strip()
-        if not key:
-            return
-
-        host = self.workspace.parentWidget()
-        owner_key_set: set[str] | None = None
-        appender: Callable[..., Any] | None = None
-        while host is not None:
-            maybe_set = getattr(host, "_toolbar_missing_icon_keys", None)
-            if isinstance(maybe_set, set):
-                owner_key_set = maybe_set
-            maybe_append = getattr(host, "_append_debug_output_lines", None)
-            if callable(maybe_append):
-                appender = maybe_append
-            if owner_key_set is not None and appender is not None:
-                break
-            host = host.parentWidget()
-
-        if owner_key_set is not None:
-            if key in owner_key_set:
-                return
-            owner_key_set.add(key)
-        else:
-            if key in self._missing_icon_warning_keys:
-                return
-            self._missing_icon_warning_keys.add(key)
-
-        print(f"[PyTPO] Missing tab icon '{key}'. Falling back to '[pin]' text.")
-        if callable(appender):
-            appender(
-                [
-                    f"[Tabs] Missing icon '{key}'. Falling back to [pin] text.",
-                    "[Tabs] Checked files:",
-                    *[f"  - {path}" for path in checked_candidates],
-                ],
-                reveal=False,
-            )
-
     def _ensure_pin_icon_loaded(self) -> bool:
         if self._pin_icon_checked:
             return bool(self._pin_icon_available) and not self._pin_icon.isNull()
 
         self._pin_icon_checked = True
-        key = "pin"
-        extensions = (".svg", ".png", ".ico", ".jpg", ".jpeg")
-        checked: list[str] = []
-        for root in self._icon_search_roots():
-            for ext in extensions:
-                candidate = root / f"{key}{ext}"
-                checked.append(str(candidate))
-                if not candidate.is_file():
-                    continue
-                icon = QIcon(str(candidate))
-                if icon.isNull():
-                    continue
-                self._pin_icon = icon
-                self._pin_icon_available = True
-                return True
-
+        if has_asset_icon("ui/pin"):
+            self._pin_icon = app_palette_icon("ui/pin")
+            self._pin_icon_available = not self._pin_icon.isNull()
+            return self._pin_icon_available
         self._pin_icon_available = False
         self._pin_icon = QIcon()
-        self._report_missing_pin_icon(icon_key=key, checked_candidates=checked)
         return False
 
     def _desired_tab_order_with_pins(self) -> list[QWidget]:

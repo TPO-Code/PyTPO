@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPalette, QPen
 from PySide6.QtMultimedia import (
     QAudioBuffer,
     QAudioDecoder,
@@ -23,10 +23,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
     QSlider,
-    QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+from pytpo.ui.icons.asset_icons import (
+    PAUSE_ICON_NAME,
+    PLAY_ICON_NAME,
+    STOP_ICON_NAME,
+    app_palette_color_hex,
+    asset_icon,
 )
 
 
@@ -709,15 +716,20 @@ class SoundPlayerEditorWidget(QWidget):
             self._refresh_meta_label()
 
     def _refresh_play_button(self, *_args) -> None:
-        style = self.style()
         state = self._player.playbackState()
+        disabled = app_palette_color_hex(
+            group=QPalette.ColorGroup.Disabled,
+        )
         if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._play_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+            play_icon = asset_icon(PAUSE_ICON_NAME, foreground="#d8a43a" if self._play_button.isEnabled() else disabled)
+            self._play_button.setIcon(play_icon)
             self._play_button.setToolTip("Pause")
         else:
-            self._play_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            play_icon = asset_icon(PLAY_ICON_NAME, foreground="#2fbf71" if self._play_button.isEnabled() else disabled)
+            self._play_button.setIcon(play_icon)
             self._play_button.setToolTip("Play")
-        self._stop_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        stop_icon = asset_icon(STOP_ICON_NAME, foreground="#d84f57" if self._stop_button.isEnabled() else disabled)
+        self._stop_button.setIcon(stop_icon)
         self._stop_button.setToolTip("Stop")
 
     def _reset_transport(self) -> None:
@@ -748,6 +760,7 @@ class SoundPlayerEditorWidget(QWidget):
         self._stop_button.setEnabled(state)
         self._position_slider.setEnabled(state)
         self._volume_slider.setEnabled(state)
+        self._refresh_play_button()
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(str(text or "").strip() or "Ready")

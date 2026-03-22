@@ -11,7 +11,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
-from pytpo.services.app_icons import shared_app_icon_path
 from pytpo.services.file_type_catalog import DesktopAssociationType, desktop_association_types
 from .storage_paths import text_editor_settings
 
@@ -78,7 +77,7 @@ def repo_root() -> Path:
 
 
 def icon_path() -> Path:
-    return shared_app_icon_path("text-editor")
+    return Path(__file__).with_name("icon.png")
 
 
 def xdg_data_home() -> Path:

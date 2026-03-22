@@ -48,7 +48,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from pytpo.services.asset_paths import preferred_shared_asset_path
 from pytpo.ui.codex_session_store import (
     CodexSessionRecord,
     canonical_path_text,
@@ -58,6 +57,7 @@ from pytpo.ui.codex_session_store import (
     session_preview_text,
 )
 from pytpo.ui.dialogs.codex_sessions_dialog import CodexSessionsDialog
+from pytpo.ui.icons.asset_icons import SETTINGS_ICON_NAME, app_palette_icon
 from pytpo.ui.theme_runtime import (
     current_codex_agent_bubble_theme,
     current_codex_agent_composer_theme,
@@ -1820,12 +1820,7 @@ class CodexAgentDockWidget(QWidget):
         )
 
     def _load_settings_icon(self) -> QIcon:
-        icon_path = preferred_shared_asset_path("icons/settings.png")
-        if icon_path.is_file():
-            icon = QIcon(str(icon_path))
-            if not icon.isNull():
-                return icon
-        return QIcon()
+        return app_palette_icon(SETTINGS_ICON_NAME)
 
     def _set_agent_options_visible(self, visible: bool) -> None:
         shown = bool(visible)

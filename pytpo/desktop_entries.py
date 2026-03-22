@@ -8,8 +8,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from pytpo.services.app_icons import shared_app_icon_relative_paths
-from pytpo.services.asset_paths import preferred_shared_asset_path
 from pytpo_dock.autostart import DockAutostartManager
 
 
@@ -42,7 +40,7 @@ def desktop_app_specs() -> tuple[DesktopAppSpec, ...]:
             display_name="PyTPO",
             comment="Multi-language IDE for Python, C/C++, Rust, and more",
             categories=("Development", "IDE"),
-            icon_candidates=("pytpo/icon.png", *shared_app_icon_relative_paths("pytpo")),
+            icon_candidates=("pytpo/icon.png",),
         ),
         DesktopAppSpec(
             key="terminal",
@@ -51,7 +49,7 @@ def desktop_app_specs() -> tuple[DesktopAppSpec, ...]:
             display_name="PyTPO Terminal",
             comment="Standalone terminal from the PyTPO suite",
             categories=("System", "TerminalEmulator", "Utility"),
-            icon_candidates=("pytpo_terminal/icon.png", *shared_app_icon_relative_paths("terminal")),
+            icon_candidates=("pytpo_terminal/icon.png",),
         ),
         DesktopAppSpec(
             key="text-editor",
@@ -60,7 +58,7 @@ def desktop_app_specs() -> tuple[DesktopAppSpec, ...]:
             display_name="PyTPO Text Editor",
             comment="Standalone text editor from the PyTPO suite",
             categories=("Utility", "TextEditor", "Development"),
-            icon_candidates=("pytpo_text_editor/icon.png", *shared_app_icon_relative_paths("text-editor")),
+            icon_candidates=("pytpo_text_editor/icon.png",),
             exec_arg="%F",
         ),
         DesktopAppSpec(
@@ -70,7 +68,7 @@ def desktop_app_specs() -> tuple[DesktopAppSpec, ...]:
             display_name="PyTPO Dock",
             comment="Standalone desktop dock from the PyTPO suite",
             categories=("Utility",),
-            icon_candidates=("pytpo_dock/icon.png", *shared_app_icon_relative_paths("dock")),
+            icon_candidates=("pytpo_dock/icon.png",),
         ),
         DesktopAppSpec(
             key="appgrid",
@@ -79,7 +77,7 @@ def desktop_app_specs() -> tuple[DesktopAppSpec, ...]:
             display_name="PyTPO App Grid",
             comment="Standalone application launcher grid from the PyTPO suite",
             categories=("Utility",),
-            icon_candidates=("pytpo_appgrid/icon.png", *shared_app_icon_relative_paths("appgrid")),
+            icon_candidates=("pytpo_appgrid/icon.png",),
         ),
     )
 
@@ -140,8 +138,6 @@ def _candidate_icon_path(relative_path: str) -> Path:
     candidate = Path(relative_path)
     if candidate.is_absolute():
         return candidate
-    if candidate.parts[:1] == ("icons",):
-        return preferred_shared_asset_path(candidate)
     return repo_root() / candidate
 
 
@@ -150,7 +146,7 @@ def resolve_icon_source(spec: DesktopAppSpec) -> Path:
         path = _candidate_icon_path(candidate)
         if path.is_file():
             return path
-    fallback = preferred_shared_asset_path("icons/pytpo.png")
+    fallback = repo_root() / "pytpo" / "icon.png"
     if fallback.is_file():
         return fallback
     raise FileNotFoundError(f"No icon asset found for {spec.desktop_id}")

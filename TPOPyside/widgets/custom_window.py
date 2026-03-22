@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QIcon, QMouseEvent, QResizeEvent
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPalette, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -23,8 +23,22 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from tpo_assets import icon as asset_icon
 
 EDGE_WIDTH = 8
+
+_TITLEBAR_ICON_NAMES = {
+    "close": "ui/x",
+    "max": "ui/maximize",
+    "min": "ui/minimize",
+    "restore": "ui/restore",
+}
+
+
+def _color_hex(color: QColor) -> str:
+    if color.alpha() >= 255:
+        return color.name(QColor.NameFormat.HexRgb)
+    return f"#{color.red():02x}{color.green():02x}{color.blue():02x}{color.alpha():02x}"
 
 
 def start_system_move(widget: QWidget, global_pos: Optional[QPoint] = None) -> None:
@@ -115,6 +129,7 @@ class CustomTitleBar(QFrame):
         self._allow_minimize = allow_minimize
         self._allow_maximize = allow_maximize
         self._allow_close = allow_close
+        self._maximized_state = False
 
         self._drag_start_global: Optional[QPoint] = None
         self._drag_started = False
@@ -200,13 +215,15 @@ class CustomTitleBar(QFrame):
         self.btn_min.clicked.connect(self._on_minimize_clicked)
         self.btn_max.clicked.connect(self._on_maximize_restore_clicked)
         self.btn_close.clicked.connect(self._on_close_clicked)
+        self._refresh_control_button_icons()
 
     def set_title(self, text: str) -> None:
         self.title_label.setText(text)
 
     def set_maximized_state(self, is_maximized: bool) -> None:
-        self.btn_max.setIcon(QIcon())
-        self.btn_max.setText("❐" if is_maximized else "□")
+        self._maximized_state = bool(is_maximized)
+        self.btn_max.setToolTip("Restore" if self._maximized_state else "Maximize")
+        self._apply_control_button_icon(self.btn_max)
 
     def add_left_widget(self, widget: QWidget) -> None:
         self.left_layout.addWidget(widget)
@@ -230,10 +247,40 @@ class CustomTitleBar(QFrame):
     def _setup_control_button(self, btn: QToolButton, fallback_text: str, tooltip: str, role: str) -> None:
         btn.setObjectName("TitleBarControlButton")
         btn.setProperty("role", role)
-        btn.setFixedSize(34, 30)
+        btn.setProperty("fallback_text", fallback_text)
+        btn.setFixedSize(32,32)
         btn.setToolTip(tooltip)
         btn.setIcon(QIcon())
         btn.setText(fallback_text)
+
+    def _control_button_foreground(self, btn: QToolButton) -> str:
+        group = QPalette.ColorGroup.Active if btn.isEnabled() else QPalette.ColorGroup.Disabled
+        return _color_hex(btn.palette().color(group, QPalette.ColorRole.ButtonText))
+
+    def _control_button_icon_name(self, btn: QToolButton) -> str:
+        role = str(btn.property("role") or "").strip().lower()
+        if role == "max" and self._maximized_state:
+            return _TITLEBAR_ICON_NAMES["restore"]
+        return _TITLEBAR_ICON_NAMES.get(role, "")
+
+    def _apply_control_button_icon(self, btn: QToolButton) -> None:
+        fallback_text = str(btn.property("fallback_text") or "").strip()
+        icon_name = self._control_button_icon_name(btn)
+        if icon_name:
+            icon = asset_icon(icon_name, foreground=self._control_button_foreground(btn))
+            if not icon.isNull():
+                btn.setText("")
+                btn.setIcon(icon)
+                btn.setIconSize(QSize(16, 16))
+                btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                return
+        btn.setIcon(QIcon())
+        btn.setText(fallback_text)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+    def _refresh_control_button_icons(self) -> None:
+        for button in (self.btn_min, self.btn_max, self.btn_close):
+            self._apply_control_button_icon(button)
 
     def _on_minimize_clicked(self) -> None:
         if self._allow_minimize and isinstance(self.window(), QWidget):
@@ -255,6 +302,11 @@ class CustomTitleBar(QFrame):
     def _on_close_clicked(self) -> None:
         if self._allow_close and isinstance(self.window(), QWidget):
             self.window().close()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() in {QEvent.Type.EnabledChange, QEvent.Type.PaletteChange, QEvent.Type.StyleChange}:
+            self._refresh_control_button_icons()
+        super().changeEvent(event)
 
     def _install_drag_event_filter(self, widget: QWidget) -> None:
         widget.installEventFilter(self)

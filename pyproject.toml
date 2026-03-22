@@ -16,7 +16,7 @@ dependencies = [
     "pygments",
     "pymdown-extensions",
     "pyspellchecker",
-    "tpo-assets @ git+https://github.com/TPO-Code/tpoassets.git@v0.1.2",
+    "tpo-assets @ git+https://github.com/TPO-Code/tpoassets.git@v0.1.3",
 ]
 
 [project.scripts]

@@ -7,7 +7,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QPoint, QSize, Qt, QTimer, QUrl, QByteArray
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QFontDatabase, QIcon, QTextCursor
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QFontDatabase, QIcon, QPalette, QTextCursor
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QTabWidget, QToolButton, QTreeView, QWidget
 
 from pytpo.ai.context_assembler import ContextAssembler
@@ -36,10 +36,7 @@ from pytpo.lang_cpp.clangd_repair import missing_std_header_from_diagnostic, rep
 from pytpo.lang_rust import RustLanguagePack
 from pytpo.services.asset_paths import (
     preferred_shared_asset_dir,
-    preferred_shared_asset_path,
-    shared_asset_search_dirs,
 )
-from pytpo.services.app_icons import shared_app_icon_path
 from pytpo.services.commit_md import (
     commit_md_path_for_project,
     ensure_commit_md_exists,
@@ -73,6 +70,16 @@ from pytpo.ui.controllers import (
     WorkspaceController,
 )
 from pytpo.ui.editor_change_highlight_service import EditorChangeHighlightService
+from pytpo.ui.icons.asset_icons import (
+    BUG_ICON_NAME,
+    PLAY_ICON_NAME,
+    SETTINGS_ICON_NAME,
+    STOP_ICON_NAME,
+    app_palette_color_hex,
+    app_palette_icon,
+    apply_tab_close_icon,
+    asset_icon,
+)
 from TPOPyside.widgets.custom_window import Window
 from pytpo.ui.dialogs.find_in_files_dialog import FindInFilesDialog
 from pytpo.ui.dialogs.file_dialog_bridge import get_save_file_name
@@ -310,7 +317,7 @@ class PythonIDE(Window):
 
     @classmethod
     def app_icon_path(cls) -> Path:
-        return shared_app_icon_path("pytpo")
+        return Path(__file__).resolve().parents[1] / "icon.png"
 
     def __init__(self):
         requested_root = os.path.realpath(QDir.currentPath())
@@ -397,6 +404,15 @@ class PythonIDE(Window):
                 "tree_font_family",
                 scope_preference="ide",
                 default=self.config.get("tree_font_family", ""),
+            )
+        )
+        self.project_explorer_icon_size = self._clamp_project_explorer_icon_size(
+            int(
+                self.settings_manager.get(
+                    "project_explorer_icon_size",
+                    scope_preference="ide",
+                    default=self.config.get("project_explorer_icon_size", 16),
+                )
             )
         )
         self.theme_name = str(
@@ -912,6 +928,7 @@ class PythonIDE(Window):
         self.tree.operationError.connect(self._show_tree_error)
         self.tree.pathMoved.connect(self._on_tree_path_moved)
         self._apply_tree_font_settings_to_all()
+        self._apply_project_explorer_icon_size_to_all()
 
         act_tree_copy = QAction("Copy", self.tree)
         act_tree_copy.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1144,6 +1161,7 @@ class PythonIDE(Window):
 
         self.debugger_dock_widget = DebuggerDockWidget(self, self.dock_debugger)
         self.dock_debugger.setWidget(self.debugger_dock_widget)
+        apply_tab_close_icon(self.debugger_dock_widget.session_tabs.tabBar())
         self.debugger_dock_widget.runStateChanged.connect(
             lambda: self.execution_controller._update_toolbar_run_controls()
         )
@@ -1158,6 +1176,7 @@ class PythonIDE(Window):
         self.console_tabs.setDocumentMode(True)
         self.console_tabs.setMovable(True)
         self.console_tabs.setTabsClosable(True)
+        apply_tab_close_icon(self.console_tabs.tabBar())
         self.dock_terminal.setWidget(self.console_tabs)
 
         self.dock_problems = QDockWidget("Problems (0)", self)
@@ -1720,60 +1739,71 @@ class PythonIDE(Window):
         ActionRegistry.create_actions(self)
         self._apply_runtime_keybindings()
 
-    def _toolbar_icon_roots(self) -> list[Path]:
-        base = Path(__file__).resolve().parents[1]
-        roots = [
-            *shared_asset_search_dirs("icons"),
-            base / "assets" / "icons",
-            base / "ui" / "icons",
-            base / "resources" / "icons",
-        ]
-        seen: set[str] = set()
-        out: list[Path] = []
-        for root in roots:
-            try:
-                key = str(root.resolve()).lower()
-            except Exception:
-                key = str(root).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(root)
-        return out
+    @staticmethod
+    def _toolbar_icon_name(icon_key: str) -> str:
+        return {
+            "debug": BUG_ICON_NAME,
+            "run": PLAY_ICON_NAME,
+            "settings": SETTINGS_ICON_NAME,
+            "stop": STOP_ICON_NAME,
+        }.get(str(icon_key or "").strip(), "")
 
-    def _load_toolbar_icon(self, icon_key: str) -> QIcon:
-        key = str(icon_key or "").strip()
-        if not key:
+    def _load_toolbar_icon(self, icon_key: str, *, foreground: str | None = None) -> QIcon:
+        asset_name = self._toolbar_icon_name(icon_key)
+        if not asset_name:
             return QIcon()
-
-        extensions = (".svg", ".png", ".ico", ".jpg", ".jpeg")
-        for root in self._toolbar_icon_roots():
-            for ext in extensions:
-                candidate = root / f"{key}{ext}"
-                if not candidate.is_file():
-                    continue
-                icon = QIcon(str(candidate))
-                if not icon.isNull():
-                    return icon
-
-        if key not in self._toolbar_missing_icon_keys:
+        icon = asset_icon(asset_name, foreground=foreground) if foreground is not None else app_palette_icon(asset_name)
+        if not icon.isNull():
+            return icon
+        key = str(icon_key or "").strip()
+        if key and key not in self._toolbar_missing_icon_keys:
             self._toolbar_missing_icon_keys.add(key)
-            roots = ", ".join(str(path) for path in self._toolbar_icon_roots())
-            print(f"[PyTPO] Missing toolbar icon '{key}'. Checked: {roots}. Falling back to text.")
-            checked_candidates = [
-                str(root / f"{key}{ext}")
-                for root in self._toolbar_icon_roots()
-                for ext in extensions
-            ]
+            print(f"[PyTPO] Missing toolbar icon asset '{asset_name}'. Falling back to text.")
             self._append_debug_output_lines(
                 [
-                    f"[Toolbar] Missing icon '{key}'. Falling back to text.",
-                    "[Toolbar] Checked files:",
-                    *[f"  - {path}" for path in checked_candidates],
+                    f"[Toolbar] Missing asset icon '{asset_name}' for '{key}'. Falling back to text.",
                 ],
                 reveal=False,
             )
         return QIcon()
+
+    @staticmethod
+    def _toolbar_button_icon_foreground(button: QToolButton) -> str:
+        if not button.isEnabled():
+            return app_palette_color_hex(
+                QPalette.ColorRole.ButtonText,
+                group=QPalette.ColorGroup.Disabled,
+            )
+        kind = str(button.property("kind") or "").strip().lower()
+        if kind == "run":
+            return "#2fbf71"
+        if kind == "debug":
+            return "#ffffff"
+        if kind == "stop":
+            return "#d84f57"
+        return app_palette_color_hex(QPalette.ColorRole.ButtonText)
+
+    def _refresh_titlebar_button_icon(self, button: QToolButton | None) -> None:
+        if button is None or not bool(button.property("icon_loaded")):
+            return
+        icon_key = str(button.property("icon_key") or "").strip()
+        if not icon_key:
+            return
+        icon = self._load_toolbar_icon(
+            icon_key,
+            foreground=self._toolbar_button_icon_foreground(button),
+        )
+        if not icon.isNull():
+            button.setIcon(icon)
+
+    def _refresh_titlebar_toolbar_icons(self) -> None:
+        for button in (
+            self._toolbar_run_btn,
+            self._toolbar_debug_btn,
+            self._toolbar_stop_btn,
+            self._toolbar_settings_btn,
+        ):
+            self._refresh_titlebar_button_icon(button)
 
     def _configure_titlebar_button(
         self,
@@ -1786,10 +1816,14 @@ class PythonIDE(Window):
     ) -> None:
         button.setObjectName("TitleBarToolButton")
         button.setProperty("kind", kind)
+        button.setProperty("icon_key", icon_key)
         button.setToolTip(tooltip)
         button.setFixedHeight(34)
         button.setCursor(Qt.PointingHandCursor)
-        icon = self._load_toolbar_icon(icon_key)
+        icon = self._load_toolbar_icon(
+            icon_key,
+            foreground=self._toolbar_button_icon_foreground(button),
+        )
         icon_loaded = not icon.isNull()
         button.setProperty("icon_loaded", icon_loaded)
         if icon_loaded:
@@ -1844,7 +1878,7 @@ class PythonIDE(Window):
             icon_key="debug",
             fallback_text="Debug",
             tooltip="Debug active Python target (selected config or current file)",
-            kind="run",
+            kind="debug",
         )
         debug_menu = QMenu(debug_btn)
         debug_menu.aboutToShow.connect(self.populate_toolbar_python_debug_menu)
@@ -1923,6 +1957,7 @@ class PythonIDE(Window):
         self._toolbar_stop_btn = stop_btn
         self._toolbar_stop_menu = stop_menu
         self._toolbar_settings_btn = settings_btn
+        self._refresh_titlebar_toolbar_icons()
 
         self.add_window_right_control(host)
 
@@ -2479,6 +2514,7 @@ class PythonIDE(Window):
             self._toolbar_ai_checkbox.setVisible(project_loaded)
         if self._toolbar_spell_checkbox is not None:
             self._toolbar_spell_checkbox.setVisible(project_loaded)
+        self._refresh_titlebar_toolbar_icons()
 
     def _update_toolbar_run_controls(self) -> None:
         self.execution_controller._update_toolbar_run_controls()
@@ -2777,6 +2813,10 @@ class PythonIDE(Window):
     def _clamp_tree_font_size(self, value: int) -> int:
         return max(self.FONT_SIZE_MIN, min(self.FONT_SIZE_MAX, int(value)))
 
+    @staticmethod
+    def _clamp_project_explorer_icon_size(value: int) -> int:
+        return max(8, min(48, int(value)))
+
     def _resolve_tree_font_family(self, family: object) -> str:
         preferred = str(family or "").strip()
         if not preferred:
@@ -2806,6 +2846,21 @@ class PythonIDE(Window):
                 font.setPointSize(int(self.tree_font_size))
                 font.setFamily(family or default_font.family())
                 widget.setFont(font)
+                viewport = widget.viewport()
+                if viewport is not None:
+                    viewport.update()
+                widget.updateGeometry()
+                widget.update()
+            except Exception:
+                continue
+
+    def _apply_project_explorer_icon_size_to_all(self) -> None:
+        size = QSize(int(self.project_explorer_icon_size), int(self.project_explorer_icon_size))
+        for widget in QApplication.allWidgets():
+            if not isinstance(widget, FileSystemTreeWidget):
+                continue
+            try:
+                widget.setIconSize(size)
                 viewport = widget.viewport()
                 if viewport is not None:
                     viewport.update()
@@ -2846,6 +2901,25 @@ class PythonIDE(Window):
         if announce:
             status = self.tree_font_family or "System default"
             self.statusBar().showMessage(f"Tree font: {status}", 1300)
+
+    def _set_project_explorer_icon_size(self, size: int, *, persist: bool = True, announce: bool = False) -> None:
+        new_size = self._clamp_project_explorer_icon_size(size)
+        if int(new_size) == int(self.project_explorer_icon_size):
+            return
+        self.project_explorer_icon_size = int(new_size)
+        self._apply_project_explorer_icon_size_to_all()
+        self.settings_manager.set("project_explorer_icon_size", int(self.project_explorer_icon_size), "ide")
+        if persist:
+            try:
+                self.settings_manager.save_all(scopes={"ide"}, only_dirty=True)
+            except Exception:
+                pass
+        self.config = self.settings_manager.export_legacy_config()
+        if announce:
+            self.statusBar().showMessage(
+                f"Project explorer icon size: {self.project_explorer_icon_size}",
+                1300,
+            )
 
     def _editor_background_config(self) -> dict:
         cfg = self.settings_manager.get("editor", scope_preference="ide", default={})
@@ -7776,9 +7850,21 @@ class PythonIDE(Window):
             persist=False,
             announce=False,
         )
+        self._set_project_explorer_icon_size(
+            int(
+                self.settings_manager.get(
+                    "project_explorer_icon_size",
+                    scope_preference="ide",
+                    default=self.project_explorer_icon_size,
+                )
+            ),
+            persist=False,
+            announce=False,
+        )
         # Ensure already-open editors stay in sync with current font settings.
         self._apply_editor_font_settings_to_all()
         self._apply_tree_font_settings_to_all()
+        self._apply_project_explorer_icon_size_to_all()
         self._apply_project_read_only_to_open_documents()
         self.theme_name = str(self.settings_manager.get("theme", scope_preference="ide", default="Default"))
         self.apply_selected_theme()

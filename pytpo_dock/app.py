@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtGui import QCursor, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication
-
-from pytpo.services.app_icons import shared_app_icon_path
 
 from .debug import install_qt_debug_message_logger, log_dock_debug, reset_dock_debug_log
 from .xlib_window_source import ensure_xlib_available
@@ -27,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(app, "setDesktopFileName"):
         app.setDesktopFileName("pytpo-dock")
     app.setQuitOnLastWindowClosed(False)
-    icon_path = shared_app_icon_path("dock")
+    icon_path = Path(__file__).with_name("icon.png")
     app_icon = QIcon(str(icon_path)) if icon_path.is_file() else QIcon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
