@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from dataclasses import dataclass
 
 from PySide6.QtCore import QMimeData, QPoint, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -12,6 +13,14 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 from pytpo.ui.dialogs.interpreter_picker_dialog import InterpreterPickerDialog
 from pytpo.ui.dialogs.paste_conflict_dialog import confirm_multi_paste_overwrite, prompt_single_paste_conflict
 from pytpo.ui.widgets.spellcheck_inputs import get_spellcheck_text
+
+
+@dataclass(frozen=True)
+class ExplorerSelectionContext:
+    scope_kind: str
+    selected_path: str | None
+    repo_root: str | None
+    requires_repo_choice: bool
 
 
 class ExplorerController:
@@ -154,6 +163,67 @@ class ExplorerController:
             return []
         return selected
 
+    def _workspace_repository_index(self):
+        return getattr(self.ide, "workspace_repository_index", None)
+
+    def _path_is_owned_by_repo(self, path: str, repo_root: str | None) -> bool:
+        if not repo_root:
+            return False
+        repo_index = self._workspace_repository_index()
+        cpath = self._canonical_path(path)
+        root = self._canonical_path(repo_root)
+        if repo_index is not None:
+            try:
+                return bool(repo_index.path_is_owned_by_repo(cpath, root))
+            except Exception:
+                return False
+        return self._path_has_prefix(cpath, root)
+
+    def current_selection_context(self, trigger_path: str | None = None) -> ExplorerSelectionContext:
+        selected_path: str | None = None
+        if isinstance(trigger_path, str) and trigger_path.strip():
+            selected_path = self._canonical_path(trigger_path)
+        elif self.tree is not None:
+            raw = self.tree.selected_path()
+            if isinstance(raw, str) and raw.strip():
+                selected_path = self._canonical_path(raw)
+
+        if not selected_path:
+            selected_path = self.project_root
+
+        repo_index = self._workspace_repository_index()
+        if selected_path == self.project_root:
+            repo_root = None
+            if repo_index is not None:
+                repo_root = getattr(repo_index, "workspace_repo_root", None)
+            return ExplorerSelectionContext(
+                scope_kind="project",
+                selected_path=selected_path,
+                repo_root=repo_root,
+                requires_repo_choice=repo_root is None,
+            )
+
+        repo_root = None
+        if repo_index is not None:
+            try:
+                repo_root = repo_index.deepest_repo_for_path(selected_path)
+            except Exception:
+                repo_root = None
+        if repo_root is None:
+            repo_root = self._repo_root_for_path(selected_path)
+
+        is_repo_root = bool(
+            repo_root
+            and os.path.isdir(selected_path)
+            and self._canonical_path(selected_path) == self._canonical_path(repo_root)
+        )
+        return ExplorerSelectionContext(
+            scope_kind="repo" if is_repo_root else "path",
+            selected_path=selected_path,
+            repo_root=repo_root,
+            requires_repo_choice=False,
+        )
+
     def _populate_multi_context_menu(self, menu: QMenu, paths: list[str]) -> None:
         read_only = self._is_project_read_only()
         targets = self._filter_nested_paths([self._canonical_path(p) for p in paths if isinstance(p, str)])
@@ -190,7 +260,7 @@ class ExplorerController:
             act_toggle_files.triggered.connect(lambda: self._set_files_excluded_bulk(file_paths, excluded=not all_files_excluded))
 
             repo_root = self._repo_root_for_path(file_paths[0])
-            if not folder_paths and repo_root and all(self._path_has_prefix(path, repo_root) for path in file_paths):
+            if not folder_paths and repo_root and all(self._path_is_owned_by_repo(path, repo_root) for path in file_paths):
                 use_fallback = len(file_paths) <= 40
                 if all(self._is_untracked_git_path(path, repo_root=repo_root, allow_fallback=use_fallback) for path in file_paths):
                     act_track_files = menu.addAction(f"Track Selected Files in Git ({len(file_paths)})")
@@ -205,7 +275,7 @@ class ExplorerController:
                 lambda: self._set_folders_excluded_bulk(folder_paths, excluded=not all_folders_excluded)
             )
             repo_root = self._repo_root_for_path(folder_paths[0])
-            if repo_root and all(self._path_has_prefix(path, repo_root) for path in folder_paths):
+            if repo_root and all(self._path_is_owned_by_repo(path, repo_root) for path in folder_paths):
                 act_track_visible = menu.addAction("Track Visible Files in Selected Folders")
                 act_track_visible.triggered.connect(
                     lambda: self._track_visible_untracked_paths_in_git(folder_paths, repo_root=repo_root)
@@ -773,7 +843,7 @@ class ExplorerController:
         act_toggle_excluded.triggered.connect(lambda: self._toggle_folder_excluded(folder_path))
 
         repo_root = self._repo_root_for_path(folder_path)
-        if repo_root and self._path_has_prefix(folder_path, repo_root):
+        if repo_root and self._path_is_owned_by_repo(folder_path, repo_root):
             menu.addSeparator()
             act_track_visible = menu.addAction("Track Visible Files in Git")
             act_track_visible.triggered.connect(
@@ -881,6 +951,12 @@ class ExplorerController:
         act_refresh_inc.triggered.connect(lambda: self.refresh_project_tree(include_excluded=True))
 
     def refresh_project_tree(self, include_excluded: bool = False):
+        refresh_repo_index = getattr(self.ide, "refresh_workspace_repository_index", None)
+        if callable(refresh_repo_index):
+            try:
+                refresh_repo_index(update_tree=True)
+            except Exception:
+                pass
         try:
             self.tree.refresh_project(include_excluded=include_excluded)
         except Exception as exc:
@@ -890,12 +966,24 @@ class ExplorerController:
 
     def refresh_subtree(self, path: str):
         cpath = self._canonical_path(path)
+        refresh_repo_index = getattr(self.ide, "refresh_workspace_repository_index", None)
+        if callable(refresh_repo_index):
+            try:
+                refresh_repo_index(update_tree=True)
+            except Exception:
+                pass
         try:
             self.tree.refresh_subtree(cpath)
         except Exception as exc:
             self._show_tree_error("Refresh Error", f"Could not refresh subtree:\n{exc}")
 
     def _on_tree_path_moved(self, old_path: str, new_path: str):
+        refresh_repo_index = getattr(self.ide, "refresh_workspace_repository_index", None)
+        if callable(refresh_repo_index):
+            try:
+                refresh_repo_index(update_tree=False)
+            except Exception:
+                pass
         self._update_open_editors_for_move(old_path, new_path)
         self.tree.select_path(new_path)
         self.ide.statusBar().showMessage(f"Moved: {old_path} -> {new_path}", 2500)
@@ -1117,7 +1205,7 @@ class ExplorerController:
         if not allow_fallback:
             return False
         root = repo_root or self._repo_root_for_path(cpath)
-        if not root or not self._path_has_prefix(cpath, root):
+        if not root or not self._path_is_owned_by_repo(cpath, root):
             return False
         rel_paths = self._to_repo_rel_paths(root, [cpath])
         if not rel_paths:
@@ -1145,12 +1233,13 @@ class ExplorerController:
             parent = next_parent
         return True
 
-    def _collect_visible_files_under_folder(self, folder_path: str) -> list[str]:
+    def _collect_visible_files_under_folder(self, folder_path: str, *, repo_root: str | None = None) -> list[str]:
         root = self._canonical_path(folder_path)
         if not os.path.isdir(root):
             return []
         if not self._is_path_visible_in_explorer(root, is_dir=True):
             return []
+        owned_repo_root = self._canonical_path(repo_root) if isinstance(repo_root, str) and repo_root else None
 
         collected: list[str] = []
         for current_root, dir_names, file_names in os.walk(root, topdown=True):
@@ -1158,16 +1247,23 @@ class ExplorerController:
             if current != root and not self._is_path_visible_in_explorer(current, is_dir=True):
                 dir_names[:] = []
                 continue
+            if owned_repo_root and not self._path_is_owned_by_repo(current, owned_repo_root):
+                dir_names[:] = []
+                continue
 
             kept_dirs: list[str] = []
             for dirname in dir_names:
                 candidate_dir = self._canonical_path(os.path.join(current, dirname))
+                if owned_repo_root and not self._path_is_owned_by_repo(candidate_dir, owned_repo_root):
+                    continue
                 if self._is_path_visible_in_explorer(candidate_dir, is_dir=True):
                     kept_dirs.append(dirname)
             dir_names[:] = kept_dirs
 
             for filename in file_names:
                 file_path = self._canonical_path(os.path.join(current, filename))
+                if owned_repo_root and not self._path_is_owned_by_repo(file_path, owned_repo_root):
+                    continue
                 if self._is_path_visible_in_explorer(file_path, is_dir=False):
                     collected.append(file_path)
 
@@ -1188,10 +1284,10 @@ class ExplorerController:
         visible_files: list[str] = []
         seen: set[str] = set()
         for target in canonical_targets:
-            if not self._path_has_prefix(target, root):
+            if not self._path_is_owned_by_repo(target, root):
                 continue
             if os.path.isdir(target):
-                candidates = self._collect_visible_files_under_folder(target)
+                candidates = self._collect_visible_files_under_folder(target, repo_root=root)
                 for candidate in candidates:
                     key = candidate.lower()
                     if key in seen:

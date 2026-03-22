@@ -7,12 +7,13 @@ from typing import Callable, Optional, Any, Dict, List, cast
 from PySide6.QtCore import (
     Qt, QAbstractItemModel, QModelIndex, QMimeData, QPoint, Signal, QObject, QItemSelectionModel, QItemSelection
 )
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QTreeView, QAbstractItemView, QStyle,
     QWidget
 )
 
+from pytpo.git.workspace_repository_index import WorkspaceRepositoryIndex
 from pytpo.ui.icons.file_icon_provider import FileIconProvider
 
 
@@ -64,10 +65,15 @@ class FileSystemTreeModel(QAbstractItemModel):
         self._exclude_path_predicate = exclude_path_predicate
         self._include_excluded = False
         self._root_path = self._canonical(root_path)
+        self._root_display_name = os.path.basename(self._root_path) or self._root_path
         self._icon_provider = FileIconProvider()
-        self._root_node = _FsNode(self._root_path, os.path.basename(self._root_path) or self._root_path, True, None)
-        self._root_node.children_loaded = False
-        self._path_map: Dict[str, _FsNode] = {self._root_path: self._root_node}
+        self._root_node = _FsNode("__pytpo_tree_root__", "", True, None)
+        self._root_node.children_loaded = True
+        self._path_map: Dict[str, _FsNode] = {}
+        self._workspace_repo_index = WorkspaceRepositoryIndex.discover(self._root_path, canonicalize=self._canonical)
+        self._repo_root_icon_color = QColor("#4fa8ff")
+        self._linked_repo_root_icon_color = QColor("#46c88b")
+        self._repo_root_icon_cache: dict[tuple[int, int, str], QIcon] = {}
         self._git_tint_enabled = False
         self._git_colors: Dict[str, str] = {
             "clean": "#7fbf7f",
@@ -85,25 +91,46 @@ class FileSystemTreeModel(QAbstractItemModel):
 
     def set_root_path(self, root_path: str):
         self._root_path = self._canonical(root_path)
+        self._root_display_name = os.path.basename(self._root_path) or self._root_path
+        self._workspace_repo_index = WorkspaceRepositoryIndex.discover(self._root_path, canonicalize=self._canonical)
         self.refresh_tree(include_excluded=False)
+
+    def set_root_display_name(self, display_name: str) -> None:
+        text = str(display_name or "").strip()
+        self._root_display_name = text or (os.path.basename(self._root_path) or self._root_path)
+        root_index = self.index_from_path(self._root_path)
+        if root_index.isValid():
+            self.dataChanged.emit(
+                root_index,
+                root_index,
+                [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole, Qt.ItemDataRole.FontRole, Qt.ItemDataRole.UserRole],
+            )
+
+    def set_workspace_repository_index(self, repo_index: WorkspaceRepositoryIndex | None) -> None:
+        self._workspace_repo_index = repo_index or WorkspaceRepositoryIndex(self._root_path, [], canonicalize=self._canonical)
+        self._repo_root_icon_cache.clear()
+        self._emit_state_update_all()
 
     def refresh_tree(self, include_excluded: bool = False):
         self._include_excluded = bool(include_excluded)
         self.beginResetModel()
-        self._root_node = _FsNode(
+        self._root_node = _FsNode("__pytpo_tree_root__", "", True, None)
+        self._root_node.children_loaded = True
+        project_root_node = _FsNode(
             self._root_path,
-            os.path.basename(self._root_path) or self._root_path,
+            self._root_display_name,
             True,
-            None,
-            )
-        self._path_map = {self._root_path: self._root_node}
+            self._root_node,
+        )
+        self._path_map = {self._root_path: project_root_node}
+        self._root_node.children = [project_root_node]
         # During reset we must not emit insert/remove row notifications.
         children = self._scan_children(self._root_path)
         for child in children:
-            child.parent = self._root_node
-            self._root_node.children.append(child)
+            child.parent = project_root_node
+            project_root_node.children.append(child)
             self._path_map[child.path] = child
-        self._root_node.children_loaded = True
+        project_root_node.children_loaded = True
         self.endResetModel()
 
     def set_git_tinting(self, *, enabled: bool, colors: Dict[str, str]):
@@ -136,7 +163,7 @@ class FileSystemTreeModel(QAbstractItemModel):
             self.refresh_tree(include_excluded=self._include_excluded)
             return
 
-        if node == self._root_node:
+        if node == self._root_node or target == self._root_path:
             self.refresh_tree(include_excluded=self._include_excluded)
             return
 
@@ -169,7 +196,9 @@ class FileSystemTreeModel(QAbstractItemModel):
             return True
         parts = [p for p in rel.split(os.sep) if p]
 
-        node = self._root_node
+        node = self._path_map.get(self._root_path)
+        if node is None:
+            return False
         current = self._root_path
         for part in parts:
             if not node.children_loaded:
@@ -240,17 +269,40 @@ class FileSystemTreeModel(QAbstractItemModel):
             return None
         node = cast(_FsNode, index.internalPointer())
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            if node.path == self._root_path:
+                return f"[{self._root_display_name}]"
             return node.name
         if role == Qt.ItemDataRole.DecorationRole:
             style = QApplication.style()
             if node.is_dir:
-                return style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+                icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+                if node.path != self._root_path and self._workspace_repo_index.is_repo_root(node.path):
+                    repo_entry = self._workspace_repo_index.entry_for_root(node.path)
+                    icon_color = self._repo_root_icon_color
+                    if repo_entry is not None and str(getattr(repo_entry, "repo_kind", "") or "") == "linked":
+                        icon_color = self._linked_repo_root_icon_color
+                    return self._tinted_folder_icon(icon, icon_color)
+                return icon
             icon = self._icon_provider.icon_for_file_name(node.name)
             if icon is not None:
                 return icon
             return style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            meta = self._metadata_for_path(node.path, node.is_dir)
+            if meta.get("is_project_root"):
+                return f"Project root: {meta.get('path')}"
+            if meta.get("is_repo_root"):
+                repo_kind = str(meta.get("repo_kind") or "repo")
+                if repo_kind == "linked":
+                    return f"Linked Git repository / package: {meta.get('path')}"
+                return f"Git repository: {meta.get('path')}"
+            return str(meta.get("path") or "")
         if role == Qt.ItemDataRole.UserRole:
             return self._metadata_for_path(node.path, node.is_dir)
+        if role == Qt.ItemDataRole.FontRole and node.path == self._root_path:
+            font = QFont()
+            font.setBold(True)
+            return font
         if role == Qt.ItemDataRole.ForegroundRole:
             if not self._git_tint_enabled:
                 return None
@@ -496,7 +548,12 @@ class FileSystemTreeModel(QAbstractItemModel):
     @staticmethod
     def _state_data_roles() -> list[int]:
         return [
+            Qt.ItemDataRole.DecorationRole,
+            Qt.ItemDataRole.DisplayRole,
+            Qt.ItemDataRole.EditRole,
+            Qt.ItemDataRole.FontRole,
             Qt.ItemDataRole.ForegroundRole,
+            Qt.ItemDataRole.ToolTipRole,
             Qt.ItemDataRole.UserRole,
         ]
 
@@ -538,12 +595,24 @@ class FileSystemTreeModel(QAbstractItemModel):
     def _metadata_for_path(self, path: str, is_dir: bool) -> Dict[str, Any]:
         cpath = self._canonical(path)
         git_state = self._git_state_for_node(cpath, is_dir) or "clean"
+        owning_repo_root = self._workspace_repo_index.deepest_repo_for_path(cpath)
+        is_project_root = cpath == self._root_path
+        is_repo_root = bool(is_dir and self._workspace_repo_index.is_repo_root(cpath))
+        repo_entry = self._workspace_repo_index.entry_for_root(cpath) if is_repo_root else None
+        repo_kind = str(getattr(repo_entry, "repo_kind", "repo") or "repo")
         return {
             "path": cpath,
             "relative_path": self._relative_to_root(cpath),
             "is_dir": bool(is_dir),
             "dirty": False,
             "git_state": git_state,
+            "is_project_root": is_project_root,
+            "is_repo_root": is_repo_root,
+            "is_workspace_repo_root": bool(is_project_root and self._workspace_repo_index.workspace_repo_root == cpath),
+            "repo_root": cpath if is_repo_root else None,
+            "repo_kind": repo_kind if is_repo_root else None,
+            "owning_repo_root": owning_repo_root,
+            "scope_kind": "project" if is_project_root else ("repo" if is_repo_root else "path"),
             "state": "normal",
         }
 
@@ -601,6 +670,35 @@ class FileSystemTreeModel(QAbstractItemModel):
             result.append(path)
         return result
 
+    def _tinted_folder_icon(self, icon: QIcon, color: QColor) -> QIcon:
+        if not color.isValid():
+            return icon
+        style = QApplication.style()
+        extent = 20
+        try:
+            extent = max(16, int(style.pixelMetric(QStyle.PixelMetric.PM_SmallIconSize)))
+        except Exception:
+            extent = 20
+        width = extent
+        height = extent
+        key = (width, height, color.name())
+        cached = self._repo_root_icon_cache.get(key)
+        if cached is not None:
+            return cached
+        pixmap = icon.pixmap(width, height)
+        if pixmap.isNull():
+            return icon
+        tinted = QPixmap(pixmap.size())
+        tinted.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(tinted)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), color)
+        painter.end()
+        wrapped = QIcon(tinted)
+        self._repo_root_icon_cache[key] = wrapped
+        return wrapped
+
 class FileSystemTreeWidget(QTreeView):
     fileOpenRequested = Signal(str)
     pathContextMenuRequested = Signal(object, QPoint)  # path | None, global_pos
@@ -657,6 +755,12 @@ class FileSystemTreeWidget(QTreeView):
     def set_root_path(self, root_path: str):
         self._model.set_root_path(root_path)
 
+    def set_root_display_name(self, display_name: str) -> None:
+        self._model.set_root_display_name(display_name)
+
+    def set_workspace_repository_index(self, repo_index: WorkspaceRepositoryIndex | None) -> None:
+        self._model.set_workspace_repository_index(repo_index)
+
     def set_git_tinting(self, *, enabled: bool, colors: Dict[str, str]):
         self._model.set_git_tinting(enabled=enabled, colors=colors)
 
@@ -688,15 +792,7 @@ class FileSystemTreeWidget(QTreeView):
         index = self._model.index_from_path(path)
         if not index.isValid():
             is_dir = os.path.isdir(path)
-            cpath = self._model._canonical(path)
-            return {
-                "path": cpath,
-                "relative_path": cpath,
-                "is_dir": is_dir,
-                "dirty": False,
-                "git_state": "clean",
-                "state": "normal",
-            }
+            return self._model._metadata_for_path(path, is_dir)
         return self._model.metadata_from_index(index)
 
     def path_from_index(self, index: QModelIndex) -> Optional[str]:

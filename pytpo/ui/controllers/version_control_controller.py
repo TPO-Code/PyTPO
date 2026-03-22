@@ -22,6 +22,7 @@ class VersionControlController(QObject):
 
         self._git_repo_root: str | None = None
         self._git_current_branch: str = ""
+        self._git_branches_by_repo: dict[str, str] = {}
         self._git_file_states: dict[str, str] = {}
         self._git_folder_states: dict[str, str] = {}
         self._git_refresh_inflight = False
@@ -61,6 +62,7 @@ class VersionControlController(QObject):
     def _sync_ide_state(self) -> None:
         self.ide._git_repo_root = self._git_repo_root
         self.ide._git_current_branch = self._git_current_branch
+        self.ide._git_branches_by_repo = dict(self._git_branches_by_repo)
         self.ide._git_file_states = dict(self._git_file_states)
         self.ide._git_folder_states = dict(self._git_folder_states)
         self.ide._git_refresh_inflight = self._git_refresh_inflight
@@ -116,11 +118,17 @@ class VersionControlController(QObject):
             self._git_refresh_requested = True
             self._sync_ide_state()
             return
+        refresh_repo_index = getattr(self.ide, "refresh_workspace_repository_index", None)
+        if callable(refresh_repo_index):
+            try:
+                refresh_repo_index(update_tree=True)
+            except Exception:
+                pass
         self._git_refresh_inflight = True
         self._sync_ide_state()
 
-        def _run() -> GitRepoStatus:
-            return self.git_service.read_status(self.project_root)
+        def _run() -> tuple[GitRepoStatus, dict[str, str | None]]:
+            return self._read_workspace_status_payload()
 
         self._submit_git_task("status", _run)
 
@@ -168,16 +176,31 @@ class VersionControlController(QObject):
     def _handle_git_task_result(self, kind: str, context: object | None, result: object, error: Exception | None) -> None:
         if kind == "status":
             self._git_refresh_inflight = False
-            if error is None and isinstance(result, GitRepoStatus):
-                self._git_repo_root = result.repo_root
-                self._git_current_branch = str(result.current_branch or "")
-                self._git_file_states = dict(result.file_states)
-                self._git_folder_states = dict(result.folder_states)
+            status_result: GitRepoStatus | None = None
+            branch_map: dict[str, str | None] = {}
+            if error is None and isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], GitRepoStatus):
+                status_result = result[0]
+                branch_map = dict(result[1]) if isinstance(result[1], dict) else {}
+            elif error is None and isinstance(result, GitRepoStatus):
+                status_result = result
+                if result.repo_root:
+                    branch_map = {str(result.repo_root): result.current_branch}
+            if error is None and isinstance(status_result, GitRepoStatus):
+                self._git_repo_root = status_result.repo_root
+                self._git_current_branch = str(status_result.current_branch or "")
+                self._git_branches_by_repo = {
+                    str(root): str(branch or "")
+                    for root, branch in branch_map.items()
+                    if str(root or "").strip()
+                }
+                self._git_file_states = dict(status_result.file_states)
+                self._git_folder_states = dict(status_result.folder_states)
                 self._apply_git_tinting_config()
                 self.statusChanged.emit(dict(self._git_file_states), dict(self._git_folder_states), self._git_current_branch)
             else:
                 self._git_repo_root = None
                 self._git_current_branch = ""
+                self._git_branches_by_repo = {}
                 self._git_file_states = {}
                 self._git_folder_states = {}
                 self._apply_git_tinting_config()
@@ -381,6 +404,14 @@ class VersionControlController(QObject):
 
     def _repo_root_for_path(self, path: str) -> str | None:
         cpath = self._canonical_path(path)
+        repo_index = getattr(self.ide, "workspace_repository_index", None)
+        if repo_index is not None:
+            try:
+                found = repo_index.deepest_repo_for_path(cpath)
+            except Exception:
+                found = None
+            if found:
+                return found
         cached = self._git_repo_root
         if cached and self._path_has_prefix(cpath, cached):
             return cached
@@ -393,6 +424,16 @@ class VersionControlController(QObject):
 
     def _ensure_git_repo(self) -> str | None:
         if not self._git_repo_root:
+            repo_index = getattr(self.ide, "workspace_repository_index", None)
+            if repo_index is not None:
+                try:
+                    self._git_repo_root = repo_index.repo_for_project_scope()
+                except Exception:
+                    self._git_repo_root = None
+            if self._git_repo_root:
+                self.schedule_git_status_refresh(delay_ms=0, force=True)
+                self._sync_ide_state()
+                return self._git_repo_root
             self._git_repo_root = self._repo_root_for_path(self.project_root)
             if self._git_repo_root:
                 self.schedule_git_status_refresh(delay_ms=0, force=True)
@@ -401,6 +442,50 @@ class VersionControlController(QObject):
             QMessageBox.information(self.ide, "Git", "Current project is not a Git repository.")
             return None
         return self._git_repo_root
+
+    def _read_workspace_status_payload(self) -> tuple[GitRepoStatus, dict[str, str | None]]:
+        repo_index = getattr(self.ide, "workspace_repository_index", None)
+        if repo_index is None or not getattr(repo_index, "has_repositories", lambda: False)():
+            status = self.git_service.read_status(self.project_root)
+            branch_map = {str(status.repo_root): status.current_branch} if status.repo_root else {}
+            return status, branch_map
+
+        merged_file_states: dict[str, str] = {}
+        merged_folder_states: dict[str, str] = {}
+        changes: list[GitChangeEntry] = []
+        branch_by_repo: dict[str, str | None] = {}
+        repo_roots = repo_index.repo_roots()
+        for repo_root in repo_roots:
+            status = self.git_service.read_status(repo_root)
+            branch_by_repo[repo_root] = status.current_branch
+            for abs_path, state in status.file_states.items():
+                try:
+                    if repo_index.path_is_owned_by_repo(abs_path, repo_root):
+                        merged_file_states[abs_path] = state
+                except Exception:
+                    continue
+            for folder_path, state in status.folder_states.items():
+                try:
+                    if repo_index.path_is_owned_by_repo(folder_path, repo_root) or folder_path == repo_root:
+                        merged_folder_states[folder_path] = state
+                except Exception:
+                    continue
+            changes.extend(status.changes)
+
+        selected_repo_root = repo_index.repo_for_project_scope()
+        current_branch = branch_by_repo.get(selected_repo_root) if selected_repo_root else None
+
+        return (
+            GitRepoStatus(
+                project_root=self.project_root,
+                repo_root=selected_repo_root,
+                current_branch=current_branch,
+                file_states=merged_file_states,
+                folder_states=merged_folder_states,
+                changes=changes,
+            ),
+            branch_by_repo,
+        )
 
     def cleanup(self) -> None:
         self._git_status_debounce_timer.stop()

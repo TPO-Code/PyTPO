@@ -1503,6 +1503,8 @@ class CodexAgentDockWidget(QWidget):
         self,
         *,
         project_dir_provider: Callable[[], str],
+        selection_scope_provider: Callable[[], dict[str, Any]] | None = None,
+        repo_options_provider: Callable[[], list[tuple[str, str]]] | None = None,
         tree_path_excluded_predicate: Callable[[str, bool], bool] | None = None,
         project_read_only_provider: Callable[[], bool] | None = None,
         settings_provider: Callable[[], dict[str, Any]],
@@ -1512,6 +1514,8 @@ class CodexAgentDockWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self._project_dir_provider = project_dir_provider
+        self._selection_scope_provider = selection_scope_provider
+        self._repo_options_provider = repo_options_provider
         self._tree_path_excluded_predicate = tree_path_excluded_predicate
         self._project_read_only_provider = project_read_only_provider
         self._settings_provider = settings_provider
@@ -1569,6 +1573,8 @@ class CodexAgentDockWidget(QWidget):
         self._transcript_start_from_beginning = False
         self._last_rate_limits_text = _RATE_LIMITS_UNAVAILABLE
         self._last_rate_limits_tooltip = "Rate limit data unavailable"
+        self._context_mode = "auto"
+        self._updating_context_combo = False
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1630,6 +1636,19 @@ class CodexAgentDockWidget(QWidget):
         top_row.addWidget(self.new_chat_btn)
         top_row.addWidget(self.stop_btn)
         root.addLayout(top_row)
+
+        context_row = QHBoxLayout()
+        context_row.setSpacing(8)
+        context_row.addWidget(QLabel("Context"), 0)
+        self.context_combo = QComboBox()
+        self.context_combo.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        context_row.addWidget(self.context_combo, 0)
+        self.context_summary_label = QLabel("")
+        self.context_summary_label.setObjectName("codexContextSummary")
+        self.context_summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.context_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        context_row.addWidget(self.context_summary_label, 1)
+        root.addLayout(context_row)
 
         root.addWidget(QLabel("Transcript"))
         self.chat_splitter = QSplitter(Qt.Vertical)
@@ -1805,6 +1824,7 @@ class CodexAgentDockWidget(QWidget):
         self.agent_options_toggle_btn.toggled.connect(self._on_agent_options_toggled)
 
         self.preamble_edit.textChanged.connect(self._schedule_persist_settings)
+        self.context_combo.currentIndexChanged.connect(self._on_context_combo_changed)
         self.model_combo.currentIndexChanged.connect(self._on_option_changed)
         self.reasoning_combo.currentIndexChanged.connect(self._on_option_changed)
         self.permissions_combo.currentIndexChanged.connect(self._on_option_changed)
@@ -2432,6 +2452,9 @@ class CodexAgentDockWidget(QWidget):
                 permission_mode = "default"
                 self._sandbox_mode = sandbox_mode
             self._set_combo_data(self.permissions_combo, permission_mode)
+            context_mode = str(data.get("context_mode") or "auto").strip() or "auto"
+            self._context_mode = context_mode
+            self._refresh_context_selector()
 
             session_id = str(data.get("session_id") or "").strip()
             self._session_id = session_id or None
@@ -2469,6 +2492,7 @@ class CodexAgentDockWidget(QWidget):
             "sandbox_mode": str(self._sandbox_mode or "workspace-write"),
             "show_system_preamble": bool(self.agent_options_toggle_btn.isChecked()),
             "show_agent_options": bool(self.agent_options_toggle_btn.isChecked()),
+            "context_mode": str(self._context_mode or "auto"),
             "model": model,
             "model_reasoning_effort": reasoning,
             "permission_mode": permission_mode,
@@ -2481,6 +2505,158 @@ class CodexAgentDockWidget(QWidget):
             self._settings_saver(payload)
         except Exception:
             pass
+
+    def refresh_context_scope(self) -> None:
+        self._refresh_context_selector()
+
+    def _workspace_dir(self) -> Path | None:
+        raw = self._project_dir_provider() if callable(self._project_dir_provider) else ""
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            path = Path(text).expanduser().resolve()
+        except Exception:
+            return None
+        if not path.is_dir():
+            return None
+        return path
+
+    def _repo_options(self) -> list[tuple[str, str]]:
+        provider = self._repo_options_provider
+        if not callable(provider):
+            return []
+        try:
+            raw = provider()
+        except Exception:
+            return []
+        options: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for label, repo_root in raw if isinstance(raw, list) else []:
+            text = str(repo_root or "").strip()
+            if not text:
+                continue
+            try:
+                normalized = str(Path(text).expanduser().resolve())
+            except Exception:
+                normalized = text
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            options.append((str(label or normalized), normalized))
+        return options
+
+    def _current_selection_scope(self) -> dict[str, Any]:
+        provider = self._selection_scope_provider
+        if not callable(provider):
+            return {}
+        try:
+            raw = provider()
+        except Exception:
+            return {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _context_data_for_mode(self, mode: str) -> dict[str, Any]:
+        workspace = self._workspace_dir()
+        workspace_text = str(workspace) if workspace is not None else ""
+        normalized_mode = str(mode or "auto").strip() or "auto"
+        if normalized_mode == "project":
+            return {
+                "mode": "project",
+                "scope_kind": "project",
+                "selected_path": workspace_text or None,
+                "repo_root": None,
+                "project_dir": workspace_text or None,
+            }
+        if normalized_mode.startswith("repo:"):
+            repo_root = normalized_mode.split(":", 1)[1].strip()
+            if repo_root:
+                return {
+                    "mode": normalized_mode,
+                    "scope_kind": "repo",
+                    "selected_path": repo_root,
+                    "repo_root": repo_root,
+                    "project_dir": repo_root,
+                }
+        scope = self._current_selection_scope()
+        scope_kind = str(scope.get("scope_kind") or "project").strip() or "project"
+        selected_path = str(scope.get("selected_path") or "").strip() or None
+        repo_root = str(scope.get("repo_root") or "").strip() or None
+        project_dir = repo_root or workspace_text or None
+        return {
+            "mode": "auto",
+            "scope_kind": scope_kind,
+            "selected_path": selected_path or workspace_text or None,
+            "repo_root": repo_root,
+            "project_dir": project_dir,
+        }
+
+    def _refresh_context_selector(self) -> None:
+        workspace = self._workspace_dir()
+        workspace_text = str(workspace) if workspace is not None else ""
+        repo_options = [
+            (label, repo_root)
+            for label, repo_root in self._repo_options()
+            if repo_root and repo_root != workspace_text
+        ]
+        selection = self._current_selection_scope()
+        auto_context = self._context_data_for_mode("auto")
+        auto_summary = self._context_summary_text(auto_context)
+
+        current_mode = str(self._context_mode or "auto").strip() or "auto"
+        valid_modes = {"auto", "project"} | {f"repo:{repo_root}" for _label, repo_root in repo_options}
+        if current_mode not in valid_modes:
+            current_mode = "auto"
+            self._context_mode = current_mode
+
+        self._updating_context_combo = True
+        try:
+            self.context_combo.clear()
+            self.context_combo.addItem(f"Auto ({auto_summary})", "auto")
+            self.context_combo.addItem("Project", "project")
+            for label, repo_root in repo_options:
+                self.context_combo.addItem(label, f"repo:{repo_root}")
+            index = max(0, self.context_combo.findData(current_mode))
+            self.context_combo.setCurrentIndex(index)
+        finally:
+            self._updating_context_combo = False
+
+        effective = self._context_data_for_mode(current_mode)
+        self.context_summary_label.setText(self._context_summary_text(effective))
+        self.context_summary_label.setToolTip(str(effective.get("project_dir") or ""))
+
+    def _context_summary_text(self, context: dict[str, Any]) -> str:
+        mode = str(context.get("mode") or "auto").strip()
+        scope_kind = str(context.get("scope_kind") or "project").strip()
+        selected_path = str(context.get("selected_path") or "").strip()
+        repo_root = str(context.get("repo_root") or "").strip()
+        if mode == "project":
+            return "Project workspace"
+        if mode.startswith("repo:"):
+            return f"Repo: {Path(repo_root or selected_path).name or (repo_root or selected_path)}"
+        if scope_kind == "project":
+            return "Auto -> Project"
+        if scope_kind == "repo":
+            return f"Auto -> Repo: {Path(repo_root or selected_path).name or (repo_root or selected_path)}"
+        if scope_kind == "path":
+            path_name = Path(selected_path).name if selected_path else ""
+            repo_name = Path(repo_root).name if repo_root else ""
+            if path_name and repo_name:
+                return f"Auto -> {path_name} ({repo_name})"
+            if repo_name:
+                return f"Auto -> Repo: {repo_name}"
+        return "Auto"
+
+    def _on_context_combo_changed(self, index: int) -> None:
+        if self._updating_context_combo:
+            return
+        mode = str(self.context_combo.itemData(index) or "auto").strip() or "auto"
+        if mode == self._context_mode:
+            self._refresh_context_selector()
+            return
+        self._context_mode = mode
+        self._refresh_context_selector()
+        self._schedule_persist_settings()
 
     def _apply_rate_limits_label(
         self,
@@ -2505,10 +2681,11 @@ class CodexAgentDockWidget(QWidget):
             self._schedule_persist_settings()
 
     def _project_dir(self) -> Path | None:
-        raw = self._project_dir_provider() if callable(self._project_dir_provider) else ""
-        text = str(raw or "").strip()
+        context = self._context_data_for_mode(self._context_mode)
+        text = str(context.get("project_dir") or "").strip()
         if not text:
-            return None
+            workspace = self._workspace_dir()
+            return workspace if workspace is not None and workspace.is_dir() else None
         try:
             path = Path(text).expanduser().resolve()
         except Exception:
@@ -3503,14 +3680,17 @@ class CodexAgentDockWidget(QWidget):
                 "Attached files (staged for this turn):\n"
                 f"{chr(10).join(attachments)}\n\n"
             )
+        scope_block = self._selection_scope_block()
         if preamble:
             return (
                 f"{preamble}\n\nProject path: {project}\n\n"
+                f"{scope_block}"
                 f"{attachment_block}"
                 f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
             )
         return (
             f"Project path: {project}\n\n"
+            f"{scope_block}"
             f"{attachment_block}"
             f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
         )
@@ -3520,6 +3700,7 @@ class CodexAgentDockWidget(QWidget):
         project: Path,
         user_text: str,
         attachment_references: list[str] | None = None,
+        scope_block: str = "",
     ) -> str:
         attachments = list(attachment_references or [])
         project_block = f"Project path: {project}\n\n"
@@ -3527,11 +3708,37 @@ class CodexAgentDockWidget(QWidget):
             attachment_block = "\n".join(attachments)
             return (
                 f"{project_block}"
+                f"{scope_block}"
                 "Attached files (staged for this turn):\n"
                 f"{attachment_block}\n\n"
                 f"User message:\n{_wrap_user_prompt_text(user_text)}\n"
             )
-        return f"{project_block}User message:\n{_wrap_user_prompt_text(user_text)}\n"
+        return f"{project_block}{scope_block}User message:\n{_wrap_user_prompt_text(user_text)}\n"
+
+    def _selection_scope_block(self) -> str:
+        context = self._context_data_for_mode(self._context_mode)
+        mode = str(context.get("mode") or "auto").strip()
+        scope_kind = str(context.get("scope_kind") or "").strip().lower()
+        selected_path = str(context.get("selected_path") or "").strip()
+        repo_root = str(context.get("repo_root") or "").strip()
+        prefix = "Current IDE selection scope" if mode == "auto" else "Agent context override"
+        if scope_kind == "project":
+            return f"{prefix}: project/workspace.\n\n"
+        if scope_kind == "repo":
+            if selected_path:
+                return f"{prefix}: repository root `{selected_path}`.\n\n"
+            if repo_root:
+                return f"{prefix}: repository `{repo_root}`.\n\n"
+            return f"{prefix}: repository.\n\n"
+        if scope_kind == "path":
+            details = []
+            if selected_path:
+                details.append(f"selected path `{selected_path}`")
+            if repo_root:
+                details.append(f"owning repo `{repo_root}`")
+            if details:
+                return f"{prefix}: {', '.join(details)}.\n\n"
+        return ""
 
     def _refresh_session_ui(self) -> None:
         if self._session_id:
@@ -4205,7 +4412,7 @@ class CodexAgentDockWidget(QWidget):
         prompt = (
             self._compose_prompt(project, user_text, attachment_refs)
             if not self._session_id
-            else self._compose_followup_prompt(project, user_text, attachment_refs)
+            else self._compose_followup_prompt(project, user_text, attachment_refs, self._selection_scope_block())
         )
         invocation = _CodexInvocation(
             project_dir=project,

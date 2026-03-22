@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from pytpo.services.file_io import read_text, write_text
 
 COMMIT_MD_RELATIVE_PATH = Path(".tide") / "commit.md"
+REPO_COMMIT_MD_RELATIVE_DIR = Path(".tide") / "repo-commit-drafts"
 COMMIT_HEADING = "Commit message"
 RELEASE_HEADING = "Release message"
 CANONICAL_COMMIT_HEADING_LINE = f"# {COMMIT_HEADING}"
@@ -37,6 +39,20 @@ def commit_md_path_for_project(project_root: str | Path) -> Path:
     return Path(str(project_root or "")).expanduser() / COMMIT_MD_RELATIVE_PATH
 
 
+def commit_md_path_for_scope(
+    project_root: str | Path,
+    *,
+    scope_kind: str = "project",
+    repo_root: str | Path | None = None,
+) -> Path:
+    project_path = _expand_path(project_root)
+    repo_path = _expand_path(repo_root) if repo_root is not None else None
+    normalized_scope = str(scope_kind or "project").strip().lower() or "project"
+    if normalized_scope == "project" or repo_path is None:
+        return project_path / COMMIT_MD_RELATIVE_PATH
+    return project_path / REPO_COMMIT_MD_RELATIVE_DIR / f"{_repo_scope_slug(project_path, repo_path)}.md"
+
+
 def ensure_commit_md_exists(project_root: str | Path) -> Path:
     path = commit_md_path_for_project(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,8 +61,35 @@ def ensure_commit_md_exists(project_root: str | Path) -> Path:
     return path
 
 
+def ensure_commit_md_exists_for_scope(
+    project_root: str | Path,
+    *,
+    scope_kind: str = "project",
+    repo_root: str | Path | None = None,
+) -> Path:
+    path = commit_md_path_for_scope(project_root, scope_kind=scope_kind, repo_root=repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        write_text(str(path), DEFAULT_COMMIT_MD_TEXT)
+    return path
+
+
 def load_commit_md_text(project_root: str | Path) -> str:
     path = ensure_commit_md_exists(project_root)
+    try:
+        return read_text(str(path))
+    except Exception:
+        write_text(str(path), DEFAULT_COMMIT_MD_TEXT)
+        return DEFAULT_COMMIT_MD_TEXT
+
+
+def load_commit_md_text_for_scope(
+    project_root: str | Path,
+    *,
+    scope_kind: str = "project",
+    repo_root: str | Path | None = None,
+) -> str:
+    path = ensure_commit_md_exists_for_scope(project_root, scope_kind=scope_kind, repo_root=repo_root)
     try:
         return read_text(str(path))
     except Exception:
@@ -173,6 +216,17 @@ def write_commit_md_for_project(project_root: str | Path, text: str) -> None:
     write_text(str(path), str(text or ""))
 
 
+def write_commit_md_for_scope(
+    project_root: str | Path,
+    text: str,
+    *,
+    scope_kind: str = "project",
+    repo_root: str | Path | None = None,
+) -> None:
+    path = ensure_commit_md_exists_for_scope(project_root, scope_kind=scope_kind, repo_root=repo_root)
+    write_text(str(path), str(text or ""))
+
+
 def _parse_sections(text: str) -> tuple[list[str], list[_SectionSpan]]:
     lines = str(text or "").splitlines(keepends=True)
     sections: list[_SectionSpan] = []
@@ -258,16 +312,52 @@ def _render_managed_section(heading_line: str, value: str, *, newline: str) -> l
     return out
 
 
+def _expand_path(path: str | Path | None) -> Path | None:
+    if path is None:
+        return None
+    text = str(path or "").strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def _paths_equal(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except Exception:
+        return str(left) == str(right)
+
+
+def _repo_scope_slug(project_root: Path, repo_root: Path) -> str:
+    project = project_root
+    repo = repo_root
+    try:
+        relative = repo.resolve().relative_to(project.resolve())
+    except Exception:
+        relative = repo.name or "repo"
+    if isinstance(relative, Path):
+        rel_text = "/".join(part for part in relative.parts if part not in {"", "."})
+    else:
+        rel_text = str(relative or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", rel_text).strip("-") or "workspace-root"
+    digest = hashlib.sha1(str(repo).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return f"{safe}--{digest}"
+
+
 __all__ = [
     "CANONICAL_COMMIT_HEADING_LINE",
     "CANONICAL_RELEASE_HEADING_LINE",
     "DEFAULT_COMMIT_MD_TEXT",
     "commit_md_path_for_project",
+    "commit_md_path_for_scope",
     "ensure_commit_md_exists",
+    "ensure_commit_md_exists_for_scope",
     "load_commit_md_text",
+    "load_commit_md_text_for_scope",
     "parse_commit_md_sections",
     "get_commit_message_from_commit_md",
     "get_release_message_from_commit_md",
     "update_commit_md_sections",
     "write_commit_md_for_project",
+    "write_commit_md_for_scope",
 ]

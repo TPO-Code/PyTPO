@@ -6,6 +6,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,7 +18,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pytpo.git.git_service import GitBranchInfo, GitService, GitServiceError
+from pytpo.git.git_service import (
+    GitBranchInfo,
+    GitRepoDisplayState,
+    GitService,
+    GitServiceError,
+    format_git_branch_label,
+    format_git_remote_label,
+)
 from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
@@ -27,6 +35,7 @@ class GitBranchesDialog(DialogWindow):
         *,
         git_service: GitService,
         repo_root: str,
+        repo_options: list[tuple[str, str]] | None = None,
         use_native_chrome: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -36,6 +45,7 @@ class GitBranchesDialog(DialogWindow):
 
         self._git_service = git_service
         self._repo_root = str(repo_root)
+        self._repo_options = [(str(label), str(root)) for label, root in (repo_options or []) if str(root).strip()]
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pytpo-git-branch")
         self._pending: dict[concurrent.futures.Future, str] = {}
 
@@ -57,6 +67,23 @@ class GitBranchesDialog(DialogWindow):
         self.repo_label = QLabel(f"Repository: {self._repo_root}")
         self.repo_label.setWordWrap(True)
         root.addWidget(self.repo_label)
+        self.repo_state_label = QLabel("Git state: (loading...)")
+        self.repo_state_label.setWordWrap(True)
+        root.addWidget(self.repo_state_label)
+
+        self.repo_combo: QComboBox | None = None
+        if len(self._repo_options) > 1:
+            repo_row = QHBoxLayout()
+            repo_row.addWidget(QLabel("Target Repository"), 0)
+            combo = QComboBox()
+            for label, repo_path in self._repo_options:
+                combo.addItem(label, repo_path)
+            current_index = max(0, combo.findData(self._repo_root))
+            combo.setCurrentIndex(current_index)
+            combo.currentIndexChanged.connect(self._on_repo_changed)
+            repo_row.addWidget(combo, 1)
+            root.addLayout(repo_row)
+            self.repo_combo = combo
 
         top = QHBoxLayout()
         self.current_label = QLabel("Current: ")
@@ -115,7 +142,15 @@ class GitBranchesDialog(DialogWindow):
             if include_remote:
                 # Refresh remote refs so newly created server branches appear.
                 self._git_service.fetch(self._repo_root, prune=True)
-            return self._git_service.list_branches(self._repo_root, include_remote=include_remote)
+            info = self._git_service.list_branches(self._repo_root, include_remote=include_remote)
+            state = None
+            describe = getattr(self._git_service, "describe_repo_state", None)
+            if callable(describe):
+                try:
+                    state = describe(self._repo_root)
+                except Exception:
+                    state = None
+            return info, state
 
         self._submit_task("load", _run)
 
@@ -202,25 +237,36 @@ class GitBranchesDialog(DialogWindow):
                 self._set_status("Git operation failed.", error=True)
             return
 
-        if kind == "load" and isinstance(result, GitBranchInfo):
-            self.current_label.setText(f"Current: {result.current or '(detached)'}")
+        info = result
+        repo_state = None
+        if isinstance(result, tuple) and result:
+            info = result[0]
+            if len(result) > 1 and isinstance(result[1], GitRepoDisplayState):
+                repo_state = result[1]
+        if kind == "load" and isinstance(info, GitBranchInfo):
+            branch_text = format_git_branch_label(repo_state) or str(info.current or "").strip() or "HEAD (detached)"
+            remote_text = format_git_remote_label(repo_state)
+            self.current_label.setText(f"Current: {branch_text}")
+            self.repo_state_label.setText(
+                f"Git state: {branch_text}" + (f" | {remote_text}" if remote_text else "")
+            )
             self.branches_list.clear()
-            for branch in result.branches:
+            for branch in info.branches:
                 item = QListWidgetItem(branch)
                 item.setData(Qt.UserRole, "local")
                 item.setData(Qt.UserRole + 1, branch)
                 self.branches_list.addItem(item)
             remote_count = 0
-            for branch in result.remote_branches:
+            for branch in info.remote_branches:
                 item = QListWidgetItem(f"{branch} [remote]")
                 item.setData(Qt.UserRole, "remote")
                 item.setData(Qt.UserRole + 1, branch)
                 self.branches_list.addItem(item)
                 remote_count += 1
             if remote_count:
-                self._set_status(f"Loaded {len(result.branches)} local and {remote_count} remote branch(es).")
+                self._set_status(f"Loaded {len(info.branches)} local and {remote_count} remote branch(es).")
             else:
-                self._set_status(f"Loaded {len(result.branches)} branch(es).")
+                self._set_status(f"Loaded {len(info.branches)} branch(es).")
             self._refresh_action_state()
             return
 
@@ -236,6 +282,8 @@ class GitBranchesDialog(DialogWindow):
 
     def _refresh_action_state(self) -> None:
         busy = bool(self._pending)
+        if self.repo_combo is not None:
+            self.repo_combo.setDisabled(busy)
         if busy:
             self.checkout_btn.setEnabled(False)
             self.create_btn.setEnabled(False)
@@ -258,6 +306,19 @@ class GitBranchesDialog(DialogWindow):
     def _set_status(self, text: str, *, error: bool = False) -> None:
         color = "#d46a6a" if error else "#a4bf7a"
         self.status_label.setText(f"<span style='color:{color};'>{text}</span>")
+
+    def _on_repo_changed(self, index: int) -> None:
+        if self.repo_combo is None:
+            return
+        repo_root = str(self.repo_combo.itemData(index) or "").strip()
+        if not repo_root or repo_root == self._repo_root:
+            return
+        self._repo_root = repo_root
+        self.repo_label.setText(f"Repository: {self._repo_root}")
+        self.repo_state_label.setText("Git state: (loading...)")
+        self.branches_list.clear()
+        self.current_label.setText("Current: ")
+        self._load_branches()
 
     def _shutdown(self) -> None:
         self._result_pump.stop()

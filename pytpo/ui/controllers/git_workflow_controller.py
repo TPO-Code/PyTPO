@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
 
 from pytpo.git.github_auth import GitHubAuthStore
 from pytpo.git.github_release_service import GitHubReleaseService
@@ -30,6 +30,116 @@ class GitWorkflowController:
             except Exception:
                 return False
         return False
+
+    def _workspace_repository_index(self):
+        return getattr(self.ide, "workspace_repository_index", None)
+
+    def _sync_repo_root(self, repo_root: str | None) -> str | None:
+        root = str(repo_root or "").strip() or None
+        self.ide._git_repo_root = root
+        controller = getattr(self.ide, "version_control_controller", None)
+        if controller is not None:
+            try:
+                controller._git_repo_root = root
+                controller._sync_ide_state()
+            except Exception:
+                pass
+        return root
+
+    def _repo_label(self, repo_root: str) -> str:
+        root = self._canonical_path(repo_root)
+        project_root = self._canonical_path(self.project_root)
+        if root == project_root:
+            return f"{os.path.basename(project_root) or project_root} (project root)"
+        try:
+            rel = os.path.relpath(root, project_root)
+        except Exception:
+            rel = root
+        return rel if rel not in (".", "") else (os.path.basename(root) or root)
+
+    def _repo_options(self) -> list[tuple[str, str]]:
+        repo_index = self._workspace_repository_index()
+        if repo_index is None:
+            return []
+        try:
+            repo_roots = list(repo_index.repo_roots())
+        except Exception:
+            return []
+        return [(self._repo_label(root), self._canonical_path(root)) for root in repo_roots]
+
+    def _choose_repo_root(self, repo_roots: list[str], *, title: str, label: str) -> str | None:
+        ordered_roots = sorted(
+            {self._canonical_path(root) for root in repo_roots if isinstance(root, str) and root.strip()},
+            key=lambda value: (value != self._canonical_path(self.project_root), value.lower()),
+        )
+        if not ordered_roots:
+            return None
+        if len(ordered_roots) == 1:
+            return ordered_roots[0]
+        labels = [self._repo_label(root) for root in ordered_roots]
+        chosen_label, accepted = QInputDialog.getItem(self.ide, title, label, labels, 0, False)
+        if not accepted:
+            return None
+        try:
+            idx = labels.index(str(chosen_label))
+        except ValueError:
+            return None
+        return ordered_roots[idx]
+
+    def _resolve_repo_root_from_selection(self) -> str | None:
+        refresh_repo_index = getattr(self.ide, "refresh_workspace_repository_index", None)
+        if callable(refresh_repo_index):
+            try:
+                refresh_repo_index(update_tree=True)
+            except Exception:
+                pass
+
+        explorer = getattr(self.ide, "explorer_controller", None)
+        context = None
+        if explorer is not None:
+            resolver = getattr(explorer, "current_selection_context", None)
+            if callable(resolver):
+                try:
+                    context = resolver()
+                except Exception:
+                    context = None
+
+        if context is not None and context.repo_root:
+            return self._sync_repo_root(context.repo_root)
+
+        repo_index = self._workspace_repository_index()
+        repo_roots: list[str] = []
+        if repo_index is not None:
+            try:
+                repo_roots = list(repo_index.repo_roots())
+            except Exception:
+                repo_roots = []
+        if not repo_roots:
+            return None
+
+        chosen = self._choose_repo_root(
+            repo_roots,
+            title="Choose Repository",
+            label="This action needs a repository target:",
+        )
+        return self._sync_repo_root(chosen)
+
+    def _ensure_git_repo(self) -> str | None:
+        repo_root = self._resolve_repo_root_from_selection()
+        if repo_root:
+            return repo_root
+
+        controller = getattr(self.ide, "version_control_controller", None)
+        if controller is not None:
+            try:
+                resolved = controller._ensure_git_repo()
+            except Exception:
+                resolved = None
+            if resolved:
+                return self._sync_repo_root(resolved)
+
+        QMessageBox.information(self.ide, "Git", "Current selection does not resolve to a Git repository.")
+        return None
 
     def open_clone_repository_dialog(self) -> None:
         auth = GitHubAuthStore(self.ide_app_dir)
@@ -83,10 +193,24 @@ class GitWorkflowController:
         indexing = self._indexing_config()
         exclude_dirs = indexing.get("exclude_dirs", []) if isinstance(indexing, dict) else []
         exclude_files = indexing.get("exclude_files", []) if isinstance(indexing, dict) else []
+        selection_target = self.project_root
+        explorer = getattr(self.ide, "explorer_controller", None)
+        if explorer is not None:
+            resolver = getattr(explorer, "current_selection_context", None)
+            if callable(resolver):
+                try:
+                    context = resolver()
+                except Exception:
+                    context = None
+                else:
+                    if context is not None:
+                        selection_target = context.repo_root or context.selected_path or self.project_root
         dialog = ShareToGitHubDialog(
-            project_root=self.project_root,
+            project_root=selection_target,
             token=token,
             share_service=self.github_share_service,
+            git_service=self.git_service,
+            repo_options=self._repo_options(),
             exclude_dirs=exclude_dirs if isinstance(exclude_dirs, list) else [],
             exclude_files=exclude_files if isinstance(exclude_files, list) else [],
             exclude_path_predicate=self._is_path_filtered_in_workspace,
@@ -116,7 +240,7 @@ class GitWorkflowController:
         reader = getattr(self.ide, "read_commit_md_messages", None)
         if callable(reader):
             try:
-                loaded_commit, loaded_release = reader()
+                loaded_commit, loaded_release = reader(repo_root=repo_root, scope_kind="repo")
                 initial_commit_message = str(loaded_commit or "")
                 initial_release_message = str(loaded_release or "")
             except Exception:
@@ -131,6 +255,8 @@ class GitWorkflowController:
             git_service=self.git_service,
             repo_root=repo_root,
             release_service=release_service,
+            repo_options=self._repo_options(),
+            exclude_path_predicate=lambda path, active_repo_root: self._is_path_excluded_for_repo(active_repo_root, path),
             exclude_untracked_predicate=self._is_path_filtered_in_workspace,
             prefer_push_action=prefer_push_action,
             initial_commit_message=initial_commit_message,
@@ -146,6 +272,8 @@ class GitWorkflowController:
                 writer(
                     commit_message=dialog.commit_message_text(),
                     release_message=dialog.release_message_text(),
+                    repo_root=dialog.selected_repo_root(),
+                    scope_kind="repo",
                 )
             except Exception:
                 pass
@@ -185,7 +313,9 @@ class GitWorkflowController:
         )
         dialog = GitReleasesDialog(
             release_service=release_service,
+            git_service=self.git_service,
             repo_root=repo_root,
+            repo_options=self._repo_options(),
             use_native_chrome=self.use_native_chrome,
             parent=self.ide,
         )
@@ -232,6 +362,67 @@ class GitWorkflowController:
             parent = next_parent
 
         return False
+
+    def _is_path_owned_by_repo(self, repo_root: str, abs_path: str) -> bool:
+        repo_index = self._workspace_repository_index()
+        root = self._canonical_path(repo_root)
+        cpath = self._canonical_path(abs_path)
+        if repo_index is not None:
+            try:
+                return bool(repo_index.path_is_owned_by_repo(cpath, root))
+            except Exception:
+                return False
+        return self._path_has_prefix(cpath, root)
+
+    def _is_path_excluded_for_repo(self, repo_root: str, abs_path: str) -> bool:
+        if self._is_path_filtered_in_workspace(abs_path):
+            return True
+        return not self._is_path_owned_by_repo(repo_root, abs_path)
+
+    def _repo_has_child_repositories(self, repo_root: str) -> bool:
+        repo_index = self._workspace_repository_index()
+        if repo_index is None:
+            return False
+        try:
+            return bool(repo_index.has_child_repositories(repo_root))
+        except Exception:
+            return False
+
+    def _owned_change_rel_paths(
+        self,
+        repo_root: str,
+        *,
+        include_untracked: bool,
+        require_staged: bool | None = None,
+        require_unstaged: bool | None = None,
+    ) -> list[str]:
+        try:
+            status = self.git_service.read_status(repo_root)
+        except Exception:
+            return []
+
+        rel_paths: list[str] = []
+        seen: set[str] = set()
+        root = self._canonical_path(repo_root)
+        for entry in getattr(status, "changes", []):
+            rel_path = str(getattr(entry, "rel_path", "") or "").strip().replace("\\", "/")
+            if not rel_path or rel_path in {".", ""}:
+                continue
+            if not include_untracked and str(getattr(entry, "state", "") or "").strip().lower() == "untracked":
+                continue
+            if require_staged is not None and bool(getattr(entry, "staged", False)) != require_staged:
+                continue
+            if require_unstaged is not None and bool(getattr(entry, "unstaged", False)) != require_unstaged:
+                continue
+            abs_path = self._canonical_path(os.path.join(root, rel_path))
+            if not self._is_path_owned_by_repo(root, abs_path):
+                continue
+            key = rel_path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rel_paths.append(rel_path)
+        return rel_paths
 
     def push_current_branch(self) -> None:
         if self._block_write_action("Push"):
@@ -290,6 +481,7 @@ class GitWorkflowController:
         dialog = GitBranchesDialog(
             git_service=self.git_service,
             repo_root=repo_root,
+            repo_options=self._repo_options(),
             use_native_chrome=self.use_native_chrome,
             parent=self.ide,
         )
@@ -334,6 +526,22 @@ class GitWorkflowController:
         if answer != QMessageBox.Yes:
             return
 
+        if self._repo_has_child_repositories(repo_root):
+            rel_paths = self._owned_change_rel_paths(
+                repo_root,
+                include_untracked=False,
+                require_unstaged=True,
+            )
+            if not rel_paths:
+                QMessageBox.information(self.ide, "Discard Unstaged Changes", "No unstaged tracked files found.")
+                return
+
+            def _run():
+                self.git_service.restore_paths(repo_root, rel_paths, staged=False, worktree=True)
+
+            self._submit_git_task("rollback_repo", _run)
+            return
+
         def _run():
             self.git_service.discard_unstaged_changes(repo_root)
 
@@ -355,6 +563,22 @@ class GitWorkflowController:
         if answer != QMessageBox.Yes:
             return
 
+        if self._repo_has_child_repositories(repo_root):
+            rel_paths = self._owned_change_rel_paths(
+                repo_root,
+                include_untracked=True,
+                require_staged=True,
+            )
+            if not rel_paths:
+                QMessageBox.information(self.ide, "Unstage All", "No staged changes found for this repository.")
+                return
+
+            def _run():
+                self.git_service.unstage_paths(repo_root, rel_paths)
+
+            self._submit_git_task("rollback_repo", _run)
+            return
+
         def _run():
             self.git_service.unstage_all(repo_root)
 
@@ -374,6 +598,23 @@ class GitWorkflowController:
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
+            return
+
+        if self._repo_has_child_repositories(repo_root):
+            rel_paths = self._owned_change_rel_paths(
+                repo_root,
+                include_untracked=False,
+                require_staged=None,
+                require_unstaged=None,
+            )
+            if not rel_paths:
+                QMessageBox.information(self.ide, "Hard Reset to HEAD", "No tracked changes found for this repository.")
+                return
+
+            def _run():
+                self.git_service.restore_paths(repo_root, rel_paths, staged=True, worktree=True)
+
+            self._submit_git_task("rollback_repo", _run)
             return
 
         def _run():
@@ -428,6 +669,23 @@ class GitWorkflowController:
         if not repo_root:
             return
 
+        if self._repo_has_child_repositories(repo_root):
+            rel_paths = self._owned_change_rel_paths(
+                repo_root,
+                include_untracked=True,
+                require_staged=None,
+                require_unstaged=None,
+            )
+            if not rel_paths:
+                QMessageBox.information(self.ide, "Git Stage", "No eligible changes found for this repository.")
+                return
+
+            def _run():
+                self.git_service.stage_paths(repo_root, rel_paths)
+
+            self._submit_git_task("stage_paths", _run, context={"count": len(rel_paths), "label": "all"})
+            return
+
         def _run():
             self.git_service.stage_all_changes(repo_root)
 
@@ -439,7 +697,7 @@ class GitWorkflowController:
         seen: set[str] = set()
         for path in paths:
             cpath = self._canonical_path(path)
-            if not self._path_has_prefix(cpath, root):
+            if not self._is_path_owned_by_repo(root, cpath):
                 continue
             if cpath == root:
                 rel = "."

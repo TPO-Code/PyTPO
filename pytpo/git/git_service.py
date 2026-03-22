@@ -61,10 +61,44 @@ class GitRemoteConfigResult:
     url: str
 
 
+@dataclass(slots=True)
+class GitRepoDisplayState:
+    repo_root: str
+    current_branch: str
+    detached_head: bool
+    upstream_branch: str | None
+    has_remotes: bool
+    primary_remote_name: str | None
+    primary_remote_url: str | None
+
+
 class GitServiceError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "git_error") -> None:
         super().__init__(message)
         self.kind = kind
+
+
+def format_git_branch_label(state: GitRepoDisplayState | None) -> str:
+    if state is None:
+        return ""
+    if state.detached_head:
+        return "HEAD (detached)"
+    return str(state.current_branch or "").strip() or "HEAD (detached)"
+
+
+def format_git_remote_label(state: GitRepoDisplayState | None) -> str:
+    if state is None:
+        return ""
+    if state.upstream_branch:
+        return f"Upstream: {state.upstream_branch}"
+    if not state.has_remotes:
+        return "No remote configured"
+    if state.detached_head:
+        return "Detached HEAD with no upstream"
+    remote_name = str(state.primary_remote_name or "").strip()
+    if remote_name:
+        return f"No upstream on {remote_name}"
+    return "No upstream configured"
 
 
 class GitService:
@@ -184,6 +218,14 @@ class GitService:
             return None
         text = str(out or "").strip()
         return text or None
+
+    def _read_remote_names(self, repo_root: str) -> list[str]:
+        try:
+            out = self._run_git(repo_root, ["remote"], check=True)
+        except GitServiceError:
+            return []
+        names = [line.strip() for line in str(out or "").splitlines() if line.strip()]
+        return sorted(set(names), key=str.lower)
 
     def _read_ahead_behind(self, repo_root: str) -> tuple[int, int]:
         try:
@@ -313,6 +355,19 @@ class GitService:
         except GitServiceError:
             # Fallback for older git versions without `restore`.
             self._run_git(root, ["reset", "HEAD", "--", *files], check=True)
+
+    def restore_paths(self, repo_root: str, rel_paths: list[str], *, staged: bool = False, worktree: bool = True) -> None:
+        root = self._require_repo(repo_root)
+        files = [str(item).strip().replace("\\", "/") for item in rel_paths if str(item).strip()]
+        if not files:
+            raise GitServiceError("No files selected to restore.", kind="validation")
+        args = ["restore"]
+        if staged:
+            args.append("--staged")
+        if worktree:
+            args.append("--worktree")
+        args.extend(["--source=HEAD", "--", *files])
+        self._run_git(root, args, check=True)
 
     def commit_files(self, repo_root: str, rel_paths: list[str], message: str) -> str:
         root = self._require_repo(repo_root)
@@ -461,6 +516,30 @@ class GitService:
             return None
         url = str(out or "").strip()
         return url or None
+
+    def describe_repo_state(self, repo_root: str) -> GitRepoDisplayState:
+        root = self._require_repo(repo_root)
+        current_branch = self._read_current_branch(root)
+        detached_head = not bool(current_branch)
+        upstream_branch = self._read_upstream_branch(root)
+        remote_names = self._read_remote_names(root)
+        primary_remote_name = None
+        if upstream_branch and "/" in upstream_branch:
+            primary_remote_name = upstream_branch.split("/", 1)[0].strip() or None
+        if not primary_remote_name and "origin" in remote_names:
+            primary_remote_name = "origin"
+        if not primary_remote_name and remote_names:
+            primary_remote_name = remote_names[0]
+        primary_remote_url = self.get_remote_url(root, primary_remote_name) if primary_remote_name else None
+        return GitRepoDisplayState(
+            repo_root=root,
+            current_branch=current_branch,
+            detached_head=detached_head,
+            upstream_branch=upstream_branch,
+            has_remotes=bool(remote_names),
+            primary_remote_name=primary_remote_name,
+            primary_remote_url=primary_remote_url,
+        )
 
     def configure_remote(
         self,

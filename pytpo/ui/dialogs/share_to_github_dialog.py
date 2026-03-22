@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pytpo.git.git_service import GitService, format_git_branch_label, format_git_remote_label
 from pytpo.git.github_share_service import (
     GitHubShareError,
     GitHubShareRequest,
@@ -38,6 +39,8 @@ class ShareToGitHubDialog(DialogWindow):
         project_root: str,
         token: str,
         share_service: GitHubShareService,
+        git_service: GitService | None = None,
+        repo_options: list[tuple[str, str]] | None = None,
         exclude_dirs: list[str] | None = None,
         exclude_files: list[str] | None = None,
         exclude_path_predicate: Callable[[str], bool] | None = None,
@@ -51,6 +54,8 @@ class ShareToGitHubDialog(DialogWindow):
         self._project_root = str(project_root or "").strip()
         self._token = str(token or "").strip()
         self._share_service = share_service
+        self._git_service = git_service
+        self._repo_options = [(str(label), str(root)) for label, root in (repo_options or []) if str(root).strip()]
         self._exclude_dirs = [str(item) for item in (exclude_dirs or []) if str(item).strip()]
         self._exclude_files = [str(item) for item in (exclude_files or []) if str(item).strip()]
         self._exclude_path_predicate = exclude_path_predicate
@@ -82,6 +87,27 @@ class ShareToGitHubDialog(DialogWindow):
         self.repo_root_label = QLabel(f"Project: {self._project_root}")
         self.repo_root_label.setWordWrap(True)
         root.addWidget(self.repo_root_label)
+        self.repo_state_label = QLabel("Git state: (loading...)")
+        self.repo_state_label.setWordWrap(True)
+        root.addWidget(self.repo_state_label)
+
+        self.repo_combo: QComboBox | None = None
+        if len(self._repo_options) > 1:
+            repo_scope_row = QHBoxLayout()
+            repo_scope_row.addWidget(QLabel("Target Repository"), 0)
+            combo = QComboBox()
+            for label, repo_path in self._repo_options:
+                combo.addItem(label, repo_path)
+            current_index = max(0, combo.findData(self._project_root))
+            combo.setCurrentIndex(current_index)
+            chosen_root = str(combo.currentData() or "").strip()
+            if chosen_root:
+                self._project_root = chosen_root
+                self.repo_root_label.setText(f"Project: {self._project_root}")
+            combo.currentIndexChanged.connect(self._on_repo_changed)
+            repo_scope_row.addWidget(combo, 1)
+            root.addLayout(repo_scope_row)
+            self.repo_combo = combo
 
         self.note_label = QLabel(
             "Select files for the initial commit. Checking a folder selects all visible files under it."
@@ -164,11 +190,20 @@ class ShareToGitHubDialog(DialogWindow):
         self._set_status("Scanning project files...")
 
         def _run():
-            return self._share_service.list_project_files(
+            files = self._share_service.list_project_files(
                 self._project_root,
                 exclude_dirs=self._exclude_dirs,
                 exclude_files=self._exclude_files,
             )
+            state = None
+            if self._git_service is not None:
+                try:
+                    resolved_repo = self._git_service.find_repo_root(self._project_root)
+                    if resolved_repo:
+                        state = self._git_service.describe_repo_state(resolved_repo)
+                except Exception:
+                    state = None
+            return files, state
 
         self._submit_task("load_files", _run)
 
@@ -243,8 +278,24 @@ class ShareToGitHubDialog(DialogWindow):
 
     def _handle_result(self, kind: str, result: Any, error: Exception | None) -> None:
         if kind == "load_files":
-            if error is None and isinstance(result, list):
-                raw_files = [str(item) for item in result if str(item).strip()]
+            files_result = result
+            repo_state = None
+            if isinstance(result, tuple):
+                files_result = result[0] if result else []
+                if len(result) > 1:
+                    repo_state = result[1]
+            branch_text = format_git_branch_label(repo_state)
+            remote_text = format_git_remote_label(repo_state)
+            if branch_text:
+                self.repo_state_label.setText(
+                    f"Git state: {branch_text}" + (f" | {remote_text}" if remote_text else "")
+                )
+            elif remote_text:
+                self.repo_state_label.setText(f"Git state: {remote_text}")
+            else:
+                self.repo_state_label.setText("Git state: Not a Git repository yet")
+            if error is None and isinstance(files_result, list):
+                raw_files = [str(item) for item in files_result if str(item).strip()]
                 self._files = self._apply_workspace_filters(raw_files)
                 self._checked_by_path = {path: bool(self._checked_by_path.get(path, True)) for path in self._files}
                 self._populate_files_tree()
@@ -485,6 +536,8 @@ class ShareToGitHubDialog(DialogWindow):
 
     def _set_busy(self, busy: bool) -> None:
         disabled = bool(busy)
+        if self.repo_combo is not None:
+            self.repo_combo.setDisabled(disabled)
         self.repo_name_edit.setDisabled(disabled)
         self.description_edit.setDisabled(disabled)
         self.visibility_combo.setDisabled(disabled)
@@ -527,3 +580,18 @@ class ShareToGitHubDialog(DialogWindow):
                 self._executor.shutdown(wait=False)
             except Exception:
                 pass
+
+    def _on_repo_changed(self, index: int) -> None:
+        if self.repo_combo is None:
+            return
+        project_root = str(self.repo_combo.itemData(index) or "").strip()
+        if not project_root or project_root == self._project_root:
+            return
+        self._project_root = project_root
+        self.repo_root_label.setText(f"Project: {self._project_root}")
+        self.repo_state_label.setText("Git state: (loading...)")
+        self.repo_name_edit.setText(os.path.basename(self._project_root.rstrip("/")) or "my-project")
+        self._files = []
+        self._checked_by_path.clear()
+        self.files_tree.clear()
+        self._load_files()

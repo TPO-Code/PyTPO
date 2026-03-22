@@ -29,7 +29,8 @@ from pytpo.formatting.providers import (
 )
 from pytpo.git.github_auth import GitHubAuthStore
 from pytpo.git.github_share_service import GitHubShareService
-from pytpo.git.git_service import GitService
+from pytpo.git.git_service import GitService, GitServiceError, format_git_branch_label, format_git_remote_label
+from pytpo.git.workspace_repository_index import WorkspaceRepositoryIndex
 from pytpo.instance_coordinator import ProjectInstanceServer, request_project_activation
 from pytpo.lang_cpp import CppLanguagePack
 from pytpo.lang_cpp.clangd_repair import missing_std_header_from_diagnostic, repair_clangd_includes
@@ -38,13 +39,15 @@ from pytpo.services.asset_paths import (
     preferred_shared_asset_dir,
 )
 from pytpo.services.commit_md import (
+    DEFAULT_COMMIT_MD_TEXT,
     commit_md_path_for_project,
-    ensure_commit_md_exists,
+    commit_md_path_for_scope,
+    ensure_commit_md_exists_for_scope,
     get_commit_message_from_commit_md,
     get_release_message_from_commit_md,
-    load_commit_md_text,
+    load_commit_md_text_for_scope,
     update_commit_md_sections,
-    write_commit_md_for_project,
+    write_commit_md_for_scope,
 )
 from pytpo.settings_manager import SettingsManager
 from pytpo.services.document_outline_service import build_document_outline
@@ -655,10 +658,15 @@ class PythonIDE(Window):
         self.github_share_service = GitHubShareService(git_service=self.git_service)
         self._git_repo_root: str | None = None
         self._git_current_branch: str = ""
+        self._git_branches_by_repo: dict[str, str] = {}
         self._git_file_states: dict[str, str] = {}
         self._git_folder_states: dict[str, str] = {}
         self._git_refresh_inflight = False
         self._git_refresh_requested = False
+        self.workspace_repository_index = WorkspaceRepositoryIndex.discover(
+            self.project_root,
+            canonicalize=self._canonical_path,
+        )
 
         self._external_file_signatures: dict[str, tuple[bool, int, int]] = {}
         self._external_conflict_signatures: dict[str, tuple[bool, int, int]] = {}
@@ -922,11 +930,19 @@ class PythonIDE(Window):
             exclude_path_predicate=self._is_tree_path_excluded,
             parent=self,
         )
+        self.tree.set_root_display_name(self._project_display_name())
+        self.tree.set_workspace_repository_index(self.workspace_repository_index)
         self.tree.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.tree.fileOpenRequested.connect(self.open_file)
         self.tree.pathContextMenuRequested.connect(self._show_project_tree_context_menu)
         self.tree.operationError.connect(self._show_tree_error)
         self.tree.pathMoved.connect(self._on_tree_path_moved)
+        try:
+            selection_model = self.tree.selectionModel()
+            if selection_model is not None:
+                selection_model.selectionChanged.connect(lambda *_args: self._on_project_tree_selection_changed())
+        except Exception:
+            pass
         self._apply_tree_font_settings_to_all()
         self._apply_project_explorer_icon_size_to_all()
 
@@ -962,6 +978,26 @@ class PythonIDE(Window):
 
         self.dock_project.setWidget(self.tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_project)
+
+    def refresh_workspace_repository_index(self, *, update_tree: bool = True) -> WorkspaceRepositoryIndex:
+        self.workspace_repository_index = WorkspaceRepositoryIndex.discover(
+            self.project_root,
+            canonicalize=self._canonical_path,
+        )
+        tree = getattr(self, "tree", None)
+        if update_tree and isinstance(tree, FileSystemTreeWidget):
+            tree.set_root_display_name(self._project_display_name())
+            tree.set_workspace_repository_index(self.workspace_repository_index)
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            refresh_fn = getattr(codex_widget, "refresh_context_scope", None)
+            if callable(refresh_fn):
+                try:
+                    refresh_fn()
+                except Exception:
+                    pass
+        self._load_commit_md_into_dock()
+        return self.workspace_repository_index
 
     def _setup_project_fs_watcher(self) -> None:
         if self.no_project_mode:
@@ -1338,6 +1374,8 @@ class PythonIDE(Window):
 
         widget = CodexAgentDockWidget(
             project_dir_provider=lambda: str(self.project_root or ""),
+            selection_scope_provider=self._codex_agent_scope_context,
+            repo_options_provider=self._codex_agent_repo_options,
             tree_path_excluded_predicate=self._is_tree_path_excluded,
             project_read_only_provider=self.is_project_read_only,
             settings_provider=self._codex_agent_settings,
@@ -1369,14 +1407,77 @@ class PythonIDE(Window):
         dock.show()
         dock.raise_()
 
-    def _commit_md_file_path(self) -> str:
-        return str(commit_md_path_for_project(self.project_root))
+    def _commit_md_scope_context(
+        self,
+        *,
+        repo_root: str | None = None,
+        scope_kind: str | None = None,
+    ) -> dict[str, str | None]:
+        context = self._active_repo_context()
+        resolved_scope = str(scope_kind or context.get("scope_kind") or "project").strip().lower() or "project"
+        candidate_repo_root = str(repo_root or context.get("repo_root") or "").strip()
+        resolved_repo_root = self._canonical_path(candidate_repo_root) if candidate_repo_root else None
+        project_root = self._canonical_path(self.project_root)
+        draft_scope_kind = "project" if resolved_scope == "project" else "repo"
+        if draft_scope_kind == "repo" and not resolved_repo_root:
+            draft_scope_kind = "project"
+        draft_repo_root = resolved_repo_root if draft_scope_kind == "repo" else None
+        scope_label = self._project_display_name() if draft_scope_kind == "project" else self._repo_display_label(draft_repo_root or project_root)
+        return {
+            "scope_kind": resolved_scope,
+            "repo_root": resolved_repo_root,
+            "draft_scope_kind": draft_scope_kind,
+            "draft_repo_root": draft_repo_root,
+            "file_path": str(
+                commit_md_path_for_scope(
+                    project_root,
+                    scope_kind=draft_scope_kind,
+                    repo_root=draft_repo_root,
+                )
+            ),
+            "scope_label": scope_label,
+        }
 
-    def _load_commit_md_into_dock(self) -> None:
+    def _commit_md_file_path(self, *, repo_root: str | None = None, scope_kind: str | None = None) -> str:
+        details = self._commit_md_scope_context(repo_root=repo_root, scope_kind=scope_kind)
+        return str(details.get("file_path") or commit_md_path_for_project(self.project_root))
+
+    def _current_commit_md_editor_path(self) -> str:
+        editor = self.commit_md_editor
+        current_file = str(getattr(editor, "file_path", "") or "").strip() if isinstance(editor, CodeEditor) else ""
+        if current_file:
+            return self._canonical_path(current_file)
+        return self._canonical_path(self._commit_md_file_path())
+
+    def _update_commit_md_dock_title(self, *, scope_label: str | None = None) -> None:
+        dock = self.dock_commit_md
+        if not isinstance(dock, QDockWidget):
+            return
+        label = str(scope_label or "").strip() or self._project_display_name()
+        dock.setWindowTitle(f"Commit Draft: {label}")
+
+    def _load_commit_md_into_dock(
+        self,
+        *,
+        repo_root: str | None = None,
+        scope_kind: str | None = None,
+        force: bool = False,
+    ) -> bool:
         editor = self.commit_md_editor
         if not isinstance(editor, CodeEditor):
-            return
-        file_path = self._commit_md_file_path()
+            return False
+        details = self._commit_md_scope_context(repo_root=repo_root, scope_kind=scope_kind)
+        file_path = str(details.get("file_path") or "")
+        if not file_path:
+            return False
+        current_file_path = str(getattr(editor, "file_path", "") or "").strip()
+        current_file_path = self._canonical_path(current_file_path) if current_file_path else ""
+        target_file_path = self._canonical_path(file_path)
+        if not force and current_file_path and current_file_path == target_file_path:
+            self._update_commit_md_dock_title(scope_label=str(details.get("scope_label") or ""))
+            return True
+        if not force and not self._flush_commit_md_dock_save(report_conflict=False):
+            return False
         path = Path(file_path)
         text = ""
         if self.is_project_read_only():
@@ -1387,11 +1488,21 @@ class PythonIDE(Window):
                     text = ""
         else:
             try:
-                ensure_commit_md_exists(self.project_root)
-                text = load_commit_md_text(self.project_root)
+                ensure_commit_md_exists_for_scope(
+                    self.project_root,
+                    scope_kind=str(details.get("draft_scope_kind") or "project"),
+                    repo_root=str(details.get("draft_repo_root") or "").strip() or None,
+                )
+                text = load_commit_md_text_for_scope(
+                    self.project_root,
+                    scope_kind=str(details.get("draft_scope_kind") or "project"),
+                    repo_root=str(details.get("draft_repo_root") or "").strip() or None,
+                )
             except Exception:
                 text = ""
         self._set_commit_md_editor_text(text, file_path=file_path)
+        self._update_commit_md_dock_title(scope_label=str(details.get("scope_label") or ""))
+        return True
 
     def _set_commit_md_editor_text(self, text: str, *, file_path: str) -> None:
         editor = self.commit_md_editor
@@ -1441,7 +1552,7 @@ class PythonIDE(Window):
         if self.is_project_read_only():
             return not bool(editor.document().isModified())
 
-        target_path = self._canonical_path(self._commit_md_file_path())
+        target_path = self._current_commit_md_editor_path()
         conflict_sig = self._external_conflict_signatures.get(target_path)
         known_sig = self._external_file_signatures.get(target_path)
         current_sig = self._external_file_signature(target_path)
@@ -1488,8 +1599,11 @@ class PythonIDE(Window):
             return False
 
         try:
-            path = ensure_commit_md_exists(self.project_root)
-            write_commit_md_for_project(self.project_root, editor.toPlainText())
+            path = Path(target_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(DEFAULT_COMMIT_MD_TEXT, encoding="utf-8")
+            path.write_text(str(editor.toPlainText() or ""), encoding="utf-8")
             editor.document().setModified(False)
             editor.set_file_path(str(path))
             self._note_editor_saved(editor, source="commit draft save")
@@ -1501,16 +1615,26 @@ class PythonIDE(Window):
                 self.statusBar().showMessage(f"Commit draft save failed: {exc}", 2600)
             return False
 
-    def read_commit_md_messages(self) -> tuple[str, str]:
+    def read_commit_md_messages(
+        self,
+        *,
+        repo_root: str | None = None,
+        scope_kind: str | None = None,
+    ) -> tuple[str, str]:
+        details = self._commit_md_scope_context(repo_root=repo_root, scope_kind=scope_kind)
+        requested_path = self._canonical_path(str(details.get("file_path") or self._commit_md_file_path()))
+        current_path = self._current_commit_md_editor_path()
         if not self._flush_commit_md_dock_save(report_conflict=True):
             editor = self.commit_md_editor
-            local_text = str(editor.toPlainText() or "") if isinstance(editor, CodeEditor) else ""
+            local_text = ""
+            if isinstance(editor, CodeEditor) and requested_path == current_path:
+                local_text = str(editor.toPlainText() or "")
             return (
                 get_commit_message_from_commit_md(local_text) or "",
                 get_release_message_from_commit_md(local_text) or "",
             )
         if self.is_project_read_only():
-            path = Path(self._commit_md_file_path())
+            path = Path(requested_path)
             if path.exists():
                 try:
                     text = path.read_text(encoding="utf-8")
@@ -1518,30 +1642,60 @@ class PythonIDE(Window):
                     text = ""
             else:
                 editor = self.commit_md_editor
-                text = str(editor.toPlainText() or "") if isinstance(editor, CodeEditor) else ""
+                text = (
+                    str(editor.toPlainText() or "")
+                    if isinstance(editor, CodeEditor) and requested_path == current_path
+                    else ""
+                )
         else:
             try:
-                text = load_commit_md_text(self.project_root)
+                text = load_commit_md_text_for_scope(
+                    self.project_root,
+                    scope_kind=str(details.get("draft_scope_kind") or "project"),
+                    repo_root=str(details.get("draft_repo_root") or "").strip() or None,
+                )
             except Exception:
                 return "", ""
         commit_message = get_commit_message_from_commit_md(text) or ""
         release_message = get_release_message_from_commit_md(text) or ""
         return commit_message, release_message
 
-    def update_commit_md_messages(self, *, commit_message: str, release_message: str) -> None:
+    def update_commit_md_messages(
+        self,
+        *,
+        commit_message: str,
+        release_message: str,
+        repo_root: str | None = None,
+        scope_kind: str | None = None,
+    ) -> None:
         if self._block_if_project_read_only("Update commit draft"):
             return
         if not self._flush_commit_md_dock_save(report_conflict=True):
             return
+        details = self._commit_md_scope_context(repo_root=repo_root, scope_kind=scope_kind)
+        target_path = self._canonical_path(str(details.get("file_path") or self._commit_md_file_path()))
         try:
-            text = load_commit_md_text(self.project_root)
+            draft_repo_root = str(details.get("draft_repo_root") or "").strip() or None
+            draft_scope_kind = str(details.get("draft_scope_kind") or "project")
+            text = load_commit_md_text_for_scope(
+                self.project_root,
+                scope_kind=draft_scope_kind,
+                repo_root=draft_repo_root,
+            )
             updated = update_commit_md_sections(
                 text,
                 str(commit_message or ""),
                 str(release_message or ""),
             )
-            write_commit_md_for_project(self.project_root, updated)
-            self._set_commit_md_editor_text(updated, file_path=self._commit_md_file_path())
+            write_commit_md_for_scope(
+                self.project_root,
+                updated,
+                scope_kind=draft_scope_kind,
+                repo_root=draft_repo_root,
+            )
+            if target_path == self._current_commit_md_editor_path():
+                self._set_commit_md_editor_text(updated, file_path=target_path)
+                self._update_commit_md_dock_title(scope_label=str(details.get("scope_label") or ""))
         except Exception:
             pass
 
@@ -1627,22 +1781,138 @@ class PythonIDE(Window):
         if not isinstance(label, QLabel):
             return
 
-        current_branch = str(self._git_current_branch if branch is None else branch).strip()
-        repo_root = str(
-            getattr(getattr(self, "version_control_controller", None), "_git_repo_root", None)
-            or self._git_repo_root
-            or ""
-        ).strip()
+        context = self._active_repo_context()
+        repo_root = str(context.get("repo_root") or "").strip()
         if not repo_root:
             label.clear()
             label.setToolTip("")
             label.hide()
             return
 
-        shown_branch = current_branch or "(detached)"
-        label.setText(f"Git: {shown_branch}")
-        label.setToolTip(f"{repo_root}")
+        repo_state = None
+        try:
+            repo_state = self.git_service.describe_repo_state(repo_root)
+        except GitServiceError:
+            repo_state = None
+        except Exception:
+            repo_state = None
+
+        shown_branch = format_git_branch_label(repo_state)
+        if not shown_branch:
+            branches_by_repo = dict(getattr(self, "_git_branches_by_repo", {}) or {})
+            current_branch = str(branches_by_repo.get(repo_root, "") or "").strip()
+            if not current_branch and repo_root == str(self._git_repo_root or "").strip():
+                current_branch = str(self._git_current_branch if branch is None else branch).strip()
+            shown_branch = current_branch or "HEAD (detached)"
+
+        remote_label = format_git_remote_label(repo_state)
+        suffix = f" [{remote_label}]" if remote_label else ""
+        label.setText(f"Git: {self._repo_display_label(repo_root)}: {shown_branch}{suffix}")
+        tooltip_lines = [repo_root]
+        if shown_branch:
+            tooltip_lines.append(f"Branch: {shown_branch}")
+        if remote_label:
+            tooltip_lines.append(remote_label)
+        remote_url = str(getattr(repo_state, "primary_remote_url", "") or "").strip() if repo_state is not None else ""
+        if remote_url:
+            tooltip_lines.append(f"Remote URL: {remote_url}")
+        label.setToolTip("\n".join(tooltip_lines))
         label.show()
+
+    def _on_project_tree_selection_changed(self) -> None:
+        self._load_commit_md_into_dock()
+        self._refresh_git_branch_status_label()
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            refresh_fn = getattr(codex_widget, "refresh_context_scope", None)
+            if callable(refresh_fn):
+                try:
+                    refresh_fn()
+                except Exception:
+                    pass
+
+    def _repo_display_label(self, repo_root: str) -> str:
+        root = self._canonical_path(repo_root)
+        if root == self.project_root:
+            return self._project_display_name()
+        try:
+            rel = os.path.relpath(root, self.project_root)
+        except Exception:
+            rel = root
+        return rel if rel not in (".", "") else (os.path.basename(root) or root)
+
+    def _active_repo_context(self) -> dict[str, str | None]:
+        explorer = getattr(self, "explorer_controller", None)
+        if explorer is not None:
+            resolver = getattr(explorer, "current_selection_context", None)
+            tree = getattr(self, "tree", None)
+            selected_tree_path = None
+            if tree is not None:
+                getter = getattr(tree, "selected_path", None)
+                if callable(getter):
+                    try:
+                        selected_tree_path = getter()
+                    except Exception:
+                        selected_tree_path = None
+            if callable(resolver) and isinstance(selected_tree_path, str) and selected_tree_path.strip():
+                try:
+                    context = resolver(selected_tree_path)
+                except Exception:
+                    context = None
+                else:
+                    if context is not None and (context.selected_path or context.repo_root):
+                        return {
+                            "scope_kind": str(getattr(context, "scope_kind", "project") or "project"),
+                            "selected_path": str(getattr(context, "selected_path", "") or "") or None,
+                            "repo_root": str(getattr(context, "repo_root", "") or "") or None,
+                        }
+
+        editor = self.current_editor()
+        file_path = str(getattr(editor, "file_path", "") or "").strip() if editor is not None else ""
+        if file_path:
+            repo_root = self._repo_root_for_path(file_path)
+            if repo_root:
+                return {
+                    "scope_kind": "path",
+                    "selected_path": self._canonical_path(file_path),
+                    "repo_root": self._canonical_path(repo_root),
+                }
+
+        repo_index = getattr(self, "workspace_repository_index", None)
+        repo_root = None
+        if repo_index is not None:
+            try:
+                repo_root = repo_index.repo_for_project_scope()
+            except Exception:
+                repo_root = None
+        return {
+            "scope_kind": "project",
+            "selected_path": self.project_root,
+            "repo_root": str(repo_root or self._git_repo_root or "") or None,
+        }
+
+    def _codex_agent_project_dir(self) -> str:
+        context = self._active_repo_context()
+        return str(context.get("repo_root") or self.project_root or "")
+
+    def _codex_agent_scope_context(self) -> dict[str, str | None]:
+        return self._active_repo_context()
+
+    def _codex_agent_repo_options(self) -> list[tuple[str, str]]:
+        repo_index = getattr(self, "workspace_repository_index", None)
+        if repo_index is None:
+            return []
+        try:
+            repo_roots = list(repo_index.repo_roots())
+        except Exception:
+            return []
+        options: list[tuple[str, str]] = []
+        for repo_root in repo_roots:
+            root = self._canonical_path(repo_root)
+            if root == self.project_root:
+                continue
+            options.append((self._repo_display_label(root), root))
+        return options
 
     def _on_status_bar_message_changed(self, message: str) -> None:
         text = str(message or "").strip()
@@ -2068,6 +2338,15 @@ class PythonIDE(Window):
         self._refresh_runtime_action_states()
         self.spellcheck_manager.refresh_active_widget(immediate=True)
         self._schedule_symbol_outline_refresh(immediate=True)
+        self._refresh_git_branch_status_label()
+        codex_widget = self.codex_agent_widget
+        if isinstance(codex_widget, CodexAgentDockWidget):
+            refresh_fn = getattr(codex_widget, "refresh_context_scope", None)
+            if callable(refresh_fn):
+                try:
+                    refresh_fn()
+                except Exception:
+                    pass
 
     def _on_outline_dock_visibility_changed(self, visible: bool) -> None:
         if bool(visible):

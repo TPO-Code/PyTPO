@@ -6,6 +6,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pytpo.git.git_service import GitService, format_git_branch_label, format_git_remote_label
 from pytpo.git.github_release_service import (
     GitHubReleaseDeleteResult,
     GitHubReleaseError,
@@ -31,7 +33,9 @@ class GitReleasesDialog(DialogWindow):
         self,
         *,
         release_service: GitHubReleaseService,
+        git_service: GitService | None = None,
         repo_root: str,
+        repo_options: list[tuple[str, str]] | None = None,
         use_native_chrome: bool = False,
         parent: QWidget | None = None,
     ) -> None:
@@ -40,7 +44,9 @@ class GitReleasesDialog(DialogWindow):
         self.resize(900, 640)
 
         self._release_service = release_service
+        self._git_service = git_service
         self._repo_root = str(repo_root or "").strip()
+        self._repo_options = [(str(label), str(root)) for label, root in (repo_options or []) if str(root).strip()]
         self._releases_by_id: dict[int, GitHubReleaseSummary] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pytpo-github-releases")
         self._pending: dict[concurrent.futures.Future, tuple[str, dict[str, Any]]] = {}
@@ -63,6 +69,23 @@ class GitReleasesDialog(DialogWindow):
         self.repo_label = QLabel(f"Repository: {self._repo_root}")
         self.repo_label.setWordWrap(True)
         root.addWidget(self.repo_label)
+        self.repo_state_label = QLabel("Git state: (loading...)")
+        self.repo_state_label.setWordWrap(True)
+        root.addWidget(self.repo_state_label)
+
+        self.repo_combo: QComboBox | None = None
+        if len(self._repo_options) > 1:
+            repo_row = QHBoxLayout()
+            repo_row.addWidget(QLabel("Target Repository"), 0)
+            combo = QComboBox()
+            for label, repo_path in self._repo_options:
+                combo.addItem(label, repo_path)
+            current_index = max(0, combo.findData(self._repo_root))
+            combo.setCurrentIndex(current_index)
+            combo.currentIndexChanged.connect(self._on_repo_changed)
+            repo_row.addWidget(combo, 1)
+            root.addLayout(repo_row)
+            self.repo_combo = combo
 
         self.note_label = QLabel(
             "Manage GitHub releases. Deleting a release can optionally delete its remote tag."
@@ -120,7 +143,14 @@ class GitReleasesDialog(DialogWindow):
         self._set_status("Loading releases from GitHub...")
 
         def _run():
-            return self._release_service.list_releases(self._repo_root)
+            releases = self._release_service.list_releases(self._repo_root)
+            state = None
+            if self._git_service is not None:
+                try:
+                    state = self._git_service.describe_repo_state(self._repo_root)
+                except Exception:
+                    state = None
+            return releases, state
 
         self._submit_task("load", _run)
 
@@ -238,7 +268,23 @@ class GitReleasesDialog(DialogWindow):
             return
 
         if kind == "load":
-            releases = result if isinstance(result, list) else []
+            releases = result
+            repo_state = None
+            if isinstance(result, tuple):
+                releases = result[0] if result else []
+                if len(result) > 1:
+                    repo_state = result[1]
+            branch_text = format_git_branch_label(repo_state)
+            remote_text = format_git_remote_label(repo_state)
+            if branch_text:
+                self.repo_state_label.setText(
+                    f"Git state: {branch_text}" + (f" | {remote_text}" if remote_text else "")
+                )
+            elif remote_text:
+                self.repo_state_label.setText(f"Git state: {remote_text}")
+            else:
+                self.repo_state_label.setText("Git state: unavailable")
+            releases = releases if isinstance(releases, list) else []
             self._populate_releases([item for item in releases if isinstance(item, GitHubReleaseSummary)])
             return
 
@@ -310,6 +356,8 @@ class GitReleasesDialog(DialogWindow):
     def _refresh_actions(self) -> None:
         busy = bool(self._pending)
         selected = self._selected_release()
+        if self.repo_combo is not None:
+            self.repo_combo.setEnabled(not busy)
         self.refresh_btn.setEnabled(not busy)
         self.releases_tree.setEnabled(not busy)
         self.close_btn.setEnabled(not busy)
@@ -333,6 +381,21 @@ class GitReleasesDialog(DialogWindow):
     def _set_status(self, text: str, *, error: bool = False) -> None:
         color = "#d46a6a" if error else "#a4bf7a"
         self.status_label.setText(f"<span style='color:{color};'>{text}</span>")
+
+    def _on_repo_changed(self, index: int) -> None:
+        if self.repo_combo is None:
+            return
+        repo_root = str(self.repo_combo.itemData(index) or "").strip()
+        if not repo_root or repo_root == self._repo_root:
+            return
+        self._repo_root = repo_root
+        self.repo_label.setText(f"Repository: {self._repo_root}")
+        self.repo_state_label.setText("Git state: (loading...)")
+        self._releases_by_id.clear()
+        self.releases_tree.clear()
+        self.details_edit.clear()
+        self.count_label.setText("Releases: 0")
+        self._load_releases()
 
     def _shutdown(self) -> None:
         self._result_pump.stop()

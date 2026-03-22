@@ -12,6 +12,7 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,7 +27,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pytpo.git.git_service import GitService, GitServiceError
+from pytpo.git.git_service import (
+    GitRepoDisplayState,
+    GitService,
+    GitServiceError,
+    format_git_branch_label,
+    format_git_remote_label,
+)
 from pytpo.git.github_release_service import (
     GitHubReleaseError,
     GitHubReleaseRequest,
@@ -65,6 +72,8 @@ class GitCommitDialog(DialogWindow):
         git_service: GitService,
         repo_root: str,
         release_service: GitHubReleaseService | None = None,
+        repo_options: list[tuple[str, str]] | None = None,
+        exclude_path_predicate: Callable[..., bool] | None = None,
         exclude_untracked_predicate: Callable[[str], bool] | None = None,
         prefer_push_action: bool = False,
         initial_commit_message: str = "",
@@ -78,7 +87,9 @@ class GitCommitDialog(DialogWindow):
 
         self._git_service = git_service
         self._repo_root = str(repo_root)
+        self._repo_options = [(str(label), str(root)) for label, root in (repo_options or []) if str(root).strip()]
         self._release_service = release_service
+        self._exclude_path_predicate = exclude_path_predicate
         self._exclude_untracked_predicate = exclude_untracked_predicate
         self._repo_has_pyproject = os.path.isfile(os.path.join(self._repo_root, "pyproject.toml"))
         self._repo_has_cargo_toml = os.path.isfile(os.path.join(self._repo_root, "Cargo.toml"))
@@ -130,6 +141,23 @@ class GitCommitDialog(DialogWindow):
         self.repo_label = QLabel(f"Repository: {self._repo_root}")
         self.repo_label.setWordWrap(True)
         root.addWidget(self.repo_label)
+        self.repo_state_label = QLabel("Git state: (loading...)")
+        self.repo_state_label.setWordWrap(True)
+        root.addWidget(self.repo_state_label)
+
+        self.repo_combo: QComboBox | None = None
+        if len(self._repo_options) > 1:
+            repo_row = QHBoxLayout()
+            repo_row.addWidget(QLabel("Target Repository"), 0)
+            combo = QComboBox()
+            for label, repo_path in self._repo_options:
+                combo.addItem(label, repo_path)
+            current_index = max(0, combo.findData(self._repo_root))
+            combo.setCurrentIndex(current_index)
+            combo.currentIndexChanged.connect(self._on_repo_changed)
+            repo_row.addWidget(combo, 1)
+            root.addLayout(repo_row)
+            self.repo_combo = combo
 
         self.note_label = QLabel(
             "Select files to commit. Checking a folder selects all visible files under it."
@@ -212,17 +240,13 @@ class GitCommitDialog(DialogWindow):
         self.release_prerelease_chk = QCheckBox("Pre-release")
         release_layout.addWidget(self.release_prerelease_chk)
 
-        self.bump_pyproject_chk: QCheckBox | None = None
-        if self._repo_has_pyproject:
-            self.bump_pyproject_chk = QCheckBox("Update pyproject.toml version")
-            self.bump_pyproject_chk.setChecked(True)
-            release_layout.addWidget(self.bump_pyproject_chk)
+        self.bump_pyproject_chk = QCheckBox("Update pyproject.toml version")
+        self.bump_pyproject_chk.setChecked(True)
+        release_layout.addWidget(self.bump_pyproject_chk)
 
-        self.bump_cargo_chk: QCheckBox | None = None
-        if self._repo_has_cargo_toml:
-            self.bump_cargo_chk = QCheckBox("Update Cargo.toml version")
-            self.bump_cargo_chk.setChecked(True)
-            release_layout.addWidget(self.bump_cargo_chk)
+        self.bump_cargo_chk = QCheckBox("Update Cargo.toml version")
+        self.bump_cargo_chk.setChecked(True)
+        release_layout.addWidget(self.bump_cargo_chk)
 
         details_column.addWidget(self.release_form, 1)
         self.release_form.setVisible(False)
@@ -289,6 +313,7 @@ class GitCommitDialog(DialogWindow):
         self.files_tree.itemChanged.connect(self._on_item_changed)
 
         self._refresh_branch_target_state()
+        self._refresh_repo_capabilities()
         self._seed_release_version()
         if self._initial_commit_message:
             self.message_edit.setPlainText(self._initial_commit_message)
@@ -301,6 +326,9 @@ class GitCommitDialog(DialogWindow):
     def release_message_text(self) -> str:
         return str(self.release_notes_edit.toPlainText() or "")
 
+    def selected_repo_root(self) -> str:
+        return str(self._repo_root or "").strip()
+
     def _load_changes(self) -> None:
         self._set_busy(True)
         self._set_status("Loading files...")
@@ -308,10 +336,18 @@ class GitCommitDialog(DialogWindow):
         def _run():
             # Backward-compatible call path:
             try:
-                return self._git_service.read_status(self._repo_root, include_untracked=True)
+                status = self._git_service.read_status(self._repo_root, include_untracked=True)
             except TypeError:
                 # Old GitService signature: read_status(repo_root)
-                return self._git_service.read_status(self._repo_root)
+                status = self._git_service.read_status(self._repo_root)
+            state = None
+            describe = getattr(self._git_service, "describe_repo_state", None)
+            if callable(describe):
+                try:
+                    state = describe(self._repo_root)
+                except Exception:
+                    state = None
+            return status, state
 
         self._submit_task("load", _run)
 
@@ -330,6 +366,35 @@ class GitCommitDialog(DialogWindow):
         self._sync_release_identity_fields()
         self.release_tag_edit.setModified(False)
         self.release_title_edit.setModified(False)
+
+    def _refresh_repo_capabilities(self) -> None:
+        self._repo_has_pyproject = os.path.isfile(os.path.join(self._repo_root, "pyproject.toml"))
+        self._repo_has_cargo_toml = os.path.isfile(os.path.join(self._repo_root, "Cargo.toml"))
+        if self.bump_pyproject_chk is not None:
+            self.bump_pyproject_chk.setVisible(self._repo_has_pyproject)
+            self.bump_pyproject_chk.setChecked(self._repo_has_pyproject)
+        if self.bump_cargo_chk is not None:
+            self.bump_cargo_chk.setVisible(self._repo_has_cargo_toml)
+            self.bump_cargo_chk.setChecked(self._repo_has_cargo_toml)
+
+    def _on_repo_changed(self, index: int) -> None:
+        if self.repo_combo is None:
+            return
+        repo_root = str(self.repo_combo.itemData(index) or "").strip()
+        if not repo_root or repo_root == self._repo_root:
+            return
+        self._repo_root = repo_root
+        self.repo_label.setText(f"Repository: {self._repo_root}")
+        self.repo_state_label.setText("Git state: (loading...)")
+        self._current_branch_name = ""
+        self.branch_label.setText("Current branch: (loading...)")
+        self.current_branch_detail_label.setText("Current branch: (loading...)")
+        self.files_tree.clear()
+        self._file_states.clear()
+        self._checked_by_path.clear()
+        self._refresh_repo_capabilities()
+        self._seed_release_version()
+        self._load_changes()
 
     def _set_release_build_value(self, value: int) -> None:
         self._updating_release_build_value = True
@@ -472,7 +537,7 @@ class GitCommitDialog(DialogWindow):
         self._refresh_commit_enabled()
 
     def _refresh_branch_target_state(self) -> None:
-        current = str(self._current_branch_name or "").strip() or "(detached)"
+        current = str(self._current_branch_name or "").strip() or "HEAD (detached)"
         self.branch_label.setText(f"Current branch: {current}")
         self.current_branch_detail_label.setText(f"Current branch: {current}")
 
@@ -705,12 +770,19 @@ class GitCommitDialog(DialogWindow):
 
     def _handle_result(self, kind: str, result: Any, error: Exception | None) -> None:
         if kind == "load":
-            if error is None and hasattr(result, "file_states"):
-                branch = str(getattr(result, "current_branch", "") or "")
+            status_result = result
+            repo_state = None
+            if isinstance(result, tuple) and result:
+                status_result = result[0]
+                if len(result) > 1 and isinstance(result[1], GitRepoDisplayState):
+                    repo_state = result[1]
+            if error is None and hasattr(status_result, "file_states"):
+                branch = str(getattr(status_result, "current_branch", "") or "")
                 self._current_branch_name = branch
+                self._apply_repo_state(repo_state, branch_fallback=branch)
                 self._refresh_branch_target_state()
 
-                self._file_states = self._extract_file_states(result)
+                self._file_states = self._extract_file_states(status_result)
                 self._populate_files_tree()
                 tracked_count = sum(1 for v in self._file_states.values() if v == "tracked")
                 untracked_count = sum(1 for v in self._file_states.values() if v == "untracked")
@@ -783,6 +855,14 @@ class GitCommitDialog(DialogWindow):
 
             self._set_status("Commit failed.", error=True)
 
+    def _apply_repo_state(self, state: GitRepoDisplayState | None, *, branch_fallback: str = "") -> None:
+        branch_text = format_git_branch_label(state) or str(branch_fallback or "").strip() or "HEAD (detached)"
+        remote_text = format_git_remote_label(state)
+        detail = f"Git state: {branch_text}"
+        if remote_text:
+            detail = f"{detail} | {remote_text}"
+        self.repo_state_label.setText(detail)
+
     def _extract_file_states(self, status: Any) -> dict[str, str]:
         """
         Convert service status.file_states into:
@@ -805,6 +885,18 @@ class GitCommitDialog(DialogWindow):
             state_text = str(state or "").strip().lower()
             if state_text not in {"dirty", "untracked"}:
                 continue
+            if callable(self._exclude_path_predicate):
+                try:
+                    if bool(self._exclude_path_predicate(cpath, self._repo_root)):
+                        continue
+                except TypeError:
+                    try:
+                        if bool(self._exclude_path_predicate(cpath)):
+                            continue
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             if state_text == "untracked" and callable(self._exclude_untracked_predicate):
                 try:
                     if bool(self._exclude_untracked_predicate(cpath)):
@@ -1069,6 +1161,8 @@ class GitCommitDialog(DialogWindow):
 
     def _set_busy(self, busy: bool) -> None:
         disabled = bool(busy)
+        if self.repo_combo is not None:
+            self.repo_combo.setDisabled(disabled)
         self.refresh_btn.setDisabled(disabled)
         self.files_tree.setDisabled(disabled)
         self.message_edit.setDisabled(disabled)
