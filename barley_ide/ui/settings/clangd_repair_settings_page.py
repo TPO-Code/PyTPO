@@ -107,11 +107,10 @@ class ClangdRepairSettingsPage(QWidget):
                 if not path:
                     continue
                 suffix = Path(path).suffix.lower()
-                if suffix in {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl", ".c", ".cc", ".cpp", ".cxx"}:
+                if suffix in {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl", ".c", ".cc", ".cpp", ".cxx", ".cu", ".cuh"}:
                     return path
         return ""
 
     def _set_status(self, text: str, *, error: bool = False) -> None:
         color = "#d46a6a" if error else "#a4bf7a"
         self.status_label.setText(f"<span style='color:{color};'>{text}</span>")
-

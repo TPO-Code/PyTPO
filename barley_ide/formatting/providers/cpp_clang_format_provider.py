@@ -22,7 +22,7 @@ from barley_ide.formatting.code_formatting import FormatRequest, FormatResult
 from TPOPyside.dialogs.custom_dialog import DialogWindow
 
 
-CPP_FORMAT_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx"}
+CPP_FORMAT_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx", ".cu", ".cuh"}
 CPP_FORMAT_LANGUAGE_IDS = {"c", "cpp"}
 CLANG_STYLE_PRESETS = ("LLVM", "Google", "Chromium", "Mozilla", "WebKit")
 

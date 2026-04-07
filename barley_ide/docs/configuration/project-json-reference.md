@@ -45,8 +45,10 @@ Reference for `.tide/project.json` keys.
 
 - `active_config`
 - `build_configs[]` entries with:
-  - `name`, `build_dir`, `build_type`, `target`
-  - `configure_args`, `build_args`, `run_args`, `parallel_jobs`, `env`
+  - `name`, `mode`, `working_dir`, `env`
+  - CMake mode: `build_dir`, `build_type`, `target`
+  - CMake mode: `configure_args`, `build_args`, `run_args`, `parallel_jobs`
+  - Custom Command mode: `build_command`, `run_command`
 
 ## `build.rust`
 

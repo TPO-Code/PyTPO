@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from barley_ide.lsp.lsp_client import LspClient
 
 
-_CPP_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx"}
+_CPP_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx", ".cu", ".cuh"}
 _SKIP_WALK_DIRS = {".git", ".hg", ".svn", ".venv", ".tide", "__pycache__", "node_modules"}
 
 _DEFAULT_CPP_SETTINGS: dict[str, Any] = {

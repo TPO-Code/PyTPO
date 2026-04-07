@@ -714,14 +714,21 @@ class SettingsManager:
         def _norm_build_cfg(raw_cfg: Any, index: int) -> dict[str, Any]:
             cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
             name = str(cfg.get("name") or "").strip() or f"Config {index + 1}"
+            mode = str(cfg.get("mode") or "cmake").strip().lower()
+            if mode not in {"cmake", "custom"}:
+                mode = "cmake"
             norm = {
                 "name": name,
+                "mode": mode,
+                "working_dir": str(cfg.get("working_dir") or "").strip(),
                 "build_dir": str(cfg.get("build_dir") or "build").strip() or "build",
                 "build_type": str(cfg.get("build_type") or "Debug").strip() or "Debug",
                 "target": str(cfg.get("target") or "").strip(),
                 "configure_args": str(cfg.get("configure_args") or "").strip(),
                 "build_args": str(cfg.get("build_args") or "").strip(),
                 "run_args": str(cfg.get("run_args") or "").strip(),
+                "build_command": str(cfg.get("build_command") or "").strip(),
+                "run_command": str(cfg.get("run_command") or "").strip(),
                 "env": _norm_env_entries(cfg.get("env")),
             }
             try:

@@ -46,12 +46,16 @@ class TerminalCommandsSettings(TypedDict, total=False):
 
 class CMakeBuildConfig(TypedDict, total=False):
     name: str
+    mode: str
+    working_dir: str
     build_dir: str
     build_type: str
     target: str
     configure_args: str
     build_args: str
     run_args: str
+    build_command: str
+    run_command: str
     parallel_jobs: int
     env: list[str] | dict[str, str]
 
@@ -379,23 +383,31 @@ def default_project_settings() -> ProjectSettings:
                 "build_configs": [
                     {
                         "name": "Debug",
+                        "mode": "cmake",
+                        "working_dir": "",
                         "build_dir": "build",
                         "build_type": "Debug",
                         "target": "",
                         "configure_args": "",
                         "build_args": "",
                         "run_args": "",
+                        "build_command": "",
+                        "run_command": "",
                         "parallel_jobs": 0,
                         "env": [],
                     },
                     {
                         "name": "Release",
+                        "mode": "cmake",
+                        "working_dir": "",
                         "build_dir": "build-release",
                         "build_type": "Release",
                         "target": "",
                         "configure_args": "",
                         "build_args": "",
                         "run_args": "",
+                        "build_command": "",
+                        "run_command": "",
                         "parallel_jobs": 0,
                         "env": [],
                     },

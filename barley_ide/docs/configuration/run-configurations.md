@@ -1,6 +1,6 @@
 # Run Configurations
 
-Barley supports named run/build configurations for Python, Rust/Cargo, and CMake.
+Barley supports named run/build configurations for Python, Rust/Cargo, and C/C++.
 
 Rust debug note:
 
@@ -56,7 +56,7 @@ Debug behavior:
 - named Cargo targets can be launched from the debug menu using the same stored configuration data
 - custom Cargo commands are run-only; they are not valid Rust debug targets
 
-## CMake build configurations
+## C/C++ build configurations
 
 Stored at:
 
@@ -65,8 +65,11 @@ Stored at:
 
 Common fields:
 
-- `name`, `build_dir`, `build_type`, `target`
-- `configure_args`, `build_args`, `run_args`, `parallel_jobs`, `env`
+- `name`, `mode`, `working_dir`, `env`
+- CMake mode: `build_dir`, `build_type`, `target`, `configure_args`, `build_args`, `run_args`, `parallel_jobs`
+- Custom Command mode: `build_command`, `run_command`
+
+Custom Command mode is intended for direct toolchain commands such as `nvcc`, `make`, or shell scripts.
 
 ## Fallback behavior
 

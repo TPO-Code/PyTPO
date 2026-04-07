@@ -25,7 +25,7 @@ except Exception:
         return True
 
 _IDENTIFIER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_CPP_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl"}
+_CPP_HEADER_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl", ".cuh"}
 _QSST_TOKEN_REF_RE = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
 _QSST_TABLE_RE = re.compile(r"^\s*\[([A-Za-z0-9_.-]+)\]\s*$")
 _QSST_ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([A-Za-z0-9_.-]+)\]\]\s*$")
@@ -854,7 +854,7 @@ class LanguageIntelligenceController:
         language = str(self._editor_language_id(ed) or "").strip().lower()
         file_path = str(getattr(ed, "file_path", "") or "").strip().lower()
         suffix = os.path.splitext(file_path)[1]
-        if language == "c" and suffix in {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx"}:
+        if language == "c" and suffix in {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".cu", ".cuh"}:
             return "cpp"
         return language
 

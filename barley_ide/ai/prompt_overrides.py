@@ -42,6 +42,8 @@ def infer_language_for_path(file_path: str) -> str:
         ".hpp": "cpp",
         ".cc": "cpp",
         ".cxx": "cpp",
+        ".cu": "cpp",
+        ".cuh": "cpp",
         ".rs": "rust",
         ".md": "markdown",
         ".xml": "xml",

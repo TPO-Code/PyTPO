@@ -26,7 +26,7 @@ def build_document_outline(
 
     if lang == "python" or suffix in {".py", ".pyw", ".pyi"}:
         return _build_python_outline(source_text)
-    if lang in {"c", "cpp"} or suffix in {".c", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".hh", ".hxx"}:
+    if lang in {"c", "cpp"} or suffix in {".c", ".h", ".hpp", ".cpp", ".cc", ".cxx", ".hh", ".hxx", ".cu", ".cuh"}:
         return _build_cpp_outline(source_text)
     return [], ""
 

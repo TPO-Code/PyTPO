@@ -133,7 +133,7 @@ _STD_C_HEADER_NAMES: set[str] = {
     "wctype.h",
 }
 
-_CPP_FILE_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl", ".c", ".cc", ".cpp", ".cxx"}
+_CPP_FILE_SUFFIXES = {".h", ".hpp", ".hh", ".hxx", ".ipp", ".tpp", ".inl", ".c", ".cc", ".cpp", ".cxx", ".cu", ".cuh"}
 _SKIP_SCAN_DIRS = {".git", ".hg", ".svn", ".tide", ".venv", "node_modules", "__pycache__"}
 _MANAGED_BEGIN = "# >>> PYTPO clangd include repair >>>"
 _MANAGED_END = "# <<< PYTPO clangd include repair <<<"
@@ -459,6 +459,7 @@ def _pick_probe_file(project_root: str, *, preferred_path: str) -> str:
             return cpath
 
     priority: dict[str, int] = {
+        ".cuh": 0,
         ".hpp": 0,
         ".hxx": 1,
         ".hh": 2,
@@ -466,7 +467,8 @@ def _pick_probe_file(project_root: str, *, preferred_path: str) -> str:
         ".cpp": 4,
         ".cc": 5,
         ".cxx": 6,
-        ".c": 7,
+        ".cu": 7,
+        ".c": 8,
     }
     best_path = ""
     best_rank = 999

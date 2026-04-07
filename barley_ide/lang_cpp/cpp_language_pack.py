@@ -40,7 +40,7 @@ _CPP_KIND_BY_ID = {
     25: "type",
 }
 
-CPP_FILE_EXTENSIONS = (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx")
+CPP_FILE_EXTENSIONS = (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx", ".cu", ".cuh")
 CPP_LANGUAGE_IDS = ("c", "cpp")
 
 

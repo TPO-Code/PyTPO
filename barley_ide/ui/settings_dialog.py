@@ -972,16 +972,16 @@ def create_default_settings_schema(theme_options: list[str] | None = None) -> Se
                 subcategory="Build",
                 title="C/C++",
                 scope="project",
-                description="Named CMake build/run presets for this project.",
-                keywords=["build", "cmake", "preset", "configuration", "project"],
+                description="Named C/C++ build/run presets for CMake projects or custom compiler commands.",
+                keywords=["build", "cmake", "custom command", "nvcc", "preset", "configuration", "project"],
                 sections=[
                     SchemaSection(
-                        title="CMake Build Configurations",
+                        title="C/C++ Build Configurations",
                         fields=[
                             SchemaField(
                                 id="project-build-configs-editor",
                                 key="build.cmake",
-                                label="CMake Build Configurations",
+                                label="C/C++ Build Configurations",
                                 type="build_configs_editor",
                                 scope="project",
                             )

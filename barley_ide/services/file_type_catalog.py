@@ -71,7 +71,7 @@ def desktop_association_types() -> tuple[DesktopAssociationType, ...]:
         DesktopAssociationType(
             "cpp",
             "C++",
-            (".cc", ".cpp", ".cxx"),
+            (".cc", ".cpp", ".cxx", ".cu"),
             ("text/x-c++src",),
             "C++ source files.",
         ),
@@ -85,7 +85,7 @@ def desktop_association_types() -> tuple[DesktopAssociationType, ...]:
         DesktopAssociationType(
             "hpp",
             "C++ Header",
-            (".hh", ".hpp", ".hxx"),
+            (".hh", ".hpp", ".hxx", ".cuh"),
             ("text/x-c++hdr",),
             "C++ header files.",
         ),

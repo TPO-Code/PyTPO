@@ -72,7 +72,7 @@ class CodeEditor(BaseCodeEditor):
         raw_language = str(self.language_id() or "").strip().lower()
         file_suffix = os.path.splitext(str(self.file_path or "").strip().lower())[1]
         effective_language = raw_language
-        if raw_language == "c" and file_suffix in {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx"}:
+        if raw_language == "c" and file_suffix in {".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".cu", ".cuh"}:
             effective_language = "cpp"
 
         act_rename = None

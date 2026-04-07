@@ -105,11 +105,24 @@ class BuildConfigsSettingsPage(QWidget):
         right_layout.setContentsMargins(8, 10, 8, 8)
         right_layout.setSpacing(8)
 
+        helper = QLabel(
+            "Use CMake mode for projects with a CMakeLists.txt. "
+            "Use Custom Command for nvcc, make, or other direct compiler commands.",
+            self,
+        )
+        helper.setWordWrap(True)
+        right_layout.addWidget(helper)
+
         form = QFormLayout()
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(8)
 
         self.name_edit = QLineEdit(self)
+        self.mode_combo = QComboBox(self)
+        self.mode_combo.addItem("CMake", "cmake")
+        self.mode_combo.addItem("Custom Command", "custom")
+        self.working_dir_edit = QLineEdit(self)
+        self.working_dir_edit.setPlaceholderText("Project root when empty")
         self.build_dir_edit = QLineEdit(self)
         self.build_type_edit = QLineEdit(self)
         self.target_edit = QLineEdit(self)
@@ -118,23 +131,35 @@ class BuildConfigsSettingsPage(QWidget):
         self.configure_args_edit = QLineEdit(self)
         self.build_args_edit = QLineEdit(self)
         self.run_args_edit = QLineEdit(self)
+        self.build_command_edit = QTextEdit(self)
+        self.build_command_edit.setPlaceholderText("nvcc -x cu main_nvidia.cpp -o mandel_nvidia -lSDL2 -lGLEW -lGL")
+        self.build_command_edit.setMinimumHeight(78)
+        self.run_command_edit = QTextEdit(self)
+        self.run_command_edit.setPlaceholderText("./mandel_nvidia")
+        self.run_command_edit.setMinimumHeight(62)
         self.env_edit = QTextEdit(self)
         self.env_edit.setPlaceholderText("One KEY=VALUE per line")
         self.env_edit.setMinimumHeight(110)
 
         form.addRow("Name", self.name_edit)
+        form.addRow("Mode", self.mode_combo)
+        form.addRow("Working Directory", self.working_dir_edit)
         form.addRow("Build Directory", self.build_dir_edit)
         form.addRow("Build Type", self.build_type_edit)
         form.addRow("Target", self.target_edit)
         form.addRow("Parallel Jobs", self.parallel_spin)
         form.addRow("Configure Args", self.configure_args_edit)
         form.addRow("Build Args", self.build_args_edit)
-        form.addRow("Program Args", self.run_args_edit)
+        form.addRow("CMake Program Args", self.run_args_edit)
+        form.addRow("Build Command", self.build_command_edit)
+        form.addRow("Run Command", self.run_command_edit)
         form.addRow("Environment", self.env_edit)
         right_layout.addLayout(form)
         right_layout.addStretch(1)
 
         self.name_edit.textChanged.connect(self._on_editor_changed)
+        self.mode_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.working_dir_edit.textChanged.connect(self._on_editor_changed)
         self.build_dir_edit.textChanged.connect(self._on_editor_changed)
         self.build_type_edit.textChanged.connect(self._on_editor_changed)
         self.target_edit.textChanged.connect(self._on_editor_changed)
@@ -142,6 +167,8 @@ class BuildConfigsSettingsPage(QWidget):
         self.configure_args_edit.textChanged.connect(self._on_editor_changed)
         self.build_args_edit.textChanged.connect(self._on_editor_changed)
         self.run_args_edit.textChanged.connect(self._on_editor_changed)
+        self.build_command_edit.textChanged.connect(self._on_editor_changed)
+        self.run_command_edit.textChanged.connect(self._on_editor_changed)
         self.env_edit.textChanged.connect(self._on_editor_changed)
 
         body.addWidget(right_group, 1)
@@ -186,12 +213,18 @@ class BuildConfigsSettingsPage(QWidget):
     def _normalize_config(raw: Any, index: int) -> dict[str, Any]:
         item = raw if isinstance(raw, dict) else {}
         name = str(item.get("name") or "").strip() or f"Config {index + 1}"
+        mode = str(item.get("mode") or "cmake").strip().lower()
+        if mode not in {"cmake", "custom"}:
+            mode = "cmake"
         build_dir = str(item.get("build_dir") or "build").strip() or "build"
         build_type = str(item.get("build_type") or "Debug").strip() or "Debug"
         target = str(item.get("target") or "").strip()
         configure_args = str(item.get("configure_args") or "").strip()
         build_args = str(item.get("build_args") or "").strip()
         run_args = str(item.get("run_args") or "").strip()
+        working_dir = str(item.get("working_dir") or "").strip()
+        build_command = str(item.get("build_command") or "").strip()
+        run_command = str(item.get("run_command") or "").strip()
         try:
             parallel_jobs = max(0, min(128, int(item.get("parallel_jobs", 0))))
         except Exception:
@@ -208,12 +241,16 @@ class BuildConfigsSettingsPage(QWidget):
             env = [str(entry).strip() for entry in env_raw if str(entry).strip()]
         return {
             "name": name,
+            "mode": mode,
+            "working_dir": working_dir,
             "build_dir": build_dir,
             "build_type": build_type,
             "target": target,
             "configure_args": configure_args,
             "build_args": build_args,
             "run_args": run_args,
+            "build_command": build_command,
+            "run_command": run_command,
             "parallel_jobs": parallel_jobs,
             "env": env,
         }
@@ -285,12 +322,16 @@ class BuildConfigsSettingsPage(QWidget):
         env_lines = [line.strip() for line in str(self.env_edit.toPlainText() or "").splitlines() if line.strip()]
         return {
             "name": name,
+            "mode": str(self.mode_combo.currentData() or "cmake").strip() or "cmake",
+            "working_dir": str(self.working_dir_edit.text() or "").strip(),
             "build_dir": str(self.build_dir_edit.text() or "").strip() or "build",
             "build_type": str(self.build_type_edit.text() or "").strip() or "Debug",
             "target": str(self.target_edit.text() or "").strip(),
             "configure_args": str(self.configure_args_edit.text() or "").strip(),
             "build_args": str(self.build_args_edit.text() or "").strip(),
             "run_args": str(self.run_args_edit.text() or "").strip(),
+            "build_command": str(self.build_command_edit.toPlainText() or "").strip(),
+            "run_command": str(self.run_command_edit.toPlainText() or "").strip(),
             "parallel_jobs": int(self.parallel_spin.value()),
             "env": env_lines,
         }
@@ -302,12 +343,16 @@ class BuildConfigsSettingsPage(QWidget):
             has_item = row >= 0
             for widget in (
                 self.name_edit,
+                self.mode_combo,
+                self.working_dir_edit,
                 self.build_dir_edit,
                 self.build_type_edit,
                 self.target_edit,
                 self.configure_args_edit,
                 self.build_args_edit,
                 self.run_args_edit,
+                self.build_command_edit,
+                self.run_command_edit,
                 self.env_edit,
             ):
                 widget.setEnabled(has_item)
@@ -317,31 +362,41 @@ class BuildConfigsSettingsPage(QWidget):
             if not has_item:
                 self._editor_row = -1
                 self.name_edit.setText("")
+                self.mode_combo.setCurrentIndex(0)
+                self.working_dir_edit.setText("")
                 self.build_dir_edit.setText("")
                 self.build_type_edit.setText("")
                 self.target_edit.setText("")
                 self.configure_args_edit.setText("")
                 self.build_args_edit.setText("")
                 self.run_args_edit.setText("")
+                self.build_command_edit.setPlainText("")
+                self.run_command_edit.setPlainText("")
                 self.parallel_spin.setValue(0)
                 self.env_edit.setPlainText("")
+                self._update_mode_ui()
                 return
 
             cfg = self._working_configs[row]
             self._editor_row = row
             self._last_selected_name = str(cfg.get("name") or "").strip()
             self.name_edit.setText(str(cfg.get("name") or ""))
+            self.mode_combo.setCurrentIndex(1 if str(cfg.get("mode") or "").strip().lower() == "custom" else 0)
+            self.working_dir_edit.setText(str(cfg.get("working_dir") or ""))
             self.build_dir_edit.setText(str(cfg.get("build_dir") or ""))
             self.build_type_edit.setText(str(cfg.get("build_type") or ""))
             self.target_edit.setText(str(cfg.get("target") or ""))
             self.configure_args_edit.setText(str(cfg.get("configure_args") or ""))
             self.build_args_edit.setText(str(cfg.get("build_args") or ""))
             self.run_args_edit.setText(str(cfg.get("run_args") or ""))
+            self.build_command_edit.setPlainText(str(cfg.get("build_command") or ""))
+            self.run_command_edit.setPlainText(str(cfg.get("run_command") or ""))
             self.parallel_spin.setValue(max(0, min(128, int(cfg.get("parallel_jobs", 0)))))
             env_items = cfg.get("env", [])
             if not isinstance(env_items, list):
                 env_items = []
             self.env_edit.setPlainText("\n".join(str(item).strip() for item in env_items if str(item).strip()))
+            self._update_mode_ui()
         finally:
             self._loading = False
 
@@ -362,6 +417,25 @@ class BuildConfigsSettingsPage(QWidget):
         self._refresh_ui()
         self._mark_dirty()
 
+    def _update_mode_ui(self) -> None:
+        has_item = self._editor_row >= 0
+        is_custom = str(self.mode_combo.currentData() or "cmake").strip().lower() == "custom"
+        for widget in (
+            self.build_dir_edit,
+            self.build_type_edit,
+            self.target_edit,
+            self.configure_args_edit,
+            self.build_args_edit,
+            self.run_args_edit,
+        ):
+            widget.setEnabled(has_item and not is_custom)
+        self.parallel_spin.setEnabled(has_item and not is_custom)
+        for widget in (
+            self.build_command_edit,
+            self.run_command_edit,
+        ):
+            widget.setEnabled(has_item and is_custom)
+
     def _on_active_changed(self, text: str) -> None:
         if self._loading:
             return
@@ -381,12 +455,16 @@ class BuildConfigsSettingsPage(QWidget):
             self._normalize_config(
                 {
                     "name": name,
+                    "mode": "cmake",
+                    "working_dir": "",
                     "build_dir": "build",
                     "build_type": "Debug",
                     "target": "",
                     "configure_args": "",
                     "build_args": "",
                     "run_args": "",
+                    "build_command": "",
+                    "run_command": "",
                     "parallel_jobs": 0,
                     "env": [],
                 },
@@ -447,9 +525,9 @@ class BuildConfigsSettingsPage(QWidget):
 
     def _refresh_status(self) -> None:
         if self.has_pending_settings_changes():
-            self.status_label.setText("Unsaved build configuration changes.")
+            self.status_label.setText("Unsaved C/C++ build configuration changes.")
         else:
-            self.status_label.setText("No build configuration changes.")
+            self.status_label.setText("No C/C++ build configuration changes.")
 
     def has_pending_settings_changes(self) -> bool:
         current_configs = self._normalized_for_compare(self._working_configs)
@@ -476,6 +554,9 @@ class BuildConfigsSettingsPage(QWidget):
             name = str(cfg.get("name") or "").strip()
             if not name:
                 return [f"Configuration #{idx + 1}: name is required."]
+            mode = str(cfg.get("mode") or "cmake").strip().lower()
+            if mode == "custom" and not str(cfg.get("build_command") or "").strip():
+                return [f"Configuration '{name}' requires a build command in Custom Command mode."]
             key = name.lower()
             if key in names_seen:
                 return [f"Duplicate configuration name: {name}"]

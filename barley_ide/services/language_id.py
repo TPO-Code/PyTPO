@@ -24,6 +24,8 @@ _EXTENSION_LANGUAGE_IDS: dict[str, str] = {
     ".hxx": "cpp",
     ".cc": "cpp",
     ".hh": "cpp",
+    ".cu": "cpp",
+    ".cuh": "cpp",
     ".js": "javascript",
     ".mjs": "javascript",
     ".cjs": "javascript",

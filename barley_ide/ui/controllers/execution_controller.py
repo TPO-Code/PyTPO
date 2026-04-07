@@ -14,8 +14,8 @@ from barley_ide.lang_rust.cargo_discovery import discover_workspace_root_for_fil
 from barley_ide.ui.debugger.lldb_dap_backend import LldbDapDebuggerBackend
 from TPOPyside.widgets.terminal_widget import TerminalWidget
 
-_CPP_RUNNABLE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx"}
-_CPP_BUILDABLE_SUFFIXES = _CPP_RUNNABLE_SUFFIXES | {".h", ".hpp", ".hh", ".hxx"}
+_CPP_RUNNABLE_SUFFIXES = {".c", ".cpp", ".cc", ".cxx", ".cu"}
+_CPP_BUILDABLE_SUFFIXES = _CPP_RUNNABLE_SUFFIXES | {".h", ".hpp", ".hh", ".hxx", ".cuh"}
 _RUST_RUNNABLE_SUFFIXES = {".rs"}
 _PYTHON_RUNNABLE_SUFFIXES = {".py"}
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -192,7 +192,7 @@ class ExecutionController:
             return
 
         if self._is_cpp_runnable_file(file_path):
-            if self._run_cpp_cmake_pipeline(file_path, status_prefix="Running", run_executable=True):
+            if self._run_cpp_build_pipeline(file_path, status_prefix="Running", run_executable=True):
                 self._remember_run_current_file_target()
                 return
             return
@@ -245,7 +245,7 @@ class ExecutionController:
         if self._is_rust_runnable_file(file_path):
             return bool(self._resolve_rust_workspace_root(file_path))
         if self._is_cpp_runnable_file(file_path):
-            return bool(self._find_cmake_root_for_file(file_path))
+            return self._can_run_cpp_file(file_path)
         return False
 
     def can_run_python_current_file(self) -> bool:
@@ -1064,7 +1064,7 @@ class ExecutionController:
             self.ide.statusBar().showMessage("Build is currently available for C/C++ files only.", 2200)
             return
 
-        self._run_cpp_cmake_pipeline(file_path, status_prefix="Building", run_executable=False)
+        self._run_cpp_build_pipeline(file_path, status_prefix="Building", run_executable=False)
 
     def build_and_run_current_file(self):
         ed = self.current_editor()
@@ -1086,7 +1086,7 @@ class ExecutionController:
             self.ide.statusBar().showMessage("Build + Run is currently available for C/C++ source files only.", 2200)
             return
 
-        self._run_cpp_cmake_pipeline(file_path, status_prefix="Building + running", run_executable=True)
+        self._run_cpp_build_pipeline(file_path, status_prefix="Building + running", run_executable=True)
 
     def rerun_current_file(self):
         active_python = self.active_python_run_config_name()
@@ -1268,13 +1268,17 @@ class ExecutionController:
         file_path = self.current_editor_file_path()
         if not file_path or not self._is_cpp_buildable_file(file_path):
             return False
+        cfg = self._cmake_run_cfg()
+        mode = str(cfg.get("mode") or "cmake").strip().lower()
+        if mode == "custom":
+            return bool(str(cfg.get("build_command") or "").strip())
         return bool(self._find_cmake_root_for_file(file_path))
 
     def can_build_and_run_current_file(self) -> bool:
         file_path = self.current_editor_file_path()
         if not file_path or not self._is_cpp_runnable_file(file_path):
             return False
-        return bool(self._find_cmake_root_for_file(file_path))
+        return self._can_run_cpp_file(file_path)
 
     def _find_cmake_root_for_file(self, file_path: str) -> str:
         cpath = self._canonical_path(file_path)
@@ -1305,16 +1309,22 @@ class ExecutionController:
         legacy_cmake_cfg = run_cfg.get("cmake", {}) if isinstance(run_cfg, dict) else {}
         base = project_build if project_build else (legacy_cmake_cfg if isinstance(legacy_cmake_cfg, dict) else {})
         resolved = {
+            "mode": str(base.get("mode") or "cmake").strip().lower() or "cmake",
+            "working_dir": str(base.get("working_dir") or "").strip(),
             "build_dir": str(base.get("build_dir") or "build").strip() or "build",
             "build_type": str(base.get("build_type") or "Debug").strip() or "Debug",
             "target": str(base.get("target") or "").strip(),
             "configure_args": str(base.get("configure_args") or "").strip(),
             "build_args": str(base.get("build_args") or "").strip(),
             "run_args": str(base.get("run_args") or "").strip(),
+            "build_command": str(base.get("build_command") or "").strip(),
+            "run_command": str(base.get("run_command") or "").strip(),
             "parallel_jobs": 0,
             "env": self._normalize_env_assignments(base.get("env")),
             "_active_config": "",
         }
+        if str(resolved.get("mode") or "").strip().lower() not in {"cmake", "custom"}:
+            resolved["mode"] = "cmake"
         try:
             resolved["parallel_jobs"] = max(0, int(base.get("parallel_jobs", 0)))
         except Exception:
@@ -1332,18 +1342,31 @@ class ExecutionController:
             selected = presets[0]
         if isinstance(selected, dict):
             resolved["_active_config"] = str(selected.get("name") or "").strip()
+            resolved["mode"] = str(selected.get("mode") or resolved["mode"]).strip().lower() or "cmake"
+            if str(resolved.get("mode") or "").strip().lower() not in {"cmake", "custom"}:
+                resolved["mode"] = "cmake"
+            resolved["working_dir"] = str(selected.get("working_dir") or "").strip()
             resolved["build_dir"] = str(selected.get("build_dir") or resolved["build_dir"]).strip() or "build"
             resolved["build_type"] = str(selected.get("build_type") or resolved["build_type"]).strip() or "Debug"
             resolved["target"] = str(selected.get("target") or "").strip()
             resolved["configure_args"] = str(selected.get("configure_args") or "").strip()
             resolved["build_args"] = str(selected.get("build_args") or "").strip()
             resolved["run_args"] = str(selected.get("run_args") or "").strip()
+            resolved["build_command"] = str(selected.get("build_command") or "").strip()
+            resolved["run_command"] = str(selected.get("run_command") or "").strip()
             resolved["env"] = self._normalize_env_assignments(selected.get("env"))
             try:
                 resolved["parallel_jobs"] = max(0, int(selected.get("parallel_jobs", 0)))
             except Exception:
                 resolved["parallel_jobs"] = 0
         return resolved
+
+    def _can_run_cpp_file(self, file_path: str) -> bool:
+        cfg = self._cmake_run_cfg()
+        mode = str(cfg.get("mode") or "cmake").strip().lower()
+        if mode == "custom":
+            return bool(str(cfg.get("build_command") or "").strip() and str(cfg.get("run_command") or "").strip())
+        return bool(self._find_cmake_root_for_file(file_path))
 
     @staticmethod
     def _normalize_env_assignments(raw_env: object) -> list[tuple[str, str]]:
@@ -1782,14 +1805,20 @@ class ExecutionController:
             seen.add(name.lower())
             norm = {
                 "name": name,
+                "mode": str(cfg.get("mode") or "cmake").strip().lower() or "cmake",
+                "working_dir": str(cfg.get("working_dir") or "").strip(),
                 "build_dir": str(cfg.get("build_dir") or "build").strip() or "build",
                 "build_type": str(cfg.get("build_type") or "Debug").strip() or "Debug",
                 "target": str(cfg.get("target") or "").strip(),
                 "configure_args": str(cfg.get("configure_args") or "").strip(),
                 "build_args": str(cfg.get("build_args") or "").strip(),
                 "run_args": str(cfg.get("run_args") or "").strip(),
+                "build_command": str(cfg.get("build_command") or "").strip(),
+                "run_command": str(cfg.get("run_command") or "").strip(),
                 "env": [f"{k}={v}" for k, v in self._normalize_env_assignments(cfg.get("env"))],
             }
+            if str(norm.get("mode") or "").strip().lower() not in {"cmake", "custom"}:
+                norm["mode"] = "cmake"
             try:
                 norm["parallel_jobs"] = max(0, int(cfg.get("parallel_jobs", 0)))
             except Exception:
@@ -1948,7 +1977,7 @@ class ExecutionController:
             [
                 "if [ -z \"$run_bin\" ] || [ ! -x \"$run_bin\" ]; then",
                 "  echo 'Error: no runnable executable found after build.'",
-                "  echo 'Tip: set a CMake target in Settings -> IDE -> Run -> C/C++ (CMake).'",
+                "  echo 'Tip: set a CMake target in Project Settings -> Execution -> Build -> C/C++.'",
                 "  status=1",
                 "  printf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"",
                 "  exit",
@@ -1968,6 +1997,136 @@ class ExecutionController:
             ]
         )
         return "\n".join(lines)
+
+    def _resolve_cpp_working_directory(self, *, working_dir_spec: str, file_path: str, default_dir: str = "") -> str:
+        spec = str(working_dir_spec or "").strip()
+        if spec:
+            resolved = self._canonical_path(spec) if os.path.isabs(spec) else self._canonical_path(os.path.join(self.project_root, spec))
+            if os.path.isdir(resolved):
+                return resolved
+            return ""
+        base = str(default_dir or "").strip()
+        if base and os.path.isdir(base):
+            return base
+        return self.project_root
+
+    def _build_custom_cpp_run_command(
+        self,
+        *,
+        run_in: str,
+        build_command: str,
+        run_command: str,
+        env_assignments: list[tuple[str, str]],
+        run_executable: bool,
+    ) -> str:
+        q = shlex.quote
+        lines = [
+            f"cd {q(run_in)}",
+            "clear",
+        ]
+        for key, value in env_assignments:
+            lines.append(f"export {key}={q(str(value or ''))}")
+        lines.extend(
+            [
+                build_command,
+                "status=$?",
+                "if [ $status -ne 0 ]; then",
+                "  printf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"",
+                "  exit",
+                "fi",
+            ]
+        )
+        if not run_executable:
+            lines.extend(
+                [
+                    "echo 'Build completed successfully.'",
+                    "status=0",
+                    "printf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"",
+                ]
+            )
+            return "\n".join(lines)
+        lines.extend(
+            [
+                f"echo {q(f'Running: {run_command}')}",
+                run_command,
+                "status=$?",
+                "printf '\\n__PYTPO_RUN_EXIT__:%s\\n' \"$status\"",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _run_cpp_build_pipeline(self, file_path: str, *, status_prefix: str, run_executable: bool) -> bool:
+        cfg = self._cmake_run_cfg()
+        mode = str(cfg.get("mode") or "cmake").strip().lower()
+        if mode == "custom":
+            return self._run_cpp_custom_pipeline(
+                file_path,
+                status_prefix=status_prefix,
+                run_executable=run_executable,
+                cfg=cfg,
+            )
+        return self._run_cpp_cmake_pipeline(file_path, status_prefix=status_prefix, run_executable=run_executable)
+
+    def _run_cpp_custom_pipeline(self, file_path: str, *, status_prefix: str, run_executable: bool, cfg: dict) -> bool:
+        if self.console_run_manager is None:
+            return False
+
+        build_command = str(cfg.get("build_command") or "").strip()
+        if not build_command:
+            self.ide.statusBar().showMessage(
+                "Active C/C++ build configuration is in Custom Command mode but has no build command.",
+                3600,
+            )
+            return False
+
+        run_command = str(cfg.get("run_command") or "").strip()
+        if run_executable and not run_command:
+            self.ide.statusBar().showMessage(
+                "Set a Run Command in the active C/C++ build configuration to use Build + Run.",
+                3600,
+            )
+            return False
+
+        run_in = self._resolve_cpp_working_directory(
+            working_dir_spec=str(cfg.get("working_dir") or "").strip(),
+            file_path=file_path,
+        )
+        if not run_in or not os.path.isdir(run_in):
+            self.ide.statusBar().showMessage(
+                "Active C/C++ build configuration has an invalid working directory.",
+                3600,
+            )
+            return False
+
+        command_block = self._build_custom_cpp_run_command(
+            run_in=run_in,
+            build_command=build_command,
+            run_command=run_command,
+            env_assignments=list(cfg.get("env") or []),
+            run_executable=run_executable,
+        )
+        self.console_run_manager.run_custom_command(
+            file_key=file_path,
+            label=os.path.basename(file_path) or file_path,
+            run_in=run_in,
+            command_block=command_block,
+        )
+        self.dock_terminal.show()
+        if self._run_config().get("focus_output_on_run", True):
+            self.dock_terminal.raise_()
+        mode_label = "custom build + run" if run_executable else "custom build"
+        active_cfg = str(cfg.get("_active_config") or "").strip()
+        if active_cfg:
+            self.ide.statusBar().showMessage(
+                f"{status_prefix} {mode_label} [{active_cfg}] for {os.path.basename(file_path)}",
+                2200,
+            )
+        else:
+            self.ide.statusBar().showMessage(
+                f"{status_prefix} {mode_label} for {os.path.basename(file_path)}",
+                2000,
+            )
+        return True
 
     def _run_cpp_cmake_pipeline(self, file_path: str, *, status_prefix: str, run_executable: bool) -> bool:
         if self.console_run_manager is None:
