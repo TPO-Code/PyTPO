@@ -6,9 +6,15 @@ from typing import Any
 
 from PySide6.QtWidgets import QApplication
 
-from pytpo.services.asset_paths import preferred_shared_asset_dir, shared_asset_search_dirs
-from pytpo.services.theme_compiler import STRUCTURED_THEME_EXTENSION, ThemeCompileError, compile_qsst_file_with_tokens
-from pytpo.ui.theme_runtime import (
+from TPOPyside.shared_assets import (
+    load_theme_stylesheet,
+    resolve_shared_theme_path,
+    shared_theme_candidates,
+    shared_theme_dir,
+    shared_theme_names,
+)
+from TPOPyside.theme_compiler import ThemeCompileError
+from TPOPyside.theme_runtime import (
     DEFAULT_EDITOR_OVERVIEW_GAP,
     DEFAULT_EDITOR_SEARCH_TOP_MARGIN_MIN,
     DEFAULT_SETTINGS_COLOR_SWATCH_HEIGHT,
@@ -35,10 +41,10 @@ class ThemeApplyResult:
 
 class TextEditorThemeManager:
     def themes_dir(self) -> Path:
-        return preferred_shared_asset_dir("themes")
+        return shared_theme_dir()
 
     def available_themes(self) -> list[str]:
-        return [name for name, _path in self._theme_candidates()]
+        return shared_theme_names(extensions=THEME_EXTENSIONS)
 
     def current_theme_name(self) -> str:
         value = str(editor_settings().value(THEME_KEY, DEFAULT_THEME_NAME) or "").strip()
@@ -81,40 +87,13 @@ class TextEditorThemeManager:
         return ThemeApplyResult(applied_name=resolved_name, error=None)
 
     def resolve_theme_path(self, theme_name: str) -> tuple[str, Path] | None:
-        selected = str(theme_name or "").strip().lower()
-        for name, path in self._theme_candidates():
-            if name.lower() == selected:
-                return name, path
-        return None
+        return resolve_shared_theme_path(theme_name, extensions=THEME_EXTENSIONS)
 
     def _theme_candidates(self) -> list[tuple[str, Path]]:
-        theme_dirs = shared_asset_search_dirs("themes")
-        if not theme_dirs:
-            return []
-
-        extension_priority = {ext: idx for idx, ext in enumerate(THEME_EXTENSIONS)}
-        chosen: dict[str, tuple[int, str, Path]] = {}
-        for theme_dir in theme_dirs:
-            for item in sorted(theme_dir.iterdir(), key=lambda path: path.name.lower()):
-                if not item.is_file():
-                    continue
-                suffix = item.suffix.lower()
-                if suffix not in extension_priority:
-                    continue
-                key = item.stem.lower()
-                priority = extension_priority[suffix]
-                current = chosen.get(key)
-                if current is not None and priority >= current[0]:
-                    continue
-                chosen[key] = (priority, item.stem, item)
-        candidates = sorted(chosen.values(), key=lambda entry: entry[1].lower())
-        return [(name, path) for _priority, name, path in candidates]
+        return shared_theme_candidates(extensions=THEME_EXTENSIONS)
 
     def _load_stylesheet(self, theme_path: Path) -> tuple[str, dict[str, Any] | None]:
-        if theme_path.suffix.lower() == STRUCTURED_THEME_EXTENSION:
-            compiled = compile_qsst_file_with_tokens(theme_path)
-            return compiled.stylesheet, compiled.resolved_tokens
-        return theme_path.read_text(encoding="utf-8"), None
+        return load_theme_stylesheet(theme_path)
 
     @staticmethod
     def _settings_color_swatch_size(tokens: dict[str, Any] | None) -> tuple[int, int]:

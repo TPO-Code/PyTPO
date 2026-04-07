@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pytpo.git.git_clone_service import parse_repo_url
+from barley_ide.git.git_clone_service import parse_repo_url
 
 
 class ParseRepoUrlTests(unittest.TestCase):

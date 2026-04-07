@@ -4,8 +4,8 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from pytpo.file_dialog_settings import configure_shared_file_dialog_defaults
-from pytpo.services.theme_compiler import compile_qsst_file
+from barley_ide.file_dialog_settings import configure_shared_file_dialog_defaults
+from TPOPyside.theme_compiler import compile_qsst_file
 from ui.main_window import MainWindow
 
 
@@ -28,7 +28,7 @@ def main(argv):
     app.setApplicationDisplayName("PyTPO Session Workbench")
     configure_shared_file_dialog_defaults()
 
-    icon_path = Path(__file__).resolve().parents[1] / "pytpo" / "icon.png"
+    icon_path = Path(__file__).resolve().parents[1] / "barley_ide" / "icon.png"
     if icon_path.is_file():
         icon = QIcon(str(icon_path))
         if not icon.isNull():

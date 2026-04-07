@@ -1,7 +1,7 @@
 [project]
-name = "pytpo"
+name = "barley_ide"
 version = "0.1.3"
-description = "A simple custom IDE."
+description = "Barley IDE."
 requires-python = ">=3.11"
 dependencies = [
     "pyside6",
@@ -20,44 +20,43 @@ dependencies = [
 ]
 
 [project.scripts]
-pytpo = "pytpo.app:main"
-pytpo-desktop-integration = "pytpo.desktop_entries:main"
-pytpo-terminal = "pytpo_terminal.app:main"
+barley-ide = "barley_ide.app:main"
+barley-ide-desktop-integration = "barley_ide.desktop_integration:main"
+stout = "stout.app:main"
+stout-terminal = "stout.app:main"
+stout-desktop-integration = "stout.desktop_integration:main"
 pytpo-text-editor = "pytpo_text_editor.app:main"
+pytpo-text-editor-desktop-integration = "pytpo_text_editor.desktop_integration:main"
 pytpo-dock = "pytpo_dock.app:main"
-pytpo-appgrid = "pytpo_appgrid.app:main"
-pytpo-topbar = "topbar.app:main"
+pytpo-dock-desktop-integration = "pytpo_dock.desktop_integration:main"
+grist = "grist.app:main"
+grist-desktop-integration = "grist.desktop_integration:main"
+brim = "brim.app:main"
 
 [tool.setuptools.package-data]
-pytpo = ["icon.png"]
-pytpo_terminal = ["icon.png"]
+TPOPyside = [
+    "assets/icons/*",
+    "assets/themes/*",
+]
+barley_ide = ["icon.png"]
+stout = ["icon.png"]
 pytpo_text_editor = ["icon.png"]
 pytpo_dock = ["icon.png"]
-pytpo_appgrid = ["icon.png"]
+grist = ["icon.png"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "pytpo*",
+    "barley_ide*",
     "TPOPyside*",
-    "pytpo_terminal*",
+    "stout*",
     "pytpo_text_editor*",
     "pytpo_dock*",
-    "pytpo_appgrid*",
+    "grist*",
     "tdock*",
-    "topbar*",
+    "brim*",
 ]
 exclude = ["tests*", "test_projects*"]
-
-[tool.setuptools.data-files]
-"share/pytpo/icons" = [
-    "icons/*.png",
-    "icons/*.svg",
-]
-"share/pytpo/themes" = [
-    "themes/*.qss",
-    "themes/*.qsst",
-]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

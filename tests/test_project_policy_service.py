@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from pytpo.services.project_policy_service import ProjectPolicyService
+from barley_ide.services.project_policy_service import ProjectPolicyService
 
 
 class ProjectPolicyServiceInterpreterTests(unittest.TestCase):

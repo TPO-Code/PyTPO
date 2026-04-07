@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pytpo.ui.controllers.theme_controller import ThemeController
+from barley_ide.ui.controllers.theme_controller import ThemeController
 
 
 class ThemeControllerTests(unittest.TestCase):

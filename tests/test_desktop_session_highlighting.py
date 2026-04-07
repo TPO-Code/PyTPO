@@ -1,4 +1,4 @@
-from pytpo.services.language_id import language_id_for_path
+from barley_ide.services.language_id import language_id_for_path
 from TPOPyside.widgets.code_editor.syntax_highlighters import (
     LANGUAGE_HIGHLIGHTER_MAP,
     SYNTAX_LANGUAGE_LABELS,

@@ -4,12 +4,27 @@
 
 set -euo pipefail
 
-PKG_NAME="pytpo"
+PKG_NAME="barley_ide"
+LEGACY_PKG_NAMES=("barley-ide" "pytpo")
 ROOT_DIR="$(pwd)"
 PIPX_PYTHON="$(uv python find --system '==3.11.*')"
 DBUS_SERVICES_DIR="${HOME}/.local/share/dbus-1/services"
+LOCAL_BIN_DIR="${HOME}/.local/bin"
 STATE_DIR="${HOME}/.local/state/pytpo"
-TOPBAR_BIN="${HOME}/.local/bin/pytpo-topbar"
+TOPBAR_BIN="${HOME}/.local/bin/brim"
+DESKTOP_INTEGRATION_CMD="barley-ide-desktop-integration"
+TEXT_EDITOR_DESKTOP_INTEGRATION_CMD="pytpo-text-editor-desktop-integration"
+DOCK_DESKTOP_INTEGRATION_CMD="pytpo-dock-desktop-integration"
+GRIST_DESKTOP_INTEGRATION_CMD="grist-desktop-integration"
+LEGACY_APPGRID_DESKTOP_INTEGRATION_CMD="pytpo-appgrid-desktop-integration"
+STOUT_DESKTOP_INTEGRATION_CMD="stout-desktop-integration"
+LEGACY_DESKTOP_INTEGRATION_CMD="pytpo-desktop-integration"
+LEGACY_BIN_NAMES=(
+    "pytpo-appgrid"
+    "pytpo-appgrid-desktop-integration"
+    "pytpo-terminal"
+    "pytpo-topbar"
+)
 
 APPINDICATOR_UUID="ubuntu-appindicators@ubuntu.com"
 APPINDICATOR_STATE_FILE="${STATE_DIR}/appindicator-was-enabled"
@@ -17,7 +32,7 @@ APPINDICATOR_STATE_FILE="${STATE_DIR}/appindicator-was-enabled"
 ACTION="install"
 TOPBAR_MODE="ask"
 
-# Core system dependencies for PyTPO and related desktop/dev integrations.
+# Core system dependencies for Barley and related desktop/dev integrations.
 # Add to this list when a fresh system install reveals a missing apt package.
 APT_DEPENDENCIES=(
     playerctl
@@ -44,15 +59,17 @@ OPTIONAL_COMMANDS=(
 usage() {
     cat <<'EOF'
 Usage:
-  ./install.sh [install|uninstall] [--with-topbar|--without-topbar] [--help]
+  ./install.sh [install|uninstall] [--with-brim|--without-brim] [--help]
 
 Actions:
-  install       Install/reinstall PyTPO and desktop integration (default)
-  uninstall     Remove PyTPO, desktop integration, and topbar D-Bus overrides
+  install       Install/reinstall Barley and desktop integration (default)
+  uninstall     Remove Barley, desktop integration, and Brim D-Bus overrides
 
 Options:
-  --with-topbar     Enable the PyTPO topbar notification/tray overrides
-  --without-topbar  Disable/remove the PyTPO topbar notification/tray overrides
+  --with-brim       Enable the Brim notification/tray overrides
+  --without-brim    Disable/remove the Brim notification/tray overrides
+  --with-topbar     Legacy alias for --with-brim
+  --without-topbar  Legacy alias for --without-brim
   --help            Show this help
 EOF
 }
@@ -64,6 +81,23 @@ ensure_state_dir() {
 
 have_command() {
     command -v "$1" >/dev/null 2>&1
+}
+
+cleanup_legacy_bin_links() {
+    echo "==> Removing stale legacy launchers from ${LOCAL_BIN_DIR} if present..."
+    local found=false
+    local legacy_bin
+    for legacy_bin in "${LEGACY_BIN_NAMES[@]}"; do
+        local legacy_path="${LOCAL_BIN_DIR}/${legacy_bin}"
+        if [[ -e "$legacy_path" || -L "$legacy_path" ]]; then
+            rm -f "$legacy_path"
+            echo "    Removed ${legacy_path}"
+            found=true
+        fi
+    done
+    if ! $found; then
+        echo "    No stale legacy launchers found."
+    fi
 }
 
 install_apt_dependencies() {
@@ -135,14 +169,14 @@ restore_conflicting_extension() {
 }
 
 remove_topbar_overrides() {
-    echo "==> Removing topbar D-Bus overrides if present..."
+    echo "==> Removing Brim D-Bus overrides if present..."
     rm -f "${DBUS_SERVICES_DIR}/org.gnome.Shell.Notifications.service"
     rm -f "${DBUS_SERVICES_DIR}/org.freedesktop.Notifications.service"
     rm -f "${DBUS_SERVICES_DIR}/org.freedesktop.StatusNotifierWatcher.service"
 }
 
 install_topbar_overrides() {
-    echo "==> Installing user D-Bus service overrides for topbar..."
+    echo "==> Installing user D-Bus service overrides for Brim..."
     mkdir -p "$DBUS_SERVICES_DIR"
 
     cat > "${DBUS_SERVICES_DIR}/org.gnome.Shell.Notifications.service" <<'EOF'
@@ -175,20 +209,56 @@ EOF
 
 desktop_uninstall() {
     echo "==> Removing desktop integration if present..."
-    if command -v pytpo-desktop-integration >/dev/null 2>&1; then
-        pytpo-desktop-integration uninstall || true
-    else
+    local found=false
+    if command -v "$DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$TEXT_EDITOR_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$TEXT_EDITOR_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$DOCK_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$DOCK_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$GRIST_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$GRIST_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$LEGACY_APPGRID_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$LEGACY_APPGRID_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$STOUT_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$STOUT_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if command -v "$LEGACY_DESKTOP_INTEGRATION_CMD" >/dev/null 2>&1; then
+        "$LEGACY_DESKTOP_INTEGRATION_CMD" uninstall || true
+        found=true
+    fi
+    if ! $found; then
         echo "    No existing desktop integration command found, skipping."
     fi
 }
 
 pipx_uninstall() {
-    echo "==> Removing pipx package if present..."
+    echo "==> Removing pipx packages if present..."
     if pipx list --short 2>/dev/null | grep -Fxq "$PKG_NAME"; then
         pipx uninstall "$PKG_NAME"
     else
-        echo "    No existing pipx package found, skipping."
+        echo "    No existing $PKG_NAME pipx package found, skipping."
     fi
+    local legacy_pkg
+    for legacy_pkg in "${LEGACY_PKG_NAMES[@]}"; do
+        if pipx list --short 2>/dev/null | grep -Fxq "$legacy_pkg"; then
+            pipx uninstall "$legacy_pkg"
+        else
+            echo "    No existing $legacy_pkg pipx package found, skipping."
+        fi
+    done
+    cleanup_legacy_bin_links
 }
 
 do_install() {
@@ -209,7 +279,11 @@ do_install() {
     pipx install --python "$PIPX_PYTHON" . --force
 
     echo "==> Installing desktop entries..."
-    pytpo-desktop-integration install
+    "$DESKTOP_INTEGRATION_CMD" install
+    "$TEXT_EDITOR_DESKTOP_INTEGRATION_CMD" install
+    "$DOCK_DESKTOP_INTEGRATION_CMD" install
+    "$GRIST_DESKTOP_INTEGRATION_CMD" install
+    "$STOUT_DESKTOP_INTEGRATION_CMD" install
 
     case "$TOPBAR_MODE" in
         with)
@@ -218,21 +292,21 @@ do_install() {
         without)
             remove_topbar_overrides
             restore_conflicting_extension
-            echo "    Topbar overrides disabled."
+            echo "    Brim overrides disabled."
             ;;
         ask)
             echo
-            read -r -p "==> Enable PyTPO topbar notification/tray override? [y/N] " ENABLE_TOPBAR
+            read -r -p "==> Enable the Brim notification/tray override? [y/N] " ENABLE_TOPBAR
             if [[ "$ENABLE_TOPBAR" =~ ^[Yy]$ ]]; then
                 install_topbar_overrides
             else
                 remove_topbar_overrides
                 restore_conflicting_extension
-                echo "    Topbar overrides disabled."
+                echo "    Brim overrides disabled."
             fi
             ;;
         *)
-            echo "Error: invalid topbar mode: $TOPBAR_MODE"
+            echo "Error: invalid Brim mode: $TOPBAR_MODE"
             exit 1
             ;;
     esac
@@ -273,10 +347,10 @@ for arg in "$@"; do
         uninstall)
             ACTION="uninstall"
             ;;
-        --with-topbar)
+        --with-brim|--with-topbar)
             TOPBAR_MODE="with"
             ;;
-        --without-topbar)
+        --without-brim|--without-topbar)
             TOPBAR_MODE="without"
             ;;
         --help|-h)

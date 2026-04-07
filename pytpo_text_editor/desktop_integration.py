@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
-from pytpo.services.file_type_catalog import DesktopAssociationType, desktop_association_types
+from barley_ide.services.file_type_catalog import DesktopAssociationType, desktop_association_types
 from .storage_paths import text_editor_settings
 
 APP_NAME = "PyTPO Text Editor"

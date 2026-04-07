@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject
 
-from pytpo.ui.controllers.workspace_controller import WorkspaceController
+from barley_ide.ui.controllers.workspace_controller import WorkspaceController
 
 
 class _StatusBar:

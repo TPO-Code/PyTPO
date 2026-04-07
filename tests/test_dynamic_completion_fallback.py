@@ -5,7 +5,7 @@ import unittest
 
 from PySide6.QtCore import QCoreApplication
 
-from pytpo.ui.completion_manager import (
+from barley_ide.ui.completion_manager import (
     CompletionManager,
     _detect_context,
     _resolve_attribute_callable_target,

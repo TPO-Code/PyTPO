@@ -28,7 +28,7 @@ from TPOPyside.widgets.custom_window import Window
 from TPOPyside.widgets.split_tab_workspace import SplitterTabWorkspace
 from backend import fs
 from backend import project as project_api
-from pytpo.file_dialog_settings import shared_file_dialog_settings
+from barley_ide.file_dialog_settings import shared_file_dialog_settings
 from ui.dialogs import DangerCodeDialog, MessageDialog, TextInputDialog
 
 DEFAULT_PROJECTS_ROOT = Path.home() / "session-workspaces"

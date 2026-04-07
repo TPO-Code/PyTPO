@@ -82,12 +82,12 @@ class WindowMatchingTests(unittest.TestCase):
             "script_name": "",
         }
         app_data = {
-            "path": "/apps/pytpo-terminal.desktop",
-            "desktop_id": "pytpo-terminal.desktop",
-            "Name": "PyTPO Terminal",
+            "path": "/apps/stout.desktop",
+            "desktop_id": "stout.desktop",
+            "Name": "Stout",
             "GenericName": "Terminal",
-            "Exec": "pytpo-terminal",
-            "Icon": "pytpo-terminal",
+            "Exec": "stout",
+            "Icon": "stout",
             "StartupWMClass": "",
         }
 
@@ -96,7 +96,7 @@ class WindowMatchingTests(unittest.TestCase):
 
     def test_generic_script_names_resolve_to_project_identity(self):
         self.assertEqual(
-            window_matching._path_identity("/home/aceofjohn/Work/Repos/PyTPO/pytpo/app.py"),
+            window_matching._path_identity("/home/aceofjohn/Work/Repos/PyTPO/barley_ide/app.py"),
             "pytpo",
         )
         self.assertEqual(
@@ -116,8 +116,8 @@ class WindowMatchingTests(unittest.TestCase):
             "script_name": "pytpo-text-editor",
         }
         base_app = {
-            "path": "/home/aceofjohn/.local/share/applications/pytpo.desktop",
-            "desktop_id": "pytpo.desktop",
+            "path": "/home/aceofjohn/.local/share/applications/barley_ide.desktop",
+            "desktop_id": "barley_ide.desktop",
             "Name": "PyTPO",
             "GenericName": "",
             "Exec": "pytpo",

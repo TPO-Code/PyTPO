@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pytpo_appgrid.desktop_apps import (
+from grist.desktop_apps import (
     DESKTOP_APP_DRAG_MIME_TYPE,
     build_app_registry,
     launch_app,

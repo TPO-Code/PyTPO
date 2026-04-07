@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from pytpo.ui.widgets.image_viewer import ImageViewerWidget
+from barley_ide.ui.widgets.image_viewer import ImageViewerWidget
 
 
 def _app() -> QApplication:

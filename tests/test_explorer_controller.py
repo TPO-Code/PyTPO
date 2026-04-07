@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pytpo.git.workspace_repository_index import WorkspaceRepositoryIndex
-from pytpo.ui.controllers.explorer_controller import ExplorerController
+from barley_ide.git.workspace_repository_index import WorkspaceRepositoryIndex
+from barley_ide.ui.controllers.explorer_controller import ExplorerController
 
 
 class _StatusBar:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPalette, QResizeEvent
+from PySide6.QtGui import QIcon, QMouseEvent, QPalette, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tpo_assets import icon as asset_icon
+
+from TPOPyside.icon_assets import asset_icon, color_hex
 
 EDGE_WIDTH = 8
 
@@ -33,13 +34,6 @@ _TITLEBAR_ICON_NAMES = {
     "min": "ui/minimize",
     "restore": "ui/restore",
 }
-
-
-def _color_hex(color: QColor) -> str:
-    if color.alpha() >= 255:
-        return color.name(QColor.NameFormat.HexRgb)
-    return f"#{color.red():02x}{color.green():02x}{color.blue():02x}{color.alpha():02x}"
-
 
 def start_system_move(widget: QWidget, global_pos: Optional[QPoint] = None) -> None:
     move = getattr(widget, "startSystemMove", None)
@@ -255,7 +249,7 @@ class CustomTitleBar(QFrame):
 
     def _control_button_foreground(self, btn: QToolButton) -> str:
         group = QPalette.ColorGroup.Active if btn.isEnabled() else QPalette.ColorGroup.Disabled
-        return _color_hex(btn.palette().color(group, QPalette.ColorRole.ButtonText))
+        return color_hex(btn.palette().color(group, QPalette.ColorRole.ButtonText))
 
     def _control_button_icon_name(self, btn: QToolButton) -> str:
         role = str(btn.property("role") or "").strip().lower()

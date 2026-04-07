@@ -6,62 +6,51 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pytpo.desktop_entries import (
-    DesktopAppSpec,
-    app_alias_map,
+from barley_ide.desktop_integration import (
+    APP_SPEC,
+    DesktopEntrySpec,
     desktop_file_path,
-    install_desktop_entries,
+    install_desktop_entry,
+    installation_status,
     main,
     installed_icon_path,
     render_desktop_file,
     resolve_icon_source,
-    uninstall_desktop_entries,
+    uninstall_desktop_entry,
 )
-from pytpo_dock.autostart import DockAutostartManager
 
 
 class DesktopEntriesTests(unittest.TestCase):
-    def test_render_desktop_file_uses_bare_command_and_icon_name(self) -> None:
-        terminal = app_alias_map()["terminal"]
+    def test_render_desktop_file_includes_barley_startup_wm_class(self) -> None:
+        rendered = render_desktop_file()
 
-        rendered = render_desktop_file(terminal)
-
-        self.assertIn("Exec=pytpo-terminal", rendered)
-        self.assertIn("TryExec=pytpo-terminal", rendered)
-        self.assertIn("Icon=pytpo-terminal", rendered)
-        self.assertIn("Categories=System;TerminalEmulator;Utility;", rendered)
-
-    def test_desktop_specs_use_package_local_icons(self) -> None:
-        self.assertEqual(app_alias_map()["pytpo"].icon_candidates, ("pytpo/icon.png",))
-        self.assertEqual(app_alias_map()["terminal"].icon_candidates, ("pytpo_terminal/icon.png",))
-        self.assertEqual(
-            app_alias_map()["text-editor"].icon_candidates,
-            ("pytpo_text_editor/icon.png",),
-        )
-        self.assertEqual(app_alias_map()["dock"].icon_candidates, ("pytpo_dock/icon.png",))
-        self.assertEqual(app_alias_map()["appgrid"].icon_candidates, ("pytpo_appgrid/icon.png",))
+        self.assertIn("Exec=barley-ide", rendered)
+        self.assertIn("Icon=barley-ide", rendered)
+        self.assertIn("StartupWMClass=barley-ide", rendered)
 
     def test_resolve_icon_source_prefers_package_icon(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            package_icon = tmp_path / "pytpo_terminal" / "icon.png"
+            package_icon = tmp_path / "barley_ide" / "icon.png"
             package_icon.parent.mkdir(parents=True, exist_ok=True)
             package_icon.write_bytes(b"package-icon")
 
-            spec = DesktopAppSpec(
-                key="terminal",
-                desktop_id="pytpo-terminal.desktop",
-                command="pytpo-terminal",
-                display_name="PyTPO Terminal",
-                comment="Standalone terminal",
-                categories=("Utility",),
-                icon_candidates=("pytpo_terminal/icon.png",),
+            spec = DesktopEntrySpec(
+                desktop_id="barley-ide.desktop",
+                command="barley-ide",
+                display_name="Barley",
+                comment="Standalone IDE",
+                categories=("Development",),
+                icon_candidates=("barley_ide/icon.png",),
             )
 
-            with mock.patch("pytpo.desktop_entries.repo_root", return_value=tmp_path):
-                self.assertEqual(resolve_icon_source(spec), package_icon)
+            with (
+                mock.patch("barley_ide.desktop_integration.APP_SPEC", spec),
+                mock.patch("barley_ide.desktop_integration.repo_root", return_value=tmp_path),
+            ):
+                self.assertEqual(resolve_icon_source(), package_icon)
 
-    def test_install_desktop_entries_writes_files(self) -> None:
+    def test_install_desktop_entry_writes_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             xdg_home = Path(tmpdir) / "xdg-data"
             commands: list[list[str]] = []
@@ -69,69 +58,56 @@ class DesktopEntriesTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg_home)}, clear=False),
                 mock.patch(
-                    "pytpo.desktop_entries._run_command",
+                    "barley_ide.desktop_integration._run_command",
                     side_effect=lambda args, warnings: commands.append(args),
                 ),
             ):
-                warnings = install_desktop_entries(["terminal"])
-                terminal = app_alias_map()["terminal"]
-                desktop_path = desktop_file_path(terminal)
-                icon_path = installed_icon_path(terminal)
+                warnings = install_desktop_entry()
+                desktop_path = desktop_file_path()
+                icon_path = installed_icon_path()
 
             self.assertEqual(warnings, [])
-            self.assertEqual(desktop_path, xdg_home / "applications" / "pytpo-terminal.desktop")
+            self.assertEqual(desktop_path, xdg_home / "applications" / APP_SPEC.desktop_id)
             self.assertTrue(desktop_path.is_file())
             self.assertEqual(
                 icon_path,
-                xdg_home / "icons" / "hicolor" / "256x256" / "apps" / "pytpo-terminal.png",
+                xdg_home / "icons" / "hicolor" / "256x256" / "apps" / "barley-ide.png",
             )
             self.assertTrue(icon_path.is_file())
-            self.assertIn("Exec=pytpo-terminal", desktop_path.read_text(encoding="utf-8"))
+            self.assertIn("Exec=barley-ide", desktop_path.read_text(encoding="utf-8"))
             self.assertEqual(commands, [["update-desktop-database", str(xdg_home / "applications")]])
 
-    def test_uninstall_desktop_entries_removes_dock_autostart(self) -> None:
+    def test_uninstall_desktop_entry_removes_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            xdg_data_home = Path(tmpdir) / "xdg-data"
-            xdg_config_home = Path(tmpdir) / "xdg-config"
-            manager = DockAutostartManager()
-            expected_path = xdg_config_home / "autostart" / "pytpo-dock.desktop"
+            xdg_home = Path(tmpdir) / "xdg-data"
 
             with (
-                mock.patch.dict(
-                    os.environ,
-                    {"XDG_DATA_HOME": str(xdg_data_home), "XDG_CONFIG_HOME": str(xdg_config_home)},
-                    clear=False,
-                ),
-                mock.patch("pytpo.desktop_entries._run_command"),
+                mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg_home)}, clear=False),
+                mock.patch("barley_ide.desktop_integration._run_command"),
             ):
-                manager.enable()
-                self.assertTrue(expected_path.is_file())
+                install_desktop_entry()
+                desktop_installed, icon_installed = installation_status()
+                self.assertTrue(desktop_installed)
+                self.assertTrue(icon_installed)
 
-                warnings = uninstall_desktop_entries(["dock"])
+                warnings = uninstall_desktop_entry()
 
             self.assertEqual(warnings, [])
-            self.assertFalse(expected_path.exists())
+            self.assertFalse((xdg_home / "applications" / APP_SPEC.desktop_id).exists())
+            self.assertFalse((xdg_home / "icons" / "hicolor" / "256x256" / "apps" / "barley-ide.png").exists())
 
-    def test_main_install_prompts_for_dock_autostart(self) -> None:
+    def test_main_status_reports_installation_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            xdg_data_home = Path(tmpdir) / "xdg-data"
-            xdg_config_home = Path(tmpdir) / "xdg-config"
-            expected_path = xdg_config_home / "autostart" / "pytpo-dock.desktop"
+            xdg_home = Path(tmpdir) / "xdg-data"
 
             with (
-                mock.patch.dict(
-                    os.environ,
-                    {"XDG_DATA_HOME": str(xdg_data_home), "XDG_CONFIG_HOME": str(xdg_config_home)},
-                    clear=False,
-                ),
-                mock.patch("pytpo.desktop_entries._run_command"),
-                mock.patch("sys.stdin.isatty", return_value=True),
-                mock.patch("builtins.input", return_value="y"),
+                mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg_home)}, clear=False),
+                mock.patch("builtins.print") as print_mock,
             ):
-                exit_code = main(["install", "--app", "dock"])
+                exit_code = main(["status"])
 
             self.assertEqual(exit_code, 0)
-            self.assertTrue(expected_path.is_file())
+            print_mock.assert_called_with("barley-ide.desktop: desktop=no icon=no")
 
 
 if __name__ == "__main__":

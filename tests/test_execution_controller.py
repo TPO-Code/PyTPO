@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pytpo.ui.controllers.execution_controller import ExecutionController
+from barley_ide.ui.controllers.execution_controller import ExecutionController
 
 
 class _StatusBar:

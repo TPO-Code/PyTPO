@@ -5,13 +5,13 @@ import unittest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QMimeData
 from PySide6.QtWidgets import QApplication
 
-from pytpo.ui.editor_workspace import (
+from barley_ide.ui.editor_workspace import (
     MIME_EDITOR_TAB,
     DropZone,
     EditorWorkspace,
     _encode_editor_drag_payload,
 )
-from pytpo.ui.widgets.image_viewer import ImageViewerWidget
+from barley_ide.ui.widgets.image_viewer import ImageViewerWidget
 
 
 def _app() -> QApplication:

@@ -8,7 +8,7 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import QApplication, QMenuBar, QMessageBox
 
 from TPOPyside.dialogs.reusable_file_dialog import FileDialog
-from pytpo.file_dialog_settings import configure_shared_file_dialog_defaults
+from barley_ide.file_dialog_settings import configure_shared_file_dialog_defaults
 from TPOPyside.widgets.custom_window import Window
 from .desktop_integration import APP_NAME, icon_path, is_linux_desktop, should_offer_onboarding
 from .desktop_integration_dialog import DesktopIntegrationDialog
