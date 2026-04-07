@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-label="Run and terminal lifecycle">
+  <defs>
+    <style>
+      .bg { fill: #111827; }
+      .title { fill: #f9fafb; font: 700 30px 'DejaVu Sans', sans-serif; }
+      .node { fill: #1f2937; stroke: #6b7280; stroke-width: 2; rx: 14; }
+      .txt { fill: #e5e7eb; font: 700 20px 'DejaVu Sans', sans-serif; }
+      .sub { fill: #d1d5db; font: 400 15px 'DejaVu Sans', sans-serif; }
+      .line { stroke: #22c55e; stroke-width: 3; }
+      .arrow { fill: #22c55e; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="480"/>
+  <text class="title" x="30" y="58">Run Session Lifecycle</text>
+
+  <rect class="node" x="40" y="120" width="210" height="170"/>
+  <text class="txt" x="68" y="164">Trigger Run</text>
+  <text class="sub" x="68" y="194">Toolbar / F5 / menu</text>
+
+  <rect class="node" x="290" y="120" width="210" height="170"/>
+  <text class="txt" x="318" y="164">Resolve Target</text>
+  <text class="sub" x="318" y="194">Active config or file</text>
+
+  <rect class="node" x="540" y="120" width="210" height="170"/>
+  <text class="txt" x="568" y="164">Run in Tab</text>
+  <text class="sub" x="568" y="194">New or reused terminal</text>
+
+  <rect class="node" x="790" y="120" width="210" height="170"/>
+  <text class="txt" x="818" y="164">Observe Output</text>
+  <text class="sub" x="818" y="194">Status + terminal stream</text>
+
+  <rect class="node" x="1040" y="120" width="140" height="170"/>
+  <text class="txt" x="1064" y="164">Stop</text>
+  <text class="sub" x="1064" y="194">Soft -> hard</text>
+
+  <line class="line" x1="250" y1="206" x2="286" y2="206"/>
+  <polygon class="arrow" points="286,206 274,198 274,214"/>
+  <line class="line" x1="500" y1="206" x2="536" y2="206"/>
+  <polygon class="arrow" points="536,206 524,198 524,214"/>
+  <line class="line" x1="750" y1="206" x2="786" y2="206"/>
+  <polygon class="arrow" points="786,206 774,198 774,214"/>
+  <line class="line" x1="1000" y1="206" x2="1036" y2="206"/>
+  <polygon class="arrow" points="1036,206 1024,198 1024,214"/>
+
+  <rect class="node" x="290" y="330" width="660" height="100"/>
+  <text class="sub" x="316" y="374">Stop Current Run escalates through interrupt, terminate, then force kill if required.</text>
+  <text class="sub" x="316" y="402">Rerun uses the last resolved target and command context.</text>
+</svg>
